@@ -41,7 +41,7 @@ const productSchema = new mongoose.Schema(
     },
     image: {
       type: String,
-      required: [true, 'Please enter product image'],
+      required: [true, 'Please upload product image'],
     },
     brand: {
       type: String,
