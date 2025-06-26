@@ -5,7 +5,6 @@ const compression = require('compression');
 const morgan = require('morgan');
 const dotenv = require('dotenv');
 const path = require('path');
-const fs = require('fs');
 
 // Load environment variables
 dotenv.config();
@@ -17,12 +16,6 @@ const productRoutes = require('./routes/productRoutes');
 // Initialize express app
 const app = express();
 
-// Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -33,9 +26,6 @@ app.use(cors({
 }));
 app.use(compression()); // Compress all responses
 app.use(morgan('dev')); // Log HTTP requests
-
-// Static folder for uploads (for development purposes)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Connect to MongoDB
 const connectDB = require('./config/db');

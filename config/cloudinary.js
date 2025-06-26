@@ -8,9 +8,9 @@ cloudinary.config({
 });
 
 // Function to upload image
-const uploadImage = async (imagePath) => {
+const uploadImage = async (fileString) => {
   try {
-    const result = await cloudinary.uploader.upload(imagePath, {
+    const result = await cloudinary.uploader.upload(fileString, {
       folder: 'products',
     });
     return result;

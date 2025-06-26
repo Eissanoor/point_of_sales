@@ -1,5 +1,4 @@
 const Product = require('../models/productModel');
-const fs = require('fs');
 const { uploadImage, deleteImage } = require('../config/cloudinary');
 
 // @desc    Fetch all products
@@ -116,12 +115,13 @@ const createProduct = async (req, res) => {
     let imagePublicId = '';
 
     if (req.file) {
-      const result = await uploadImage(req.file.path);
+      // Convert buffer to base64 string for Cloudinary
+      const b64 = Buffer.from(req.file.buffer).toString('base64');
+      const dataURI = `data:${req.file.mimetype};base64,${b64}`;
+      
+      const result = await uploadImage(dataURI);
       imageUrl = result.secure_url;
       imagePublicId = result.public_id;
-      
-      // Remove the file from local storage
-      fs.unlinkSync(req.file.path);
     }
 
     const product = new Product({
@@ -177,13 +177,14 @@ const updateProduct = async (req, res) => {
           await deleteImage(product.imagePublicId);
         }
 
+        // Convert buffer to base64 string for Cloudinary
+        const b64 = Buffer.from(req.file.buffer).toString('base64');
+        const dataURI = `data:${req.file.mimetype};base64,${b64}`;
+        
         // Upload the new image to Cloudinary
-        const result = await uploadImage(req.file.path);
+        const result = await uploadImage(dataURI);
         imageUrl = result.secure_url;
         imagePublicId = result.public_id;
-        
-        // Remove the file from local storage
-        fs.unlinkSync(req.file.path);
       }
 
       product.name = name || product.name;
