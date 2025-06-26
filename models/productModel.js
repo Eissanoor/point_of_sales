@@ -43,6 +43,9 @@ const productSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Please upload product image'],
     },
+    imagePublicId: {
+      type: String,
+    },
     brand: {
       type: String,
       required: [true, 'Please enter product brand'],

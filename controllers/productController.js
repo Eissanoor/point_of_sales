@@ -1,4 +1,6 @@
 const Product = require('../models/productModel');
+const fs = require('fs');
+const { uploadImage, deleteImage } = require('../config/cloudinary');
 
 // @desc    Fetch all products
 // @route   GET /api/products
@@ -71,6 +73,11 @@ const deleteProduct = async (req, res) => {
     const product = await Product.findById(req.params.id);
 
     if (product) {
+      // Delete image from Cloudinary if it exists
+      if (product.imagePublicId) {
+        await deleteImage(product.imagePublicId);
+      }
+      
       await Product.deleteOne({ _id: req.params.id });
       res.json({
         status: 'success',
@@ -99,17 +106,30 @@ const createProduct = async (req, res) => {
       name,
       price,
       description,
-      image,
       brand,
       category,
       countInStock,
     } = req.body;
 
+    // Handle image upload to Cloudinary
+    let imageUrl = '';
+    let imagePublicId = '';
+
+    if (req.file) {
+      const result = await uploadImage(req.file.path);
+      imageUrl = result.secure_url;
+      imagePublicId = result.public_id;
+      
+      // Remove the file from local storage
+      fs.unlinkSync(req.file.path);
+    }
+
     const product = new Product({
       name,
       price,
       user: req.user._id,
-      image,
+      image: imageUrl,
+      imagePublicId,
       brand,
       category,
       countInStock,
@@ -138,7 +158,6 @@ const updateProduct = async (req, res) => {
       name,
       price,
       description,
-      image,
       brand,
       category,
       countInStock,
@@ -147,10 +166,31 @@ const updateProduct = async (req, res) => {
     const product = await Product.findById(req.params.id);
 
     if (product) {
+      // Handle image update
+      let imageUrl = product.image;
+      let imagePublicId = product.imagePublicId;
+
+      // If a new image is uploaded
+      if (req.file) {
+        // Delete the old image from Cloudinary if it exists
+        if (product.imagePublicId) {
+          await deleteImage(product.imagePublicId);
+        }
+
+        // Upload the new image to Cloudinary
+        const result = await uploadImage(req.file.path);
+        imageUrl = result.secure_url;
+        imagePublicId = result.public_id;
+        
+        // Remove the file from local storage
+        fs.unlinkSync(req.file.path);
+      }
+
       product.name = name || product.name;
       product.price = price || product.price;
       product.description = description || product.description;
-      product.image = image || product.image;
+      product.image = imageUrl;
+      product.imagePublicId = imagePublicId;
       product.brand = brand || product.brand;
       product.category = category || product.category;
       product.countInStock = countInStock || product.countInStock;
