@@ -13,7 +13,7 @@ const generateToken = (id) => {
 // @access  Public
 const registerUser = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, role } = req.body;
 
     // Check if user already exists
     const userExists = await User.findOne({ email });
@@ -29,6 +29,7 @@ const registerUser = async (req, res) => {
       name,
       email,
       password,
+      role,
     });
 
     if (user) {
@@ -140,6 +141,7 @@ const updateUserProfile = async (req, res) => {
     if (user) {
       user.name = req.body.name || user.name;
       user.email = req.body.email || user.email;
+      user.role = req.body.role || user.role;
 
       if (req.body.password) {
         user.password = req.body.password;
