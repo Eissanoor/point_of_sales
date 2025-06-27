@@ -72,16 +72,21 @@ const deleteProduct = async (req, res) => {
     const product = await Product.findById(req.params.id);
 
     if (product) {
-      // Delete image from Cloudinary if it exists
-      if (product.imagePublicId) {
-        await deleteImage(product.imagePublicId);
-      }
-      
+      // Delete the product first for quick response
       await Product.deleteOne({ _id: req.params.id });
+      
+      // Send response immediately
       res.json({
         status: 'success',
         message: 'Product removed',
       });
+      
+      // Delete image from Cloudinary asynchronously
+      if (product.imagePublicId) {
+        deleteImage(product.imagePublicId).catch(err => 
+          console.error('Error deleting image from Cloudinary:', err)
+        );
+      }
     } else {
       res.status(404).json({
         status: 'fail',
@@ -110,26 +115,13 @@ const createProduct = async (req, res) => {
       countInStock,
     } = req.body;
 
-    // Handle image upload to Cloudinary
-    let imageUrl = '';
-    let imagePublicId = '';
-
-    if (req.file) {
-      // Convert buffer to base64 string for Cloudinary
-      const b64 = Buffer.from(req.file.buffer).toString('base64');
-      const dataURI = `data:${req.file.mimetype};base64,${b64}`;
-      
-      const result = await uploadImage(dataURI);
-      imageUrl = result.secure_url;
-      imagePublicId = result.public_id;
-    }
-
+    // Create product with placeholder image if needed
     const product = new Product({
       name,
       price,
       user: req.user._id,
-      image: imageUrl,
-      imagePublicId,
+      image: '',
+      imagePublicId: '',
       brand,
       category,
       countInStock,
@@ -137,10 +129,31 @@ const createProduct = async (req, res) => {
     });
 
     const createdProduct = await product.save();
+    
+    // Send response immediately
     res.status(201).json({
       status: 'success',
-      data: createdProduct,
+      message: 'Product created successfully',
     });
+
+    // Handle image upload to Cloudinary asynchronously
+    if (req.file) {
+      try {
+        // Convert buffer to base64 string for Cloudinary
+        const b64 = Buffer.from(req.file.buffer).toString('base64');
+        const dataURI = `data:${req.file.mimetype};base64,${b64}`;
+        
+        const result = await uploadImage(dataURI);
+        
+        // Update product with image info
+        await Product.findByIdAndUpdate(createdProduct._id, {
+          image: result.secure_url,
+          imagePublicId: result.public_id,
+        });
+      } catch (uploadError) {
+        console.error('Error uploading image:', uploadError);
+      }
+    }
   } catch (error) {
     res.status(500).json({
       status: 'error',
@@ -161,61 +174,95 @@ const updateProduct = async (req, res) => {
       brand,
       category,
       countInStock,
+      removeImage,
     } = req.body;
 
     const product = await Product.findById(req.params.id);
 
-    if (product) {
-      // Handle image update
-      let imageUrl = product.image;
-      let imagePublicId = product.imagePublicId;
-
-      // If a new image is uploaded
-      if (req.file) {
-        // Delete the old image from Cloudinary if it exists
-        if (product.imagePublicId) {
-          await deleteImage(product.imagePublicId);
-        }
-
-        // Convert buffer to base64 string for Cloudinary
-        const b64 = Buffer.from(req.file.buffer).toString('base64');
-        const dataURI = `data:${req.file.mimetype};base64,${b64}`;
-        
-        // Upload the new image to Cloudinary
-        const result = await uploadImage(dataURI);
-        imageUrl = result.secure_url;
-        imagePublicId = result.public_id;
-      }
-
-      // Handle image removal
-      if (req.body.removeImage === 'true' && !req.file) {
-        // Delete the image from Cloudinary if it exists
-        if (product.imagePublicId) {
-          await deleteImage(product.imagePublicId);
-        }
-        imageUrl = '';
-        imagePublicId = '';
-      }
-
-      product.name = name || product.name;
-      product.price = price || product.price;
-      product.description = description || product.description;
-      product.image = imageUrl;
-      product.imagePublicId = imagePublicId;
-      product.brand = brand || product.brand;
-      product.category = category || product.category;
-      product.countInStock = countInStock || product.countInStock;
-
-      const updatedProduct = await product.save();
-      res.json({
-        status: 'success',
-        data: updatedProduct,
-      });
-    } else {
-      res.status(404).json({
+    if (!product) {
+      return res.status(404).json({
         status: 'fail',
         message: 'Product not found',
       });
+    }
+
+    // Update basic product info
+    product.name = name || product.name;
+    product.price = price || product.price;
+    product.description = description || product.description;
+    product.brand = brand || product.brand;
+    product.category = category || product.category;
+    product.countInStock = countInStock || product.countInStock;
+    
+    // Save product first for quick response
+    await product.save();
+    
+    // Send response immediately
+    res.json({
+      status: 'success',
+      message: 'Product updated successfully',
+    });
+
+    // Handle image operations asynchronously
+    const processImage = async () => {
+      // Store current image info
+      let imageUrl = product.image;
+      let imagePublicId = product.imagePublicId;
+      let shouldUpdateImage = false;
+
+      // Handle image removal request
+      if (removeImage === 'true' && !req.file) {
+        if (product.imagePublicId) {
+          try {
+            await deleteImage(product.imagePublicId);
+          } catch (error) {
+            console.error('Error deleting image:', error);
+          }
+        }
+        imageUrl = '';
+        imagePublicId = '';
+        shouldUpdateImage = true;
+      }
+
+      // Handle new image upload
+      if (req.file) {
+        // Delete old image if exists
+        if (product.imagePublicId) {
+          try {
+            await deleteImage(product.imagePublicId);
+          } catch (error) {
+            console.error('Error deleting old image:', error);
+          }
+        }
+
+        try {
+          // Upload new image
+          const b64 = Buffer.from(req.file.buffer).toString('base64');
+          const dataURI = `data:${req.file.mimetype};base64,${b64}`;
+          const result = await uploadImage(dataURI);
+          
+          imageUrl = result.secure_url;
+          imagePublicId = result.public_id;
+          shouldUpdateImage = true;
+        } catch (error) {
+          console.error('Error uploading new image:', error);
+        }
+      }
+
+      // Update product with new image info if needed
+      if (shouldUpdateImage) {
+        await Product.findByIdAndUpdate(product._id, {
+          image: imageUrl,
+          imagePublicId: imagePublicId,
+        });
+      }
+    };
+
+    // Process image asynchronously
+    if (req.file || removeImage === 'true') {
+      processImage().catch(err => 
+        console.error('Error processing image:', err)
+      );
     }
   } catch (error) {
     res.status(500).json({
