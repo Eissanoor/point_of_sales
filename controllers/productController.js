@@ -9,17 +9,17 @@ const getProducts = async (req, res) => {
     const pageSize = 10;
     const page = Number(req.query.page) || 1;
 
-    const keyword = req.query.keyword
+    const search = req.query.search
       ? {
           name: {
-            $regex: req.query.keyword,
+            $regex: req.query.search,
             $options: 'i',
           },
         }
       : {};
 
-    const count = await Product.countDocuments({ ...keyword });
-    const products = await Product.find({ ...keyword })
+    const count = await Product.countDocuments({ ...search });
+    const products = await Product.find({ ...search })
       .limit(pageSize)
       .skip(pageSize * (page - 1));
 
