@@ -41,10 +41,11 @@ const productSchema = new mongoose.Schema(
     },
     image: {
       type: String,
-      required: [true, 'Please upload product image'],
+      default: '',
     },
     imagePublicId: {
       type: String,
+      default: '',
     },
     brand: {
       type: String,

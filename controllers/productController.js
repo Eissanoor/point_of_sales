@@ -187,6 +187,16 @@ const updateProduct = async (req, res) => {
         imagePublicId = result.public_id;
       }
 
+      // Handle image removal
+      if (req.body.removeImage === 'true' && !req.file) {
+        // Delete the image from Cloudinary if it exists
+        if (product.imagePublicId) {
+          await deleteImage(product.imagePublicId);
+        }
+        imageUrl = '';
+        imagePublicId = '';
+      }
+
       product.name = name || product.name;
       product.price = price || product.price;
       product.description = description || product.description;
