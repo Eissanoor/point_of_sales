@@ -110,7 +110,6 @@ const createProduct = async (req, res) => {
       name,
       price,
       description,
-      brand,
       category,
       countInStock,
     } = req.body;
@@ -122,7 +121,6 @@ const createProduct = async (req, res) => {
       user: req.user._id,
       image: '',
       imagePublicId: '',
-      brand,
       category,
       countInStock,
       description,
@@ -171,7 +169,6 @@ const updateProduct = async (req, res) => {
       name,
       price,
       description,
-      brand,
       category,
       countInStock,
       removeImage,
@@ -190,7 +187,6 @@ const updateProduct = async (req, res) => {
     product.name = name || product.name;
     product.price = price || product.price;
     product.description = description || product.description;
-    product.brand = brand || product.brand;
     product.category = category || product.category;
     product.countInStock = countInStock || product.countInStock;
     

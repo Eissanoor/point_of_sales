@@ -47,10 +47,6 @@ const productSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
-    brand: {
-      type: String,
-      required: [true, 'Please enter product brand'],
-    },
     category: {
       type: String,
       required: [true, 'Please enter product category'],
