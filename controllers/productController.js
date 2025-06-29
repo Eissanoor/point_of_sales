@@ -9,17 +9,28 @@ const getProducts = async (req, res) => {
     const pageSize = 10;
     const page = Number(req.query.page) || 1;
 
-    const search = req.query.search
-      ? {
-          name: {
-            $regex: req.query.search,
-            $options: 'i',
-          },
-        }
-      : {};
+    let searchQuery = {};
+    
+    if (req.query.search) {
+      // Get category IDs that match the search term
+      const Category = require('../models/categoryModel');
+      const categories = await Category.find({
+        name: { $regex: req.query.search, $options: 'i' }
+      });
+      
+      const categoryIds = categories.map(cat => cat._id);
+      
+      // Search by product name OR category ID
+      searchQuery = {
+        $or: [
+          { name: { $regex: req.query.search, $options: 'i' } },
+          { category: { $in: categoryIds } }
+        ]
+      };
+    }
 
-    const count = await Product.countDocuments({ ...search });
-    const products = await Product.find({ ...search })
+    const count = await Product.countDocuments(searchQuery);
+    const products = await Product.find(searchQuery)
       .populate('category', 'name description')
       .limit(pageSize)
       .skip(pageSize * (page - 1));
