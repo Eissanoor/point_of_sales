@@ -27,8 +27,8 @@ const customerSchema = new mongoose.Schema(
     },
     customerType: {
       type: String,
-      enum: ['regular', 'premium', 'vip'],
-      default: 'regular',
+      required: [true, 'Please enter customer type'],
+      trim: true,
     },
     isActive: {
       type: Boolean,
