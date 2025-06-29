@@ -44,15 +44,44 @@ const createCustomer = async (req, res) => {
   }
 };
 
-// @desc    Get all customers
+// @desc    Get all customers or search customers by name, email, or phoneNumber with pagination
 // @route   GET /api/customers
 // @access  Private
 const getCustomers = async (req, res) => {
   try {
-    const customers = await Customer.find({});
+    const { search, page = 1, limit = 10 } = req.query;
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    let query = {};
+
+    // If search parameter exists, create a search query
+    if (search) {
+      query = {
+        $or: [
+          { name: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } },
+          { phoneNumber: { $regex: search, $options: 'i' } },
+        ],
+      };
+    }
+
+    // Count total documents for pagination info
+    const totalCustomers = await Customer.countDocuments(query);
+
+    // Find customers based on query with pagination
+    const customers = await Customer.find(query)
+      .limit(limitNum)
+      .skip(skip)
+      .sort({ createdAt: -1 });
+    
     res.json({
       status: 'success',
       results: customers.length,
+      totalPages: Math.ceil(totalCustomers / limitNum),
+      currentPage: pageNum,
+      totalCustomers,
       data: customers,
     });
   } catch (error) {
