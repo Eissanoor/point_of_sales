@@ -13,6 +13,7 @@ dotenv.config();
 const userRoutes = require('./routes/userRoutes');
 const productRoutes = require('./routes/productRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
+const customerRoutes = require('./routes/customerRoutes');
 
 // Initialize express app
 const app = express();
@@ -36,6 +37,7 @@ connectDB();
 app.use('/api/users', userRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/categories', categoryRoutes);
+app.use('/api/customers', customerRoutes);
 
 // Root route
 app.get('/', (req, res) => {
