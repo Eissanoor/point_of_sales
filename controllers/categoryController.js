@@ -145,10 +145,51 @@ const deleteCategory = async (req, res) => {
   }
 };
 
+// @desc    Get product count for each category
+// @route   GET /api/categories/product-count
+// @access  Public
+const getProductCountByCategory = async (req, res) => {
+  try {
+    const Product = require('../models/productModel');
+    
+    // Get all categories
+    const categories = await Category.find({});
+    
+    // Create an array to store results
+    const results = [];
+    
+    // For each category, get the product count
+    for (const category of categories) {
+      const count = await Product.countDocuments({ category: category._id });
+      
+      results.push({
+        category: {
+          _id: category._id,
+          name: category.name,
+          description: category.description
+        },
+        productCount: count
+      });
+    }
+    
+    res.json({
+      status: 'success',
+      results: results.length,
+      data: results
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   getCategories,
   getCategoryById,
   createCategory,
   updateCategory,
   deleteCategory,
+  getProductCountByCategory
 }; 

@@ -6,6 +6,7 @@ const {
   createCategory,
   updateCategory,
   deleteCategory,
+  getProductCountByCategory
 } = require('../controllers/categoryController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 
@@ -13,6 +14,9 @@ const { protect, admin } = require('../middlewares/authMiddleware');
 router.route('/')
   .get(getCategories)
   .post(protect, admin, createCategory);
+
+router.route('/product-count')
+  .get(getProductCountByCategory);
 
 router.route('/:id')
   .get(getCategoryById)
