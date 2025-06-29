@@ -48,8 +48,9 @@ const productSchema = new mongoose.Schema(
       default: '',
     },
     category: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
       required: [true, 'Please enter product category'],
+      ref: 'Category',
     },
     description: {
       type: String,
