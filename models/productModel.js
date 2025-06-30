@@ -72,6 +72,58 @@ const productSchema = new mongoose.Schema(
       required: [true, 'Please enter product price'],
       default: 0,
     },
+    purchaseRate: {
+      type: Number,
+      required: [true, 'Please enter product purchase rate'],
+      default: 0,
+    },
+    saleRate: {
+      type: Number,
+      required: [true, 'Please enter product sale rate'],
+      default: 0,
+    },
+    wholesaleRate: {
+      type: Number,
+      required: [true, 'Please enter product wholesale rate'],
+      default: 0,
+    },
+    retailRate: {
+      type: Number,
+      required: [true, 'Please enter product retail rate'],
+      default: 0,
+    },
+    size: {
+      type: String,
+      default: '',
+    },
+    color: {
+      type: String,
+      default: '',
+    },
+    barcode: {
+      type: String,
+      default: '',
+    },
+    availableQuantity: {
+      type: Number,
+      default: 0,
+    },
+    soldOutQuantity: {
+      type: Number,
+      default: 0,
+    },
+    packingUnit: {
+      type: String,
+      default: '',
+    },
+    additionalUnit: {
+      type: String,
+      default: '',
+    },
+    pouchesOrPieces: {
+      type: Number,
+      default: 0,
+    },
     countInStock: {
       type: Number,
       required: [true, 'Please enter product count in stock'],

@@ -121,6 +121,18 @@ const createProduct = async (req, res) => {
     const {
       name,
       price,
+      purchaseRate,
+      saleRate,
+      wholesaleRate,
+      retailRate,
+      size,
+      color,
+      barcode,
+      availableQuantity,
+      soldOutQuantity,
+      packingUnit,
+      additionalUnit,
+      pouchesOrPieces,
       description,
       category,
       countInStock,
@@ -130,6 +142,18 @@ const createProduct = async (req, res) => {
     const product = new Product({
       name,
       price,
+      purchaseRate,
+      saleRate,
+      wholesaleRate,
+      retailRate,
+      size,
+      color,
+      barcode,
+      availableQuantity,
+      soldOutQuantity,
+      packingUnit,
+      additionalUnit,
+      pouchesOrPieces,
       user: req.user._id,
       image: '',
       imagePublicId: '',
@@ -180,6 +204,18 @@ const updateProduct = async (req, res) => {
     const {
       name,
       price,
+      purchaseRate,
+      saleRate,
+      wholesaleRate,
+      retailRate,
+      size,
+      color,
+      barcode,
+      availableQuantity,
+      soldOutQuantity,
+      packingUnit,
+      additionalUnit,
+      pouchesOrPieces,
       description,
       category,
       countInStock,
@@ -198,6 +234,18 @@ const updateProduct = async (req, res) => {
     // Update basic product info
     product.name = name || product.name;
     product.price = price || product.price;
+    product.purchaseRate = purchaseRate || product.purchaseRate;
+    product.saleRate = saleRate || product.saleRate;
+    product.wholesaleRate = wholesaleRate || product.wholesaleRate;
+    product.retailRate = retailRate || product.retailRate;
+    product.size = size !== undefined ? size : product.size;
+    product.color = color !== undefined ? color : product.color;
+    product.barcode = barcode !== undefined ? barcode : product.barcode;
+    product.availableQuantity = availableQuantity !== undefined ? availableQuantity : product.availableQuantity;
+    product.soldOutQuantity = soldOutQuantity !== undefined ? soldOutQuantity : product.soldOutQuantity;
+    product.packingUnit = packingUnit !== undefined ? packingUnit : product.packingUnit;
+    product.additionalUnit = additionalUnit !== undefined ? additionalUnit : product.additionalUnit;
+    product.pouchesOrPieces = pouchesOrPieces !== undefined ? pouchesOrPieces : product.pouchesOrPieces;
     product.description = description || product.description;
     product.category = category || product.category;
     product.countInStock = countInStock || product.countInStock;
