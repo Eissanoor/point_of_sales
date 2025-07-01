@@ -273,7 +273,7 @@ const updateProduct = async (req, res) => {
     const journeyPromises = [];
     
     // Check for changes and create individual journey records
-    if (name && name !== product.name) {
+    if (name !== undefined && name !== product.name) {
       journeyPromises.push(
         ProductJourney.create({
           product: product._id,
@@ -290,7 +290,7 @@ const updateProduct = async (req, res) => {
       product.name = name;
     }
     
-    if (price && price !== product.price) {
+    if (price !== undefined && price !== product.price) {
       journeyPromises.push(
         ProductJourney.create({
           product: product._id,
@@ -307,7 +307,7 @@ const updateProduct = async (req, res) => {
       product.price = price;
     }
     
-    if (purchaseRate && purchaseRate !== product.purchaseRate) {
+    if (purchaseRate !== undefined && purchaseRate !== product.purchaseRate) {
       journeyPromises.push(
         ProductJourney.create({
           product: product._id,
@@ -324,7 +324,7 @@ const updateProduct = async (req, res) => {
       product.purchaseRate = purchaseRate;
     }
     
-    if (saleRate && saleRate !== product.saleRate) {
+    if (saleRate !== undefined && saleRate !== product.saleRate) {
       journeyPromises.push(
         ProductJourney.create({
           product: product._id,
@@ -341,7 +341,7 @@ const updateProduct = async (req, res) => {
       product.saleRate = saleRate;
     }
     
-    if (wholesaleRate && wholesaleRate !== product.wholesaleRate) {
+    if (wholesaleRate !== undefined && wholesaleRate !== product.wholesaleRate) {
       journeyPromises.push(
         ProductJourney.create({
           product: product._id,
@@ -358,7 +358,7 @@ const updateProduct = async (req, res) => {
       product.wholesaleRate = wholesaleRate;
     }
     
-    if (retailRate && retailRate !== product.retailRate) {
+    if (retailRate !== undefined && retailRate !== product.retailRate) {
       journeyPromises.push(
         ProductJourney.create({
           product: product._id,
@@ -511,7 +511,7 @@ const updateProduct = async (req, res) => {
       product.pouchesOrPieces = pouchesOrPieces;
     }
     
-    if (description && description !== product.description) {
+    if (description !== undefined && description !== product.description) {
       journeyPromises.push(
         ProductJourney.create({
           product: product._id,
@@ -528,7 +528,7 @@ const updateProduct = async (req, res) => {
       product.description = description;
     }
     
-    if (category && category.toString() !== product.category.toString()) {
+    if (category !== undefined && category !== null && category.toString() !== product.category.toString()) {
       journeyPromises.push(
         ProductJourney.create({
           product: product._id,
@@ -545,7 +545,7 @@ const updateProduct = async (req, res) => {
       product.category = category;
     }
     
-    if (countInStock && countInStock !== product.countInStock) {
+    if (countInStock !== undefined && countInStock !== product.countInStock) {
       journeyPromises.push(
         ProductJourney.create({
           product: product._id,
