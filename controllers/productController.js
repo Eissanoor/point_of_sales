@@ -9,8 +9,14 @@ const getProducts = async (req, res) => {
   try {
     const pageSize = 10;
     const page = Number(req.query.page) || 1;
+    const showAll = req.query.showAll === 'true';
 
-    let searchQuery = {};
+    let searchQuery = { isActive: true }; // Default to only active products
+    
+    // If showAll is true and user is admin, show all products (active and inactive)
+    if (showAll && req.user && req.user.isAdmin) {
+      searchQuery = {};
+    }
     
     if (req.query.search) {
       // Get category IDs that match the search term
@@ -21,13 +27,18 @@ const getProducts = async (req, res) => {
       
       const categoryIds = categories.map(cat => cat._id);
       
-      // Search by product name OR category ID
-      searchQuery = {
+      // Search by product name OR category ID while maintaining isActive filter
+      const searchCondition = {
         $or: [
           { name: { $regex: req.query.search, $options: 'i' } },
           { category: { $in: categoryIds } }
         ]
       };
+      
+      // Combine search condition with isActive filter
+      searchQuery = showAll && req.user && req.user.isAdmin 
+        ? searchCondition 
+        : { ...searchCondition, isActive: true };
     }
 
     const count = await Product.countDocuments(searchQuery);
@@ -149,6 +160,7 @@ const createProduct = async (req, res) => {
       description,
       category,
       countInStock,
+      isActive,
     } = req.body;
 
     // Create product with placeholder image if needed
@@ -173,6 +185,7 @@ const createProduct = async (req, res) => {
       category,
       countInStock,
       description,
+      isActive: isActive !== undefined ? isActive : true,
     });
 
     const createdProduct = await product.save();
@@ -257,6 +270,7 @@ const updateProduct = async (req, res) => {
       description,
       category,
       countInStock,
+      isActive,
       removeImage,
     } = req.body;
 
@@ -560,6 +574,23 @@ const updateProduct = async (req, res) => {
         })
       );
       product.countInStock = countInStock;
+    }
+    
+    if (isActive !== undefined && isActive !== product.isActive) {
+      journeyPromises.push(
+        ProductJourney.create({
+          product: product._id,
+          user: req.user._id,
+          action: 'updated',
+          changes: [{
+            field: 'isActive',
+            oldValue: product.isActive,
+            newValue: isActive
+          }],
+          notes: `Updated active status`
+        })
+      );
+      product.isActive = isActive;
     }
     
     // Save product first for quick response
