@@ -33,15 +33,18 @@ const getProductJourneyByProductId = asyncHandler(async (req, res) => {
 // @route   POST /api/productjourney
 // @access  Private/Admin
 const createProductJourney = asyncHandler(async (req, res) => {
-  const { product, action, field, oldValue, newValue, notes } = req.body;
+  const { product, action, changes, notes } = req.body;
+
+  if (!changes || !Array.isArray(changes) || changes.length === 0) {
+    res.status(400);
+    throw new Error('At least one change must be provided');
+  }
 
   const productJourney = await ProductJourney.create({
     product,
     user: req.user._id,
     action,
-    field,
-    oldValue,
-    newValue,
+    changes,
     notes,
   });
 
