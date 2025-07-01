@@ -1,4 +1,5 @@
 const Product = require('../models/productModel');
+const ProductJourney = require('../models/productJourneyModel');
 const { uploadImage, deleteImage } = require('../config/cloudinary');
 
 // @desc    Fetch all products
@@ -84,6 +85,16 @@ const deleteProduct = async (req, res) => {
     const product = await Product.findById(req.params.id);
 
     if (product) {
+      // Create product journey record for deletion
+      await ProductJourney.create({
+        product: product._id,
+        user: req.user._id,
+        action: 'deleted',
+        field: 'product',
+        oldValue: product.name,
+        notes: 'Product deleted'
+      });
+      
       // Delete the product first for quick response
       await Product.deleteOne({ _id: req.params.id });
       
@@ -164,6 +175,16 @@ const createProduct = async (req, res) => {
 
     const createdProduct = await product.save();
     
+    // Create product journey record for creation
+    await ProductJourney.create({
+      product: createdProduct._id,
+      user: req.user._id,
+      action: 'created',
+      field: 'product',
+      newValue: createdProduct.name,
+      notes: 'Product created'
+    });
+    
     // Send response immediately
     res.status(201).json({
       status: 'success',
@@ -183,6 +204,17 @@ const createProduct = async (req, res) => {
         await Product.findByIdAndUpdate(createdProduct._id, {
           image: result.secure_url,
           imagePublicId: result.public_id,
+        });
+        
+        // Create product journey record for image update
+        await ProductJourney.create({
+          product: createdProduct._id,
+          user: req.user._id,
+          action: 'updated',
+          field: 'image',
+          oldValue: '',
+          newValue: result.secure_url,
+          notes: 'Product image added'
         });
       } catch (uploadError) {
         console.error('Error uploading image:', uploadError);
@@ -231,27 +263,178 @@ const updateProduct = async (req, res) => {
       });
     }
 
-    // Update basic product info
-    product.name = name || product.name;
-    product.price = price || product.price;
-    product.purchaseRate = purchaseRate || product.purchaseRate;
-    product.saleRate = saleRate || product.saleRate;
-    product.wholesaleRate = wholesaleRate || product.wholesaleRate;
-    product.retailRate = retailRate || product.retailRate;
-    product.size = size !== undefined ? size : product.size;
-    product.color = color !== undefined ? color : product.color;
-    product.barcode = barcode !== undefined ? barcode : product.barcode;
-    product.availableQuantity = availableQuantity !== undefined ? availableQuantity : product.availableQuantity;
-    product.soldOutQuantity = soldOutQuantity !== undefined ? soldOutQuantity : product.soldOutQuantity;
-    product.packingUnit = packingUnit !== undefined ? packingUnit : product.packingUnit;
-    product.additionalUnit = additionalUnit !== undefined ? additionalUnit : product.additionalUnit;
-    product.pouchesOrPieces = pouchesOrPieces !== undefined ? pouchesOrPieces : product.pouchesOrPieces;
-    product.description = description || product.description;
-    product.category = category || product.category;
-    product.countInStock = countInStock || product.countInStock;
+    // Track changes for ProductJourney
+    const changes = [];
+    
+    // Check for changes and add to changes array
+    if (name && name !== product.name) {
+      changes.push({
+        field: 'name',
+        oldValue: product.name,
+        newValue: name
+      });
+      product.name = name;
+    }
+    
+    if (price && price !== product.price) {
+      changes.push({
+        field: 'price',
+        oldValue: product.price,
+        newValue: price
+      });
+      product.price = price;
+    }
+    
+    if (purchaseRate && purchaseRate !== product.purchaseRate) {
+      changes.push({
+        field: 'purchaseRate',
+        oldValue: product.purchaseRate,
+        newValue: purchaseRate
+      });
+      product.purchaseRate = purchaseRate;
+    }
+    
+    if (saleRate && saleRate !== product.saleRate) {
+      changes.push({
+        field: 'saleRate',
+        oldValue: product.saleRate,
+        newValue: saleRate
+      });
+      product.saleRate = saleRate;
+    }
+    
+    if (wholesaleRate && wholesaleRate !== product.wholesaleRate) {
+      changes.push({
+        field: 'wholesaleRate',
+        oldValue: product.wholesaleRate,
+        newValue: wholesaleRate
+      });
+      product.wholesaleRate = wholesaleRate;
+    }
+    
+    if (retailRate && retailRate !== product.retailRate) {
+      changes.push({
+        field: 'retailRate',
+        oldValue: product.retailRate,
+        newValue: retailRate
+      });
+      product.retailRate = retailRate;
+    }
+    
+    if (size !== undefined && size !== product.size) {
+      changes.push({
+        field: 'size',
+        oldValue: product.size,
+        newValue: size
+      });
+      product.size = size;
+    }
+    
+    if (color !== undefined && color !== product.color) {
+      changes.push({
+        field: 'color',
+        oldValue: product.color,
+        newValue: color
+      });
+      product.color = color;
+    }
+    
+    if (barcode !== undefined && barcode !== product.barcode) {
+      changes.push({
+        field: 'barcode',
+        oldValue: product.barcode,
+        newValue: barcode
+      });
+      product.barcode = barcode;
+    }
+    
+    if (availableQuantity !== undefined && availableQuantity !== product.availableQuantity) {
+      changes.push({
+        field: 'availableQuantity',
+        oldValue: product.availableQuantity,
+        newValue: availableQuantity
+      });
+      product.availableQuantity = availableQuantity;
+    }
+    
+    if (soldOutQuantity !== undefined && soldOutQuantity !== product.soldOutQuantity) {
+      changes.push({
+        field: 'soldOutQuantity',
+        oldValue: product.soldOutQuantity,
+        newValue: soldOutQuantity
+      });
+      product.soldOutQuantity = soldOutQuantity;
+    }
+    
+    if (packingUnit !== undefined && packingUnit !== product.packingUnit) {
+      changes.push({
+        field: 'packingUnit',
+        oldValue: product.packingUnit,
+        newValue: packingUnit
+      });
+      product.packingUnit = packingUnit;
+    }
+    
+    if (additionalUnit !== undefined && additionalUnit !== product.additionalUnit) {
+      changes.push({
+        field: 'additionalUnit',
+        oldValue: product.additionalUnit,
+        newValue: additionalUnit
+      });
+      product.additionalUnit = additionalUnit;
+    }
+    
+    if (pouchesOrPieces !== undefined && pouchesOrPieces !== product.pouchesOrPieces) {
+      changes.push({
+        field: 'pouchesOrPieces',
+        oldValue: product.pouchesOrPieces,
+        newValue: pouchesOrPieces
+      });
+      product.pouchesOrPieces = pouchesOrPieces;
+    }
+    
+    if (description && description !== product.description) {
+      changes.push({
+        field: 'description',
+        oldValue: product.description,
+        newValue: description
+      });
+      product.description = description;
+    }
+    
+    if (category && category.toString() !== product.category.toString()) {
+      changes.push({
+        field: 'category',
+        oldValue: product.category,
+        newValue: category
+      });
+      product.category = category;
+    }
+    
+    if (countInStock && countInStock !== product.countInStock) {
+      changes.push({
+        field: 'countInStock',
+        oldValue: product.countInStock,
+        newValue: countInStock
+      });
+      product.countInStock = countInStock;
+    }
     
     // Save product first for quick response
     await product.save();
+    
+    // Record all changes in ProductJourney
+    for (const change of changes) {
+      await ProductJourney.create({
+        product: product._id,
+        user: req.user._id,
+        action: 'updated',
+        field: change.field,
+        oldValue: change.oldValue,
+        newValue: change.newValue,
+        notes: `Updated ${change.field}`
+      });
+    }
     
     // Send response immediately
     res.json({
@@ -275,6 +458,18 @@ const updateProduct = async (req, res) => {
             console.error('Error deleting image:', error);
           }
         }
+        
+        // Record image removal in ProductJourney
+        await ProductJourney.create({
+          product: product._id,
+          user: req.user._id,
+          action: 'updated',
+          field: 'image',
+          oldValue: product.image,
+          newValue: '',
+          notes: 'Product image removed'
+        });
+        
         imageUrl = '';
         imagePublicId = '';
         shouldUpdateImage = true;
@@ -296,6 +491,17 @@ const updateProduct = async (req, res) => {
           const b64 = Buffer.from(req.file.buffer).toString('base64');
           const dataURI = `data:${req.file.mimetype};base64,${b64}`;
           const result = await uploadImage(dataURI);
+          
+          // Record image update in ProductJourney
+          await ProductJourney.create({
+            product: product._id,
+            user: req.user._id,
+            action: 'updated',
+            field: 'image',
+            oldValue: product.image,
+            newValue: result.secure_url,
+            notes: 'Product image updated'
+          });
           
           imageUrl = result.secure_url;
           imagePublicId = result.public_id;
