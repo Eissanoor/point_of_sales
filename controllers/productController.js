@@ -289,190 +289,251 @@ const updateProduct = async (req, res) => {
     // Track what fields were updated for the notes
     const updatedFields = [];
     
+    // Helper function to check if values are actually different
+    const hasValueChanged = (oldVal, newVal) => {
+      // Handle null/undefined/empty string equivalence
+      if ((oldVal === null || oldVal === undefined || oldVal === '') && 
+          (newVal === null || newVal === undefined || newVal === '')) {
+        return false;
+      }
+      
+      // Handle numeric comparisons - convert string numbers to actual numbers
+      const oldNum = typeof oldVal === 'string' ? Number(oldVal) : oldVal;
+      const newNum = typeof newVal === 'string' ? Number(newVal) : newVal;
+      
+      // If both are valid numbers after conversion, compare them numerically
+      if (!isNaN(oldNum) && !isNaN(newNum) && 
+          (typeof oldNum === 'number' && typeof newNum === 'number')) {
+        return oldNum !== newNum;
+      }
+      
+      // For string comparison, trim and compare
+      if (typeof oldVal === 'string' && typeof newVal === 'string') {
+        return oldVal.trim() !== newVal.trim();
+      }
+      
+      // Default comparison
+      return oldVal !== newVal;
+    };
+
     // Check for changes and update product
-    if (name !== undefined && name !== product.name) {
-      allChanges.push({
-        field: 'name',
-        oldValue: product.name,
-        newValue: name
-      });
+    if (name !== undefined) {
+      if (hasValueChanged(product.name, name)) {
+        allChanges.push({
+          field: 'name',
+          oldValue: product.name,
+          newValue: name
+        });
+        updatedFields.push('name');
+      }
       product.name = name;
-      updatedFields.push('name');
     }
     
-    if (price !== undefined && price !== product.price) {
-      allChanges.push({
-        field: 'price',
-        oldValue: product.price,
-        newValue: price
-      });
+    if (price !== undefined) {
+      if (hasValueChanged(product.price, price)) {
+        allChanges.push({
+          field: 'price',
+          oldValue: product.price,
+          newValue: price
+        });
+        updatedFields.push('price');
+      }
       product.price = price;
-      updatedFields.push('price');
     }
     
-    if (purchaseRate !== undefined && purchaseRate !== product.purchaseRate) {
-      allChanges.push({
-        field: 'purchaseRate',
-        oldValue: product.purchaseRate,
-        newValue: purchaseRate
-      });
+    if (purchaseRate !== undefined) {
+      if (hasValueChanged(product.purchaseRate, purchaseRate)) {
+        allChanges.push({
+          field: 'purchaseRate',
+          oldValue: product.purchaseRate,
+          newValue: purchaseRate
+        });
+        updatedFields.push('purchase rate');
+      }
       product.purchaseRate = purchaseRate;
-      updatedFields.push('purchase rate');
     }
     
-    if (saleRate !== undefined && saleRate !== product.saleRate) {
-      allChanges.push({
-        field: 'saleRate',
-        oldValue: product.saleRate,
-        newValue: saleRate
-      });
+    if (saleRate !== undefined) {
+      if (hasValueChanged(product.saleRate, saleRate)) {
+        allChanges.push({
+          field: 'saleRate',
+          oldValue: product.saleRate,
+          newValue: saleRate
+        });
+        updatedFields.push('sale rate');
+      }
       product.saleRate = saleRate;
-      updatedFields.push('sale rate');
     }
     
-    if (wholesaleRate !== undefined && wholesaleRate !== product.wholesaleRate) {
-      allChanges.push({
-        field: 'wholesaleRate',
-        oldValue: product.wholesaleRate,
-        newValue: wholesaleRate
-      });
+    if (wholesaleRate !== undefined) {
+      if (hasValueChanged(product.wholesaleRate, wholesaleRate)) {
+        allChanges.push({
+          field: 'wholesaleRate',
+          oldValue: product.wholesaleRate,
+          newValue: wholesaleRate
+        });
+        updatedFields.push('wholesale rate');
+      }
       product.wholesaleRate = wholesaleRate;
-      updatedFields.push('wholesale rate');
     }
     
-    if (retailRate !== undefined && retailRate !== product.retailRate) {
-      allChanges.push({
-        field: 'retailRate',
-        oldValue: product.retailRate,
-        newValue: retailRate
-      });
+    if (retailRate !== undefined) {
+      if (hasValueChanged(product.retailRate, retailRate)) {
+        allChanges.push({
+          field: 'retailRate',
+          oldValue: product.retailRate,
+          newValue: retailRate
+        });
+        updatedFields.push('retail rate');
+      }
       product.retailRate = retailRate;
-      updatedFields.push('retail rate');
     }
     
-    if (size !== undefined && size !== product.size) {
-      allChanges.push({
-        field: 'size',
-        oldValue: product.size,
-        newValue: size
-      });
+    if (size !== undefined) {
+      if (hasValueChanged(product.size, size)) {
+        allChanges.push({
+          field: 'size',
+          oldValue: product.size,
+          newValue: size
+        });
+        updatedFields.push('size');
+      }
       product.size = size;
-      updatedFields.push('size');
     }
     
-    if (color !== undefined && color !== product.color) {
-      allChanges.push({
-        field: 'color',
-        oldValue: product.color,
-        newValue: color
-      });
+    if (color !== undefined) {
+      if (hasValueChanged(product.color, color)) {
+        allChanges.push({
+          field: 'color',
+          oldValue: product.color,
+          newValue: color
+        });
+        updatedFields.push('color');
+      }
       product.color = color;
-      updatedFields.push('color');
     }
     
-    if (barcode !== undefined && barcode !== product.barcode) {
-      allChanges.push({
-        field: 'barcode',
-        oldValue: product.barcode,
-        newValue: barcode
-      });
+    if (barcode !== undefined) {
+      if (hasValueChanged(product.barcode, barcode)) {
+        allChanges.push({
+          field: 'barcode',
+          oldValue: product.barcode,
+          newValue: barcode
+        });
+        updatedFields.push('barcode');
+      }
       product.barcode = barcode;
-      updatedFields.push('barcode');
     }
     
-    if (availableQuantity !== undefined && availableQuantity !== product.availableQuantity) {
-      allChanges.push({
-        field: 'availableQuantity',
-        oldValue: product.availableQuantity,
-        newValue: availableQuantity
-      });
+    if (availableQuantity !== undefined) {
+      if (hasValueChanged(product.availableQuantity, availableQuantity)) {
+        allChanges.push({
+          field: 'availableQuantity',
+          oldValue: product.availableQuantity,
+          newValue: availableQuantity
+        });
+        updatedFields.push('available quantity');
+      }
       product.availableQuantity = availableQuantity;
-      updatedFields.push('available quantity');
     }
     
-    if (soldOutQuantity !== undefined && soldOutQuantity !== product.soldOutQuantity) {
-      allChanges.push({
-        field: 'soldOutQuantity',
-        oldValue: product.soldOutQuantity,
-        newValue: soldOutQuantity
-      });
+    if (soldOutQuantity !== undefined) {
+      if (hasValueChanged(product.soldOutQuantity, soldOutQuantity)) {
+        allChanges.push({
+          field: 'soldOutQuantity',
+          oldValue: product.soldOutQuantity,
+          newValue: soldOutQuantity
+        });
+        updatedFields.push('sold out quantity');
+      }
       product.soldOutQuantity = soldOutQuantity;
-      updatedFields.push('sold out quantity');
     }
     
-    if (packingUnit !== undefined && packingUnit !== product.packingUnit) {
-      allChanges.push({
-        field: 'packingUnit',
-        oldValue: product.packingUnit,
-        newValue: packingUnit
-      });
+    if (packingUnit !== undefined) {
+      if (hasValueChanged(product.packingUnit, packingUnit)) {
+        allChanges.push({
+          field: 'packingUnit',
+          oldValue: product.packingUnit,
+          newValue: packingUnit
+        });
+        updatedFields.push('packing unit');
+      }
       product.packingUnit = packingUnit;
-      updatedFields.push('packing unit');
     }
     
-    if (additionalUnit !== undefined && additionalUnit !== product.additionalUnit) {
-      allChanges.push({
-        field: 'additionalUnit',
-        oldValue: product.additionalUnit,
-        newValue: additionalUnit
-      });
+    if (additionalUnit !== undefined) {
+      if (hasValueChanged(product.additionalUnit, additionalUnit)) {
+        allChanges.push({
+          field: 'additionalUnit',
+          oldValue: product.additionalUnit,
+          newValue: additionalUnit
+        });
+        updatedFields.push('additional unit');
+      }
       product.additionalUnit = additionalUnit;
-      updatedFields.push('additional unit');
     }
     
-    if (pouchesOrPieces !== undefined && pouchesOrPieces !== product.pouchesOrPieces) {
-      allChanges.push({
-        field: 'pouchesOrPieces',
-        oldValue: product.pouchesOrPieces,
-        newValue: pouchesOrPieces
-      });
+    if (pouchesOrPieces !== undefined) {
+      if (hasValueChanged(product.pouchesOrPieces, pouchesOrPieces)) {
+        allChanges.push({
+          field: 'pouchesOrPieces',
+          oldValue: product.pouchesOrPieces,
+          newValue: pouchesOrPieces
+        });
+        updatedFields.push('pouches/pieces');
+      }
       product.pouchesOrPieces = pouchesOrPieces;
-      updatedFields.push('pouches/pieces');
     }
     
-    if (description !== undefined && description !== product.description) {
-      allChanges.push({
-        field: 'description',
-        oldValue: product.description,
-        newValue: description
-      });
+    if (description !== undefined) {
+      if (hasValueChanged(product.description, description)) {
+        allChanges.push({
+          field: 'description',
+          oldValue: product.description,
+          newValue: description
+        });
+        updatedFields.push('description');
+      }
       product.description = description;
-      updatedFields.push('description');
     }
     
-    if (category !== undefined && category !== null && category.toString() !== product.category.toString()) {
-      allChanges.push({
-        field: 'category',
-        oldValue: product.category,
-        newValue: category
-      });
+    if (category !== undefined && category !== null) {
+      if (category.toString() !== product.category.toString()) {
+        allChanges.push({
+          field: 'category',
+          oldValue: product.category,
+          newValue: category
+        });
+        updatedFields.push('category');
+      }
       product.category = category;
-      updatedFields.push('category');
     }
     
-    if (countInStock !== undefined && countInStock !== product.countInStock) {
-      allChanges.push({
-        field: 'countInStock',
-        oldValue: product.countInStock,
-        newValue: countInStock
-      });
+    if (countInStock !== undefined) {
+      if (hasValueChanged(product.countInStock, countInStock)) {
+        allChanges.push({
+          field: 'countInStock',
+          oldValue: product.countInStock,
+          newValue: countInStock
+        });
+        updatedFields.push('count in stock');
+      }
       product.countInStock = countInStock;
-      updatedFields.push('count in stock');
     }
     
     if (isActive !== undefined) {
       // Convert to proper boolean value
       const isActiveBool = isActive === true || isActive === 'true' || isActive === 1;
       
-      if (isActiveBool !== product.isActive) {
+      if (hasValueChanged(product.isActive, isActiveBool)) {
         allChanges.push({
           field: 'isActive',
           oldValue: product.isActive,
           newValue: isActiveBool
         });
-        product.isActive = isActiveBool;
         updatedFields.push('active status');
       }
+      product.isActive = isActiveBool;
     }
     
     // Save product first for quick response
