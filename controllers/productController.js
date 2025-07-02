@@ -460,14 +460,19 @@ const updateProduct = async (req, res) => {
       updatedFields.push('count in stock');
     }
     
-    if (isActive !== undefined && isActive !== product.isActive) {
-      allChanges.push({
-        field: 'isActive',
-        oldValue: product.isActive,
-        newValue: isActive
-      });
-      product.isActive = isActive;
-      updatedFields.push('active status');
+    if (isActive !== undefined) {
+      // Convert to proper boolean value
+      const isActiveBool = isActive === true || isActive === 'true' || isActive === 1;
+      
+      if (isActiveBool !== product.isActive) {
+        allChanges.push({
+          field: 'isActive',
+          oldValue: product.isActive,
+          newValue: isActiveBool
+        });
+        product.isActive = isActiveBool;
+        updatedFields.push('active status');
+      }
     }
     
     // Save product first for quick response
