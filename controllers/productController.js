@@ -283,323 +283,195 @@ const updateProduct = async (req, res) => {
       });
     }
 
-    // Track changes for individual updates
-    const journeyPromises = [];
+    // Collect all changes in a single array
+    const allChanges = [];
     
-    // Check for changes and create individual journey records
+    // Track what fields were updated for the notes
+    const updatedFields = [];
+    
+    // Check for changes and update product
     if (name !== undefined && name !== product.name) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'name',
-            oldValue: product.name,
-            newValue: name
-          }],
-          notes: `Updated name`
-        })
-      );
+      allChanges.push({
+        field: 'name',
+        oldValue: product.name,
+        newValue: name
+      });
       product.name = name;
+      updatedFields.push('name');
     }
     
     if (price !== undefined && price !== product.price) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'price',
-            oldValue: product.price,
-            newValue: price
-          }],
-          notes: `Updated price`
-        })
-      );
+      allChanges.push({
+        field: 'price',
+        oldValue: product.price,
+        newValue: price
+      });
       product.price = price;
+      updatedFields.push('price');
     }
     
     if (purchaseRate !== undefined && purchaseRate !== product.purchaseRate) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'purchaseRate',
-            oldValue: product.purchaseRate,
-            newValue: purchaseRate
-          }],
-          notes: `Updated purchase rate`
-        })
-      );
+      allChanges.push({
+        field: 'purchaseRate',
+        oldValue: product.purchaseRate,
+        newValue: purchaseRate
+      });
       product.purchaseRate = purchaseRate;
+      updatedFields.push('purchase rate');
     }
     
     if (saleRate !== undefined && saleRate !== product.saleRate) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'saleRate',
-            oldValue: product.saleRate,
-            newValue: saleRate
-          }],
-          notes: `Updated sale rate`
-        })
-      );
+      allChanges.push({
+        field: 'saleRate',
+        oldValue: product.saleRate,
+        newValue: saleRate
+      });
       product.saleRate = saleRate;
+      updatedFields.push('sale rate');
     }
     
     if (wholesaleRate !== undefined && wholesaleRate !== product.wholesaleRate) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'wholesaleRate',
-            oldValue: product.wholesaleRate,
-            newValue: wholesaleRate
-          }],
-          notes: `Updated wholesale rate`
-        })
-      );
+      allChanges.push({
+        field: 'wholesaleRate',
+        oldValue: product.wholesaleRate,
+        newValue: wholesaleRate
+      });
       product.wholesaleRate = wholesaleRate;
+      updatedFields.push('wholesale rate');
     }
     
     if (retailRate !== undefined && retailRate !== product.retailRate) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'retailRate',
-            oldValue: product.retailRate,
-            newValue: retailRate
-          }],
-          notes: `Updated retail rate`
-        })
-      );
+      allChanges.push({
+        field: 'retailRate',
+        oldValue: product.retailRate,
+        newValue: retailRate
+      });
       product.retailRate = retailRate;
+      updatedFields.push('retail rate');
     }
     
     if (size !== undefined && size !== product.size) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'size',
-            oldValue: product.size,
-            newValue: size
-          }],
-          notes: `Updated size`
-        })
-      );
+      allChanges.push({
+        field: 'size',
+        oldValue: product.size,
+        newValue: size
+      });
       product.size = size;
+      updatedFields.push('size');
     }
     
     if (color !== undefined && color !== product.color) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'color',
-            oldValue: product.color,
-            newValue: color
-          }],
-          notes: `Updated color`
-        })
-      );
+      allChanges.push({
+        field: 'color',
+        oldValue: product.color,
+        newValue: color
+      });
       product.color = color;
+      updatedFields.push('color');
     }
     
     if (barcode !== undefined && barcode !== product.barcode) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'barcode',
-            oldValue: product.barcode,
-            newValue: barcode
-          }],
-          notes: `Updated barcode`
-        })
-      );
+      allChanges.push({
+        field: 'barcode',
+        oldValue: product.barcode,
+        newValue: barcode
+      });
       product.barcode = barcode;
+      updatedFields.push('barcode');
     }
     
     if (availableQuantity !== undefined && availableQuantity !== product.availableQuantity) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'availableQuantity',
-            oldValue: product.availableQuantity,
-            newValue: availableQuantity
-          }],
-          notes: `Updated available quantity`
-        })
-      );
+      allChanges.push({
+        field: 'availableQuantity',
+        oldValue: product.availableQuantity,
+        newValue: availableQuantity
+      });
       product.availableQuantity = availableQuantity;
+      updatedFields.push('available quantity');
     }
     
     if (soldOutQuantity !== undefined && soldOutQuantity !== product.soldOutQuantity) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'soldOutQuantity',
-            oldValue: product.soldOutQuantity,
-            newValue: soldOutQuantity
-          }],
-          notes: `Updated sold out quantity`
-        })
-      );
+      allChanges.push({
+        field: 'soldOutQuantity',
+        oldValue: product.soldOutQuantity,
+        newValue: soldOutQuantity
+      });
       product.soldOutQuantity = soldOutQuantity;
+      updatedFields.push('sold out quantity');
     }
     
     if (packingUnit !== undefined && packingUnit !== product.packingUnit) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'packingUnit',
-            oldValue: product.packingUnit,
-            newValue: packingUnit
-          }],
-          notes: `Updated packing unit`
-        })
-      );
+      allChanges.push({
+        field: 'packingUnit',
+        oldValue: product.packingUnit,
+        newValue: packingUnit
+      });
       product.packingUnit = packingUnit;
+      updatedFields.push('packing unit');
     }
     
     if (additionalUnit !== undefined && additionalUnit !== product.additionalUnit) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'additionalUnit',
-            oldValue: product.additionalUnit,
-            newValue: additionalUnit
-          }],
-          notes: `Updated additional unit`
-        })
-      );
+      allChanges.push({
+        field: 'additionalUnit',
+        oldValue: product.additionalUnit,
+        newValue: additionalUnit
+      });
       product.additionalUnit = additionalUnit;
+      updatedFields.push('additional unit');
     }
     
     if (pouchesOrPieces !== undefined && pouchesOrPieces !== product.pouchesOrPieces) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'pouchesOrPieces',
-            oldValue: product.pouchesOrPieces,
-            newValue: pouchesOrPieces
-          }],
-          notes: `Updated pouches/pieces`
-        })
-      );
+      allChanges.push({
+        field: 'pouchesOrPieces',
+        oldValue: product.pouchesOrPieces,
+        newValue: pouchesOrPieces
+      });
       product.pouchesOrPieces = pouchesOrPieces;
+      updatedFields.push('pouches/pieces');
     }
     
     if (description !== undefined && description !== product.description) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'description',
-            oldValue: product.description,
-            newValue: description
-          }],
-          notes: `Updated description`
-        })
-      );
+      allChanges.push({
+        field: 'description',
+        oldValue: product.description,
+        newValue: description
+      });
       product.description = description;
+      updatedFields.push('description');
     }
     
     if (category !== undefined && category !== null && category.toString() !== product.category.toString()) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'category',
-            oldValue: product.category,
-            newValue: category
-          }],
-          notes: `Updated category`
-        })
-      );
+      allChanges.push({
+        field: 'category',
+        oldValue: product.category,
+        newValue: category
+      });
       product.category = category;
+      updatedFields.push('category');
     }
     
     if (countInStock !== undefined && countInStock !== product.countInStock) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'countInStock',
-            oldValue: product.countInStock,
-            newValue: countInStock
-          }],
-          notes: `Updated count in stock`
-        })
-      );
+      allChanges.push({
+        field: 'countInStock',
+        oldValue: product.countInStock,
+        newValue: countInStock
+      });
       product.countInStock = countInStock;
+      updatedFields.push('count in stock');
     }
     
     if (isActive !== undefined && isActive !== product.isActive) {
-      journeyPromises.push(
-        ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'isActive',
-            oldValue: product.isActive,
-            newValue: isActive
-          }],
-          notes: `Updated active status`
-        })
-      );
+      allChanges.push({
+        field: 'isActive',
+        oldValue: product.isActive,
+        newValue: isActive
+      });
       product.isActive = isActive;
+      updatedFields.push('active status');
     }
     
     // Save product first for quick response
     await product.save();
-    
-    // Process all journey records asynchronously
-    Promise.all(journeyPromises).catch(err => 
-      console.error('Error creating journey records:', err)
-    );
     
     // Send response immediately
     res.json({
@@ -613,6 +485,7 @@ const updateProduct = async (req, res) => {
       let imageUrl = product.image;
       let imagePublicId = product.imagePublicId;
       let shouldUpdateImage = false;
+      let imageChange = null;
 
       // Handle image removal request
       if (removeImage === 'true' && !req.file) {
@@ -624,22 +497,17 @@ const updateProduct = async (req, res) => {
           }
         }
         
-        // Record image removal in ProductJourney
-        await ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'image',
-            oldValue: product.image,
-            newValue: ''
-          }],
-          notes: 'Updated image'
-        });
+        // Prepare image change record
+        imageChange = {
+          field: 'image',
+          oldValue: product.image,
+          newValue: ''
+        };
         
         imageUrl = '';
         imagePublicId = '';
         shouldUpdateImage = true;
+        updatedFields.push('image removed');
       }
 
       // Handle new image upload
@@ -659,22 +527,17 @@ const updateProduct = async (req, res) => {
           const dataURI = `data:${req.file.mimetype};base64,${b64}`;
           const result = await uploadImage(dataURI);
           
-          // Record image update in ProductJourney
-          await ProductJourney.create({
-            product: product._id,
-            user: req.user._id,
-            action: 'updated',
-            changes: [{
-              field: 'image',
-              oldValue: product.image,
-              newValue: result.secure_url
-            }],
-            notes: 'Updated image'
-          });
+          // Prepare image change record
+          imageChange = {
+            field: 'image',
+            oldValue: product.image,
+            newValue: result.secure_url
+          };
           
           imageUrl = result.secure_url;
           imagePublicId = result.public_id;
           shouldUpdateImage = true;
+          updatedFields.push('image');
         } catch (error) {
           console.error('Error uploading new image:', error);
         }
@@ -686,17 +549,38 @@ const updateProduct = async (req, res) => {
           image: imageUrl,
           imagePublicId: imagePublicId,
         });
+        
+        // Add image change to allChanges array
+        if (imageChange) {
+          allChanges.push(imageChange);
+        }
+      }
+      
+      // Create a single product journey record for all changes if there are any
+      if (allChanges.length > 0) {
+        // Create a descriptive note based on what was updated
+        const noteText = updatedFields.length > 0 
+          ? `Updated: ${updatedFields.join(', ')}`
+          : 'Product updated';
+          
+        // Use the productJourney controller directly
+        const ProductJourney = require('../models/productJourneyModel');
+        await ProductJourney.create({
+          product: product._id,
+          user: req.user._id,
+          action: 'updated',
+          changes: allChanges,
+          notes: noteText
+        });
       }
     };
 
-    // Process image asynchronously
-    if (req.file || removeImage === 'true') {
-      processImage().catch(err => 
-        console.error('Error processing image:', err)
-      );
-    }
+    // Process image and create journey record
+    processImage().catch(err => 
+      console.error('Error processing image or creating journey record:', err)
+    );
   } catch (error) {
-    res.status(500).json({
+    return res.status(400).json({
       status: 'error',
       message: error.message,
     });

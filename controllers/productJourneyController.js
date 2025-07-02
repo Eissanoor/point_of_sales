@@ -40,11 +40,39 @@ const createProductJourney = asyncHandler(async (req, res) => {
     throw new Error('At least one change must be provided');
   }
 
+  // Filter out changes where oldValue and newValue are the same
+  const filteredChanges = changes.filter(change => {
+    // Handle different data types (string vs number)
+    let oldValue = change.oldValue;
+    let newValue = change.newValue;
+    
+    // Convert to same type if needed
+    if (oldValue !== undefined && newValue !== undefined) {
+      if (typeof oldValue === 'number' && typeof newValue === 'string') {
+        newValue = Number(newValue);
+      } else if (typeof newValue === 'number' && typeof oldValue === 'string') {
+        oldValue = Number(oldValue);
+      }
+      
+      // Compare the values
+      return oldValue !== newValue;
+    }
+    
+    return true; // Keep changes where one value is undefined
+  });
+
+  // If no changes remain after filtering, don't create a record
+  if (filteredChanges.length === 0) {
+    return res.status(200).json({
+      message: 'No actual changes detected, journey record not created'
+    });
+  }
+
   const productJourney = await ProductJourney.create({
     product,
     user: req.user._id,
     action,
-    changes,
+    changes: filteredChanges,
     notes,
   });
 
