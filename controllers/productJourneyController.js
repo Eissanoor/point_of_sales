@@ -5,7 +5,42 @@ const ProductJourney = require('../models/productJourneyModel');
 // @route   GET /api/productjourney
 // @access  Private/Admin
 const getProductJourneys = asyncHandler(async (req, res) => {
-  const productJourneys = await ProductJourney.find({})
+  const { search } = req.query;
+  
+  // Build search query
+  const query = {};
+  
+  // If search parameter exists, create a search query
+  if (search) {
+    // First find products and users that match the search term
+    const productQuery = { name: { $regex: search, $options: 'i' } };
+    const userQuery = { name: { $regex: search, $options: 'i' } };
+    
+    // Use mongoose models to find matching products and users
+    const Product = require('../models/productModel');
+    const User = require('../models/userModel');
+    
+    const matchingProducts = await Product.find(productQuery).select('_id');
+    const matchingUsers = await User.find(userQuery).select('_id');
+    
+    // Extract IDs
+    const productIds = matchingProducts.map(p => p._id);
+    const userIds = matchingUsers.map(u => u._id);
+    
+    query.$or = [
+      // Search in notes field
+      { notes: { $regex: search, $options: 'i' } },
+      // Search in changes array for field names or values
+      { 'changes.field': { $regex: search, $options: 'i' } },
+      { 'changes.oldValue': { $regex: search, $options: 'i' } },
+      { 'changes.newValue': { $regex: search, $options: 'i' } },
+      // Search by product or user IDs that match the search term
+      { product: { $in: productIds } },
+      { user: { $in: userIds } }
+    ];
+  }
+
+  const productJourneys = await ProductJourney.find(query)
     .populate('product', 'name')
     .populate('user', 'name');
   
