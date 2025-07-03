@@ -7,6 +7,7 @@ const {
   createProduct,
   updateProduct,
   createProductReview,
+  getProductJourneyByProductId,
 } = require('../controllers/productController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 const upload = require('../middlewares/uploadMiddleware');
@@ -23,5 +24,8 @@ router.route('/:id')
 
 router.route('/:id/reviews')
   .post(protect, createProductReview);
+  
+router.route('/:id/journey')
+  .get(protect, admin, getProductJourneyByProductId);
 
 module.exports = router; 

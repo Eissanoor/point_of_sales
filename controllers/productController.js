@@ -708,6 +708,40 @@ const createProductReview = async (req, res) => {
   }
 };
 
+// @desc    Get product journey by product ID
+// @route   GET /api/products/:id/journey
+// @access  Private/Admin
+const getProductJourneyByProductId = async (req, res) => {
+  try {
+    const productId = req.params.id;
+    
+    // Check if product exists
+    const product = await Product.findById(productId);
+    if (!product) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Product not found',
+      });
+    }
+    
+    // Get all journey records for this product, sorted by newest first
+    const journeyRecords = await ProductJourney.find({ product: productId })
+      .populate('user', 'name email')
+      .sort({ createdAt: -1 });
+      
+    res.json({
+      status: 'success',
+      results: journeyRecords.length,
+      data: journeyRecords,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   getProducts,
   getProductById,
@@ -715,4 +749,5 @@ module.exports = {
   createProduct,
   updateProduct,
   createProductReview,
+  getProductJourneyByProductId,
 }; 
