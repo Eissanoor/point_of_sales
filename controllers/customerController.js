@@ -8,11 +8,11 @@ const createCustomer = async (req, res) => {
     const { name, email, phoneNumber, address, customerType } = req.body;
 
     // Check if customer already exists with the same email
-    const customerExists = await Customer.findOne({ email });
+    const customerExists = await Customer.findOne({ name });
     if (customerExists) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Customer with this email already exists',
+        message: 'Customer with this name already exists',
       });
     }
 
