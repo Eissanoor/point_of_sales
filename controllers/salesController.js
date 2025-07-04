@@ -36,6 +36,22 @@ const createSale = async (req, res) => {
     
     const invoiceNumber = `INV-${year}${month}${day}-${(salesCount + 1).toString().padStart(3, '0')}`;
 
+    // Calculate due amount if paid amount is less than grand total
+    const actualPaidAmount = paidAmount || 0;
+    const dueAmount = grandTotal - actualPaidAmount;
+    
+    // Automatically set payment status based on paid amount
+    let autoPaymentStatus = paymentStatus;
+    if (!autoPaymentStatus) {
+      if (dueAmount <= 0) {
+        autoPaymentStatus = 'paid';
+      } else if (actualPaidAmount > 0) {
+        autoPaymentStatus = 'partial';
+      } else {
+        autoPaymentStatus = 'unpaid';
+      }
+    }
+
     // Create new sale
     const sale = await Sales.create({
       invoiceNumber,
@@ -46,8 +62,9 @@ const createSale = async (req, res) => {
       tax,
       grandTotal,
       paymentMethod,
-      paymentStatus,
-      paidAmount,
+      paymentStatus: autoPaymentStatus,
+      paidAmount: actualPaidAmount,
+      dueAmount,
       notes,
       user: req.user._id, // Assuming req.user is set by auth middleware
     });
@@ -221,7 +238,7 @@ const updateSale = async (req, res) => {
         paymentDetails.newStatus = paymentStatus;
       }
       
-      if (paidAmount && paidAmount !== sale.paidAmount) {
+      if (paidAmount !== undefined && paidAmount !== sale.paidAmount) {
         changes.push({
           field: 'paidAmount',
           oldValue: sale.paidAmount,
@@ -229,6 +246,38 @@ const updateSale = async (req, res) => {
         });
         paymentDetails.previousAmount = sale.paidAmount;
         paymentDetails.newAmount = paidAmount;
+        
+        // Calculate new due amount
+        const newDueAmount = sale.grandTotal - paidAmount;
+        changes.push({
+          field: 'dueAmount',
+          oldValue: sale.dueAmount,
+          newValue: newDueAmount
+        });
+        paymentDetails.previousDueAmount = sale.dueAmount;
+        paymentDetails.newDueAmount = newDueAmount;
+        
+        // Auto-update payment status based on paid amount
+        let autoPaymentStatus = paymentStatus;
+        if (!autoPaymentStatus) {
+          if (newDueAmount <= 0) {
+            autoPaymentStatus = 'paid';
+          } else if (paidAmount > 0) {
+            autoPaymentStatus = 'partial';
+          } else {
+            autoPaymentStatus = 'unpaid';
+          }
+          
+          if (autoPaymentStatus !== sale.paymentStatus) {
+            changes.push({
+              field: 'paymentStatus',
+              oldValue: sale.paymentStatus,
+              newValue: autoPaymentStatus
+            });
+            paymentDetails.previousStatus = sale.paymentStatus;
+            paymentDetails.newStatus = autoPaymentStatus;
+          }
+        }
       }
       
       if (notes && notes !== sale.notes) {
@@ -239,9 +288,27 @@ const updateSale = async (req, res) => {
         });
       }
 
-      // Only allow updating payment information and notes
-      sale.paymentStatus = paymentStatus || sale.paymentStatus;
-      sale.paidAmount = paidAmount || sale.paidAmount;
+      // Update payment information and notes
+      if (paidAmount !== undefined) {
+        sale.paidAmount = paidAmount;
+        sale.dueAmount = sale.grandTotal - paidAmount;
+        
+        // Auto-update payment status if not explicitly provided
+        if (!paymentStatus) {
+          if (sale.dueAmount <= 0) {
+            sale.paymentStatus = 'paid';
+          } else if (paidAmount > 0) {
+            sale.paymentStatus = 'partial';
+          } else {
+            sale.paymentStatus = 'unpaid';
+          }
+        } else {
+          sale.paymentStatus = paymentStatus;
+        }
+      } else if (paymentStatus) {
+        sale.paymentStatus = paymentStatus;
+      }
+      
       sale.notes = notes || sale.notes;
 
       const updatedSale = await sale.save();
