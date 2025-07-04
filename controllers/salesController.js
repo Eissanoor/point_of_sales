@@ -1,5 +1,6 @@
 const Sales = require('../models/salesModel');
 const Product = require('../models/productModel');
+const SalesJourney = require('../models/salesJourneyModel');
 
 // @desc    Create a new sale
 // @route   POST /api/sales
@@ -63,6 +64,15 @@ const createSale = async (req, res) => {
         }
       );
     }
+
+    // Create sales journey record for the new sale
+    await SalesJourney.create({
+      sale: sale._id,
+      user: req.user._id,
+      action: 'created',
+      changes: [],
+      notes: 'Sale created',
+    });
 
     if (sale) {
       res.status(201).json({
@@ -197,12 +207,56 @@ const updateSale = async (req, res) => {
     const sale = await Sales.findById(req.params.id);
 
     if (sale) {
+      // Track changes for sales journey
+      const changes = [];
+      const paymentDetails = {};
+      
+      if (paymentStatus && paymentStatus !== sale.paymentStatus) {
+        changes.push({
+          field: 'paymentStatus',
+          oldValue: sale.paymentStatus,
+          newValue: paymentStatus
+        });
+        paymentDetails.previousStatus = sale.paymentStatus;
+        paymentDetails.newStatus = paymentStatus;
+      }
+      
+      if (paidAmount && paidAmount !== sale.paidAmount) {
+        changes.push({
+          field: 'paidAmount',
+          oldValue: sale.paidAmount,
+          newValue: paidAmount
+        });
+        paymentDetails.previousAmount = sale.paidAmount;
+        paymentDetails.newAmount = paidAmount;
+      }
+      
+      if (notes && notes !== sale.notes) {
+        changes.push({
+          field: 'notes',
+          oldValue: sale.notes,
+          newValue: notes
+        });
+      }
+
       // Only allow updating payment information and notes
       sale.paymentStatus = paymentStatus || sale.paymentStatus;
       sale.paidAmount = paidAmount || sale.paidAmount;
       sale.notes = notes || sale.notes;
 
       const updatedSale = await sale.save();
+
+      // Create sales journey record if there are changes
+      if (changes.length > 0) {
+        await SalesJourney.create({
+          sale: sale._id,
+          user: req.user._id,
+          action: 'payment_updated',
+          changes,
+          paymentDetails,
+          notes: 'Payment information updated',
+        });
+      }
 
       res.json({
         status: 'success',
@@ -242,6 +296,15 @@ const deleteSale = async (req, res) => {
           }
         );
       }
+
+      // Create sales journey record before deleting the sale
+      await SalesJourney.create({
+        sale: sale._id,
+        user: req.user._id,
+        action: 'deleted',
+        changes: [],
+        notes: `Sale with invoice ${sale.invoiceNumber} deleted`,
+      });
 
       await Sales.deleteOne({ _id: req.params.id });
       
