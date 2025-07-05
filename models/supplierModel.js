@@ -9,7 +9,6 @@ const supplierSchema = new mongoose.Schema(
     },
     email: {
       type: String,
-      required: [true, 'Email address is required'],
       unique: true,
       trim: true,
       lowercase: true,
@@ -17,7 +16,7 @@ const supplierSchema = new mongoose.Schema(
     },
     phoneNumber: {
       type: String,
-      required: [true, 'Phone number is required'],
+    
       trim: true,
     },
     image: {

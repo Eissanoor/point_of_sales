@@ -8,10 +8,10 @@ const { uploadImage, deleteImage, getPublicIdFromUrl } = require('../config/clou
 const createSupplier = asyncHandler(async (req, res) => {
   const { name, email, phoneNumber, address } = req.body;
 
-  const supplierExists = await Supplier.findOne({ email });
+  const supplierExists = await Supplier.findOne({ name });
   if (supplierExists) {
     res.status(400);
-    throw new Error('Supplier with this email already exists');
+    throw new Error('Supplier with this name already exists');
   }
 
   // Handle image upload if file is provided
