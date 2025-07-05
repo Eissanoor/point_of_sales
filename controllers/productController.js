@@ -44,6 +44,8 @@ const getProducts = async (req, res) => {
     const count = await Product.countDocuments(searchQuery);
     const products = await Product.find(searchQuery)
       .populate('category', 'name description')
+      .populate('currency', 'name code symbol')
+      .populate('supplier', 'name email phone')
       .limit(pageSize)
       .skip(pageSize * (page - 1));
 
@@ -67,7 +69,10 @@ const getProducts = async (req, res) => {
 // @access  Public
 const getProductById = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id).populate('category', 'name description');
+    const product = await Product.findById(req.params.id)
+      .populate('category', 'name description')
+      .populate('currency', 'name code symbol')
+      .populate('supplier', 'name email phone');
 
     if (product) {
       res.json({
@@ -161,6 +166,9 @@ const createProduct = async (req, res) => {
       category,
       countInStock,
       isActive,
+      location,
+      currency,
+      supplier,
     } = req.body;
 
     // Create product with placeholder image if needed
@@ -186,6 +194,9 @@ const createProduct = async (req, res) => {
       countInStock,
       description,
       isActive: isActive !== undefined ? isActive : true,
+      location: location || '',
+      currency,
+      supplier,
     });
 
     const createdProduct = await product.save();
@@ -272,6 +283,9 @@ const updateProduct = async (req, res) => {
       countInStock,
       isActive,
       removeImage,
+      location,
+      currency,
+      supplier,
     } = req.body;
 
     const product = await Product.findById(req.params.id);
@@ -534,6 +548,42 @@ const updateProduct = async (req, res) => {
         updatedFields.push('active status');
       }
       product.isActive = isActiveBool;
+    }
+    
+    if (location !== undefined) {
+      if (hasValueChanged(product.location, location)) {
+        allChanges.push({
+          field: 'location',
+          oldValue: product.location,
+          newValue: location
+        });
+        updatedFields.push('location');
+      }
+      product.location = location;
+    }
+    
+    if (currency !== undefined) {
+      if (hasValueChanged(product.currency, currency)) {
+        allChanges.push({
+          field: 'currency',
+          oldValue: product.currency,
+          newValue: currency
+        });
+        updatedFields.push('currency');
+      }
+      product.currency = currency;
+    }
+    
+    if (supplier !== undefined) {
+      if (hasValueChanged(product.supplier, supplier)) {
+        allChanges.push({
+          field: 'supplier',
+          oldValue: product.supplier,
+          newValue: supplier
+        });
+        updatedFields.push('supplier');
+      }
+      product.supplier = supplier;
     }
     
     // Save product first for quick response

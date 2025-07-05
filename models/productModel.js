@@ -52,6 +52,18 @@ const productSchema = new mongoose.Schema(
       required: [true, 'Please enter product category'],
       ref: 'Category',
     },
+    supplier: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Supplier',
+    },
+    currency: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Currency',
+    },
+    location: {
+      type: String,
+      default: '',
+    },
     description: {
       type: String,
       required: [true, 'Please enter product description'],
