@@ -24,11 +24,8 @@ const supplierSchema = new mongoose.Schema(
       default: '',
     },
     address: {
-      street: String,
-      city: String,
-      state: String,
-      zipCode: String,
-      country: String,
+      type: String,
+      trim: true,
     },
     isActive: {
       type: Boolean,
