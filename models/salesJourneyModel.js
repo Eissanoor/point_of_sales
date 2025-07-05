@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const autoIncrementPlugin = require('./autoIncrementPlugin');
 
 const salesJourneySchema = new mongoose.Schema(
   {
@@ -53,6 +54,9 @@ const salesJourneySchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// Apply the auto-increment plugin
+salesJourneySchema.plugin(autoIncrementPlugin);
 
 // Pre-save middleware to ensure consistent data types between oldValue and newValue
 salesJourneySchema.pre('save', function(next) {

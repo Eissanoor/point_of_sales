@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const autoIncrementPlugin = require('./autoIncrementPlugin');
 
 const categorySchema = new mongoose.Schema(
   {
@@ -21,6 +22,9 @@ const categorySchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// Apply the auto-increment plugin
+categorySchema.plugin(autoIncrementPlugin);
 
 const Category = mongoose.model('Category', categorySchema);
 

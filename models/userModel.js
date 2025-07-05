@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const autoIncrementPlugin = require('./autoIncrementPlugin');
 
 const userSchema = new mongoose.Schema(
   {
@@ -36,6 +37,9 @@ const userSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// Apply the auto-increment plugin
+userSchema.plugin(autoIncrementPlugin);
 
 // Encrypt password before saving
 userSchema.pre('save', async function (next) {

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const autoIncrementPlugin = require('./autoIncrementPlugin');
 
 const reviewSchema = new mongoose.Schema(
   {
@@ -150,6 +151,9 @@ const productSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// Apply the auto-increment plugin
+productSchema.plugin(autoIncrementPlugin);
 
 const Product = mongoose.model('Product', productSchema);
 

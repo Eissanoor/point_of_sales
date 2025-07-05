@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const autoIncrementPlugin = require('./autoIncrementPlugin');
 
 const supplierSchema = new mongoose.Schema(
   {
@@ -36,6 +37,9 @@ const supplierSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// Apply the auto-increment plugin
+supplierSchema.plugin(autoIncrementPlugin);
 
 const Supplier = mongoose.model('Supplier', supplierSchema);
 

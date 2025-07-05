@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const autoIncrementPlugin = require('./autoIncrementPlugin');
 
 const currencySchema = new mongoose.Schema(
   {
@@ -21,6 +22,9 @@ const currencySchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// Apply the auto-increment plugin
+currencySchema.plugin(autoIncrementPlugin);
 
 const Currency = mongoose.model('Currency', currencySchema);
 

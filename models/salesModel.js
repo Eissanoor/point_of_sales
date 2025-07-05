@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const autoIncrementPlugin = require('./autoIncrementPlugin');
 
 const salesItemSchema = new mongoose.Schema(
   {
@@ -94,6 +95,9 @@ const salesSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// Apply the auto-increment plugin
+salesSchema.plugin(autoIncrementPlugin);
 
 // Virtual for calculating due amount
 salesSchema.pre('save', function (next) {
