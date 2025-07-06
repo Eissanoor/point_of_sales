@@ -501,6 +501,232 @@ const getSalesByCustomer = async (req, res) => {
   }
 };
 
+// @desc    Get all sales for a specific customer
+// @route   GET /api/sales/customer/:customerId
+// @access  Private
+const getSalesByCustomerId = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { page = 1, limit = 10, startDate, endDate } = req.query;
+    
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    // Build query with customer ID filter
+    let query = { customer: customerId };
+    
+    // Add date range filter if provided
+    if (startDate && endDate) {
+      query.createdAt = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    }
+    
+    // Get customer details
+    const customer = await require('../models/customerModel').findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Customer not found',
+      });
+    }
+    
+    // Count total documents for pagination info
+    const totalSales = await Sales.countDocuments(query);
+    
+    // Find sales for the specific customer with pagination
+    const sales = await Sales.find(query)
+      .populate('customer', 'name email phoneNumber address')
+      .populate({
+        path: 'items.product',
+        select: 'name image price barcode category',
+        populate: {
+          path: 'category',
+          select: 'name'
+        }
+      })
+      .populate('user', 'name email')
+      .limit(limitNum)
+      .skip(skip)
+      .sort({ createdAt: -1 });
+    
+    // Calculate aggregated values
+    const aggregatedData = await Sales.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: null,
+          totalAmount: { $sum: "$totalAmount" },
+          totalDiscount: { $sum: "$discount" },
+          totalTax: { $sum: "$tax" },
+          totalGrandTotal: { $sum: "$grandTotal" },
+          totalPaid: { $sum: "$paidAmount" },
+          totalDue: { $sum: "$dueAmount" },
+          totalSales: { $sum: 1 },
+          firstPurchaseDate: { $min: "$createdAt" },
+          lastPurchaseDate: { $max: "$createdAt" },
+          avgPurchaseAmount: { $avg: "$grandTotal" }
+        }
+      }
+    ]);
+    
+    // Get payment status distribution
+    const paymentStatusDistribution = await Sales.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: "$paymentStatus",
+          count: { $sum: 1 },
+          totalAmount: { $sum: "$grandTotal" }
+        }
+      }
+    ]);
+    
+    // Get payment method distribution
+    const paymentMethodDistribution = await Sales.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: "$paymentMethod",
+          count: { $sum: 1 },
+          totalAmount: { $sum: "$grandTotal" }
+        }
+      }
+    ]);
+    
+    // Get top purchased products
+    const topProducts = await Sales.aggregate([
+      { $match: query },
+      { $unwind: "$items" },
+      {
+        $group: {
+          _id: "$items.product",
+          totalQuantity: { $sum: "$items.quantity" },
+          totalAmount: { $sum: { $multiply: ["$items.price", "$items.quantity"] } },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { totalQuantity: -1 } },
+      { $limit: 5 },
+      {
+        $lookup: {
+          from: "products",
+          localField: "_id",
+          foreignField: "_id",
+          as: "productDetails"
+        }
+      },
+      { $unwind: "$productDetails" },
+      {
+        $project: {
+          _id: 1,
+          name: "$productDetails.name",
+          totalQuantity: 1,
+          totalAmount: 1,
+          count: 1
+        }
+      }
+    ]);
+    
+    // Get purchase frequency by month (last 6 months)
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    
+    const purchasesByMonth = await Sales.aggregate([
+      { 
+        $match: { 
+          ...query,
+          createdAt: { $gte: sixMonthsAgo }
+        } 
+      },
+      {
+        $group: {
+          _id: { 
+            year: { $year: "$createdAt" },
+            month: { $month: "$createdAt" }
+          },
+          count: { $sum: 1 },
+          totalAmount: { $sum: "$grandTotal" }
+        }
+      },
+      { $sort: { "_id.year": 1, "_id.month": 1 } }
+    ]);
+    
+    const summary = aggregatedData.length > 0 ? aggregatedData[0] : {
+      totalAmount: 0,
+      totalDiscount: 0,
+      totalTax: 0,
+      totalGrandTotal: 0,
+      totalPaid: 0,
+      totalDue: 0,
+      totalSales: 0,
+      firstPurchaseDate: null,
+      lastPurchaseDate: null,
+      avgPurchaseAmount: 0
+    };
+    
+    // Calculate days since first purchase and last purchase
+    const daysSinceFirstPurchase = summary.firstPurchaseDate 
+      ? Math.floor((new Date() - new Date(summary.firstPurchaseDate)) / (1000 * 60 * 60 * 24)) 
+      : 0;
+      
+    const daysSinceLastPurchase = summary.lastPurchaseDate 
+      ? Math.floor((new Date() - new Date(summary.lastPurchaseDate)) / (1000 * 60 * 60 * 24)) 
+      : 0;
+    
+    // Format purchase frequency data for easier frontend use
+    const purchaseFrequency = purchasesByMonth.map(item => ({
+      period: `${item._id.year}-${String(item._id.month).padStart(2, '0')}`,
+      count: item.count,
+      amount: item.totalAmount
+    }));
+    
+    res.json({
+      status: 'success',
+      results: sales.length,
+      totalPages: Math.ceil(totalSales / limitNum),
+      currentPage: pageNum,
+      totalSales,
+      customerInfo: {
+        _id: customer._id,
+        name: customer.name,
+        email: customer.email,
+        phoneNumber: customer.phoneNumber,
+        address: customer.address
+      },
+      summary: {
+        totalAmount: summary.totalAmount,
+        totalDiscount: summary.totalDiscount,
+        totalTax: summary.totalTax,
+        totalGrandTotal: summary.totalGrandTotal,
+        totalPaid: summary.totalPaid,
+        totalDue: summary.totalDue,
+        totalSales: summary.totalSales,
+        firstPurchaseDate: summary.firstPurchaseDate,
+        lastPurchaseDate: summary.lastPurchaseDate,
+        daysSinceFirstPurchase,
+        daysSinceLastPurchase,
+        avgPurchaseAmount: summary.avgPurchaseAmount,
+        purchaseFrequency: totalSales > 0 ? (totalSales / (daysSinceFirstPurchase || 1) * 30).toFixed(2) : 0 // Average purchases per month
+      },
+      analytics: {
+        paymentStatus: paymentStatusDistribution,
+        paymentMethods: paymentMethodDistribution,
+        topProducts,
+        purchasesByMonth: purchaseFrequency
+      },
+      data: sales,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   createSale,
   getSales,
@@ -508,4 +734,5 @@ module.exports = {
   updateSale,
   deleteSale,
   getSalesByCustomer,
+  getSalesByCustomerId,
 }; 

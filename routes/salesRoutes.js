@@ -8,6 +8,7 @@ const {
   updateSale,
   deleteSale,
   getSalesByCustomer,
+  getSalesByCustomerId,
 } = require('../controllers/salesController');
 
 router.route('/')
@@ -16,6 +17,9 @@ router.route('/')
 
 router.route('/by-customer')
   .get(protect, getSalesByCustomer);
+
+router.route('/customer/:customerId')
+  .get(protect, getSalesByCustomerId);
 
 router.route('/:id')
   .get(protect, getSaleById)
