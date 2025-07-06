@@ -404,10 +404,108 @@ const deleteSale = async (req, res) => {
   }
 };
 
+// @desc    Get sales grouped by customer with aggregated payment info
+// @route   GET /api/sales/by-customer
+// @access  Private
+const getSalesByCustomer = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    // Build date filter if provided
+    let dateFilter = {};
+    if (startDate && endDate) {
+      dateFilter = {
+        createdAt: {
+          $gte: new Date(startDate),
+          $lte: new Date(endDate),
+        }
+      };
+    }
+
+    // Aggregate sales by customer
+    const customerSales = await Sales.aggregate([
+      // Match based on date filter if provided
+      { $match: dateFilter },
+      
+      // Group by customer
+      {
+        $group: {
+          _id: "$customer",
+          totalSales: { $sum: 1 },
+          totalAmount: { $sum: "$totalAmount" },
+          totalPaid: { $sum: "$paidAmount" },
+          totalDue: { $sum: "$dueAmount" },
+          lastPurchaseDate: { $max: "$createdAt" },
+          // Get the most recent invoice
+          lastInvoice: { 
+            $last: {
+              $cond: { 
+                if: { $eq: [{ $arrayElemAt: [{ $objectToArray: "$$ROOT" }, 0] }, null] }, 
+                then: null,
+                else: "$invoiceNumber" 
+              }
+            }
+          }
+        }
+      },
+      
+      // Lookup customer details
+      {
+        $lookup: {
+          from: "customers",
+          localField: "_id",
+          foreignField: "_id",
+          as: "customerDetails"
+        }
+      },
+      
+      // Unwind the customerDetails array
+      {
+        $unwind: {
+          path: "$customerDetails",
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      
+      // Project the final output format
+      {
+        $project: {
+          _id: 1,
+          customerId: "$_id",
+          customerName: "$customerDetails.name",
+          customerEmail: "$customerDetails.email",
+          customerPhone: "$customerDetails.phoneNumber",
+          totalSales: 1,
+          totalAmount: 1,
+          totalPaid: 1,
+          totalDue: 1,
+          lastPurchaseDate: 1,
+          lastInvoice: 1
+        }
+      },
+      
+      // Sort by total amount in descending order
+      { $sort: { totalAmount: -1 } }
+    ]);
+
+    res.json({
+      status: 'success',
+      results: customerSales.length,
+      data: customerSales,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   createSale,
   getSales,
   getSaleById,
   updateSale,
   deleteSale,
+  getSalesByCustomer,
 }; 
