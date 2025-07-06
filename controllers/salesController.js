@@ -71,12 +71,17 @@ const createSale = async (req, res) => {
 
     // Update product quantities
     for (const item of items) {
+      const product = await Product.findById(item.product);
+      
+      // Initialize soldOutQuantity to 0 if it's null
+      const currentSoldOutQuantity = product.soldOutQuantity || 0;
+      
       await Product.findByIdAndUpdate(
         item.product,
         {
-          $inc: { 
-            countInStock: -item.quantity,
-            soldOutQuantity: item.quantity
+          $set: { 
+            countInStock: product.countInStock - item.quantity,
+            soldOutQuantity: currentSoldOutQuantity + item.quantity
           }
         }
       );
@@ -353,12 +358,18 @@ const deleteSale = async (req, res) => {
     if (sale) {
       // Restore product quantities
       for (const item of sale.items) {
+        const product = await Product.findById(item.product);
+        
+        // Initialize soldOutQuantity to 0 if it's null
+        const currentSoldOutQuantity = product.soldOutQuantity || 0;
+        const newSoldOutQuantity = Math.max(0, currentSoldOutQuantity - item.quantity);
+        
         await Product.findByIdAndUpdate(
           item.product,
           {
-            $inc: { 
-              countInStock: item.quantity,
-              soldOutQuantity: -item.quantity
+            $set: { 
+              countInStock: product.countInStock + item.quantity,
+              soldOutQuantity: newSoldOutQuantity
             }
           }
         );
