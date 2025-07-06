@@ -51,7 +51,7 @@ const getCurrencyById = async (req, res) => {
 // @access  Private/Admin
 const createCurrency = async (req, res) => {
   try {
-    const { name, symbol, isActive } = req.body;
+    const { name, symbol, isActive, code } = req.body;
 
     // Check if currency already exists
     const currencyExists = await Currency.findOne({ name });
@@ -67,6 +67,7 @@ const createCurrency = async (req, res) => {
       name,
       symbol,
       isActive: isActive !== undefined ? isActive : true,
+      code: code || name.substring(0, 3).toUpperCase(),
     });
 
     const createdCurrency = await currency.save();
@@ -77,6 +78,13 @@ const createCurrency = async (req, res) => {
       message: 'Currency created successfully',
     });
   } catch (error) {
+    if (error.code === 11000 && error.keyPattern && error.keyPattern.code) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Currency with this code already exists. Please provide a unique code.',
+      });
+    }
+    
     res.status(500).json({
       status: 'error',
       message: error.message,
@@ -89,7 +97,7 @@ const createCurrency = async (req, res) => {
 // @access  Private/Admin
 const updateCurrency = async (req, res) => {
   try {
-    const { name, symbol, isActive } = req.body;
+    const { name, symbol, isActive, code } = req.body;
 
     const currency = await Currency.findById(req.params.id);
 
@@ -115,10 +123,32 @@ const updateCurrency = async (req, res) => {
       }
     }
 
+    // If updating code, check if it already exists
+    if (code && code !== currency.code) {
+      const codeExists = await Currency.findOne({
+        code,
+        _id: { $ne: req.params.id }
+      });
+
+      if (codeExists) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Currency with this code already exists',
+        });
+      }
+    }
+
     // Update currency info
     currency.name = name || currency.name;
     currency.symbol = symbol || currency.symbol;
     currency.isActive = isActive !== undefined ? isActive : currency.isActive;
+    
+    // Update code if provided, otherwise keep existing or generate from name if name changed
+    if (code) {
+      currency.code = code;
+    } else if (name && name !== currency.name && !currency.code) {
+      currency.code = name.substring(0, 3).toUpperCase();
+    }
 
     const updatedCurrency = await currency.save();
 
@@ -128,6 +158,14 @@ const updateCurrency = async (req, res) => {
       message: 'Currency updated successfully',
     });
   } catch (error) {
+    // Handle duplicate key error specifically
+    if (error.code === 11000 && error.keyPattern && error.keyPattern.code) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Currency with this code already exists. Please provide a unique code.',
+      });
+    }
+    
     res.status(500).json({
       status: 'error',
       message: error.message,

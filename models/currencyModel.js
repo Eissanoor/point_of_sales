@@ -9,6 +9,12 @@ const currencySchema = new mongoose.Schema(
       trim: true,
       unique: true,
     },
+    code: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true, // This allows null values to not trigger unique constraint
+    },
     symbol: {
       type: String,
       required: [true, 'Please enter currency symbol'],
