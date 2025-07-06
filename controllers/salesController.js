@@ -409,7 +409,17 @@ const deleteSale = async (req, res) => {
 // @access  Private
 const getSalesByCustomer = async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { 
+      startDate, 
+      endDate, 
+      paymentStatus,
+      minTotalAmount,
+      maxTotalAmount,
+      minTotalDue,
+      maxTotalDue,
+      customer,
+      invoiceNumber
+    } = req.query;
     
     // Build date filter if provided
     let dateFilter = {};
@@ -420,6 +430,16 @@ const getSalesByCustomer = async (req, res) => {
           $lte: new Date(endDate),
         }
       };
+    }
+
+    // Add customer filter if provided
+    if (customer) {
+      dateFilter.customer = require('mongoose').Types.ObjectId(customer);
+    }
+
+    // Add invoice number filter if provided
+    if (invoiceNumber) {
+      dateFilter.invoiceNumber = { $regex: invoiceNumber, $options: 'i' };
     }
 
     // Aggregate sales by customer
@@ -445,7 +465,11 @@ const getSalesByCustomer = async (req, res) => {
                 else: "$invoiceNumber" 
               }
             }
-          }
+          },
+          // Collect payment statuses to filter by them later
+          paymentStatuses: { $addToSet: "$paymentStatus" },
+          // Collect invoice numbers to filter by them later
+          invoiceNumbers: { $addToSet: "$invoiceNumber" }
         }
       },
       
@@ -480,7 +504,28 @@ const getSalesByCustomer = async (req, res) => {
           totalPaid: 1,
           totalDue: 1,
           lastPurchaseDate: 1,
-          lastInvoice: 1
+          lastInvoice: 1,
+          paymentStatuses: 1,
+          invoiceNumbers: 1
+        }
+      },
+      
+      // Apply additional filters
+      {
+        $match: {
+          ...(minTotalAmount ? { totalAmount: { $gte: parseFloat(minTotalAmount) } } : {}),
+          ...(maxTotalAmount ? { totalAmount: { $lte: parseFloat(maxTotalAmount) } } : {}),
+          ...(minTotalDue ? { totalDue: { $gte: parseFloat(minTotalDue) } } : {}),
+          ...(maxTotalDue ? { totalDue: { $lte: parseFloat(maxTotalDue) } } : {}),
+          ...(paymentStatus ? { paymentStatuses: paymentStatus } : {})
+        }
+      },
+      
+      // Remove the temporary fields from the final output
+      {
+        $project: {
+          paymentStatuses: 0,
+          invoiceNumbers: 0
         }
       },
       
