@@ -33,11 +33,11 @@ const salesJourneySchema = new mongoose.Schema(
     paymentDetails: {
       previousStatus: {
         type: String,
-        enum: ['pending', 'partial', 'completed'],
+        enum: ['unpaid', 'partial', 'paid'],
       },
       newStatus: {
         type: String,
-        enum: ['pending', 'partial', 'completed'],
+        enum: ['unpaid', 'partial', 'paid'],
       },
       previousAmount: {
         type: Number,
