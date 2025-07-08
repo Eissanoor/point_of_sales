@@ -452,7 +452,7 @@ const getSalesByCustomer = async (req, res) => {
         $group: {
           _id: "$customer",
           totalSales: { $sum: 1 },
-          totalAmount: { $sum: "$totalAmount" },
+          totalAmount: { $sum: "$grandTotal" },
           totalPaid: { $sum: "$paidAmount" },
           totalDue: { $sum: "$dueAmount" },
           lastPurchaseDate: { $max: "$createdAt" },
