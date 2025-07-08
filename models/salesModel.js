@@ -67,7 +67,6 @@ const salesSchema = new mongoose.Schema(
     },
     paymentStatus: {
       type: String,
-      enum: ['unpaid', 'partial', 'paid'],
       default: 'unpaid',
     },
     paidAmount: {
