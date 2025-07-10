@@ -13,11 +13,7 @@ const createSale = async (req, res) => {
       totalAmount, 
       discount, 
       tax, 
-      grandTotal, 
-      paymentMethod, 
-      paymentStatus, 
-      paidAmount,
-      notes 
+      grandTotal
     } = req.body;
 
     // Generate invoice number (you can customize this logic)
@@ -36,22 +32,6 @@ const createSale = async (req, res) => {
     
     const invoiceNumber = `INV-${year}${month}${day}-${(salesCount + 1).toString().padStart(3, '0')}`;
 
-    // Calculate due amount if paid amount is less than grand total
-    const actualPaidAmount = paidAmount || 0;
-    const dueAmount = grandTotal - actualPaidAmount;
-    
-    // Automatically set payment status based on paid amount
-    let autoPaymentStatus = paymentStatus;
-    if (!autoPaymentStatus) {
-      if (dueAmount <= 0) {
-        autoPaymentStatus = 'paid';
-      } else if (actualPaidAmount > 0) {
-        autoPaymentStatus = 'partial';
-      } else {
-        autoPaymentStatus = 'unpaid';
-      }
-    }
-
     // Create new sale
     const sale = await Sales.create({
       invoiceNumber,
@@ -61,11 +41,6 @@ const createSale = async (req, res) => {
       discount,
       tax,
       grandTotal,
-      paymentMethod,
-      paymentStatus: autoPaymentStatus,
-      paidAmount: actualPaidAmount,
-      dueAmount,
-      notes,
       user: req.user._id, // Assuming req.user is set by auth middleware
     });
 
@@ -126,7 +101,6 @@ const getSales = async (req, res) => {
       startDate, 
       endDate, 
       customer, 
-      paymentStatus,
       invoiceNumber 
     } = req.query;
     
@@ -147,11 +121,6 @@ const getSales = async (req, res) => {
     // Filter by customer
     if (customer) {
       query.customer = customer;
-    }
-
-    // Filter by payment status
-    if (paymentStatus) {
-      query.paymentStatus = paymentStatus;
     }
 
     // Filter by invoice number
@@ -220,115 +189,19 @@ const getSaleById = async (req, res) => {
 // @access  Private
 const updateSale = async (req, res) => {
   try {
-    const { 
-      paymentStatus, 
-      paidAmount,
-      notes 
-    } = req.body;
-
     const sale = await Sales.findById(req.params.id);
 
     if (sale) {
-      // Track changes for sales journey
-      const changes = [];
-      const paymentDetails = {};
-      
-      if (paymentStatus && paymentStatus !== sale.paymentStatus) {
-        changes.push({
-          field: 'paymentStatus',
-          oldValue: sale.paymentStatus,
-          newValue: paymentStatus
-        });
-        paymentDetails.previousStatus = sale.paymentStatus;
-        paymentDetails.newStatus = paymentStatus;
-      }
-      
-      if (paidAmount !== undefined && paidAmount !== sale.paidAmount) {
-        changes.push({
-          field: 'paidAmount',
-          oldValue: sale.paidAmount,
-          newValue: paidAmount
-        });
-        paymentDetails.previousAmount = sale.paidAmount;
-        paymentDetails.newAmount = paidAmount;
-        
-        // Calculate new due amount
-        const newDueAmount = sale.grandTotal - paidAmount;
-        changes.push({
-          field: 'dueAmount',
-          oldValue: sale.dueAmount,
-          newValue: newDueAmount
-        });
-        paymentDetails.previousDueAmount = sale.dueAmount;
-        paymentDetails.newDueAmount = newDueAmount;
-        
-        // Auto-update payment status based on paid amount
-        let autoPaymentStatus = paymentStatus;
-        if (!autoPaymentStatus) {
-          if (newDueAmount <= 0) {
-            autoPaymentStatus = 'paid';
-          } else if (paidAmount > 0) {
-            autoPaymentStatus = 'partial';
-          } else {
-            autoPaymentStatus = 'unpaid';
-          }
-          
-          if (autoPaymentStatus !== sale.paymentStatus) {
-            changes.push({
-              field: 'paymentStatus',
-              oldValue: sale.paymentStatus,
-              newValue: autoPaymentStatus
-            });
-            paymentDetails.previousStatus = sale.paymentStatus;
-            paymentDetails.newStatus = autoPaymentStatus;
-          }
-        }
-      }
-      
-      if (notes && notes !== sale.notes) {
-        changes.push({
-          field: 'notes',
-          oldValue: sale.notes,
-          newValue: notes
-        });
-      }
-
-      // Update payment information and notes
-      if (paidAmount !== undefined) {
-        sale.paidAmount = paidAmount;
-        sale.dueAmount = sale.grandTotal - paidAmount;
-        
-        // Auto-update payment status if not explicitly provided
-        if (!paymentStatus) {
-          if (sale.dueAmount <= 0) {
-            sale.paymentStatus = 'paid';
-          } else if (paidAmount > 0) {
-            sale.paymentStatus = 'partial';
-          } else {
-            sale.paymentStatus = 'unpaid';
-          }
-        } else {
-          sale.paymentStatus = paymentStatus;
-        }
-      } else if (paymentStatus) {
-        sale.paymentStatus = paymentStatus;
-      }
-      
-      sale.notes = notes || sale.notes;
+      // Create sales journey record
+      await SalesJourney.create({
+        sale: sale._id,
+        user: req.user._id,
+        action: 'updated',
+        changes: [],
+        notes: 'Sale updated',
+      });
 
       const updatedSale = await sale.save();
-
-      // Create sales journey record if there are changes
-      if (changes.length > 0) {
-        await SalesJourney.create({
-          sale: sale._id,
-          user: req.user._id,
-          action: 'payment_updated',
-          changes,
-          paymentDetails,
-          notes: 'Payment information updated',
-        });
-      }
 
       res.json({
         status: 'success',
@@ -412,11 +285,8 @@ const getSalesByCustomer = async (req, res) => {
     const { 
       startDate, 
       endDate, 
-      paymentStatus,
       minTotalAmount,
       maxTotalAmount,
-      minTotalDue,
-      maxTotalDue,
       customer,
       invoiceNumber
     } = req.query;
@@ -453,8 +323,6 @@ const getSalesByCustomer = async (req, res) => {
           _id: "$customer",
           totalSales: { $sum: 1 },
           totalAmount: { $sum: "$grandTotal" },
-          totalPaid: { $sum: "$paidAmount" },
-          totalDue: { $sum: "$dueAmount" },
           lastPurchaseDate: { $max: "$createdAt" },
           // Get the most recent invoice
           lastInvoice: { 
@@ -466,8 +334,6 @@ const getSalesByCustomer = async (req, res) => {
               }
             }
           },
-          // Collect payment statuses to filter by them later
-          paymentStatuses: { $addToSet: "$paymentStatus" },
           // Collect invoice numbers to filter by them later
           invoiceNumbers: { $addToSet: "$invoiceNumber" }
         }
@@ -501,11 +367,8 @@ const getSalesByCustomer = async (req, res) => {
           customerPhone: "$customerDetails.phoneNumber",
           totalSales: 1,
           totalAmount: 1,
-          totalPaid: 1,
-          totalDue: 1,
           lastPurchaseDate: 1,
           lastInvoice: 1,
-          paymentStatuses: 1,
           invoiceNumbers: 1
         }
       },
@@ -514,17 +377,13 @@ const getSalesByCustomer = async (req, res) => {
       {
         $match: {
           ...(minTotalAmount ? { totalAmount: { $gte: parseFloat(minTotalAmount) } } : {}),
-          ...(maxTotalAmount ? { totalAmount: { $lte: parseFloat(maxTotalAmount) } } : {}),
-          ...(minTotalDue ? { totalDue: { $gte: parseFloat(minTotalDue) } } : {}),
-          ...(maxTotalDue ? { totalDue: { $lte: parseFloat(maxTotalDue) } } : {}),
-          ...(paymentStatus ? { paymentStatuses: paymentStatus } : {})
+          ...(maxTotalAmount ? { totalAmount: { $lte: parseFloat(maxTotalAmount) } } : {})
         }
       },
       
       // Remove the temporary fields from the final output
       {
         $project: {
-          paymentStatuses: 0,
           invoiceNumbers: 0
         }
       },
@@ -607,36 +466,10 @@ const getSalesByCustomerId = async (req, res) => {
           totalDiscount: { $sum: "$discount" },
           totalTax: { $sum: "$tax" },
           totalGrandTotal: { $sum: "$grandTotal" },
-          totalPaid: { $sum: "$paidAmount" },
-          totalDue: { $sum: "$dueAmount" },
           totalSales: { $sum: 1 },
           firstPurchaseDate: { $min: "$createdAt" },
           lastPurchaseDate: { $max: "$createdAt" },
           avgPurchaseAmount: { $avg: "$grandTotal" }
-        }
-      }
-    ]);
-    
-    // Get payment status distribution
-    const paymentStatusDistribution = await Sales.aggregate([
-      { $match: query },
-      {
-        $group: {
-          _id: "$paymentStatus",
-          count: { $sum: 1 },
-          totalAmount: { $sum: "$grandTotal" }
-        }
-      }
-    ]);
-    
-    // Get payment method distribution
-    const paymentMethodDistribution = await Sales.aggregate([
-      { $match: query },
-      {
-        $group: {
-          _id: "$paymentMethod",
-          count: { $sum: 1 },
-          totalAmount: { $sum: "$grandTotal" }
         }
       }
     ]);
@@ -704,8 +537,6 @@ const getSalesByCustomerId = async (req, res) => {
       totalDiscount: 0,
       totalTax: 0,
       totalGrandTotal: 0,
-      totalPaid: 0,
-      totalDue: 0,
       totalSales: 0,
       firstPurchaseDate: null,
       lastPurchaseDate: null,
@@ -746,8 +577,6 @@ const getSalesByCustomerId = async (req, res) => {
         totalDiscount: summary.totalDiscount,
         totalTax: summary.totalTax,
         totalGrandTotal: summary.totalGrandTotal,
-        totalPaid: summary.totalPaid,
-        totalDue: summary.totalDue,
         totalSales: summary.totalSales,
         firstPurchaseDate: summary.firstPurchaseDate,
         lastPurchaseDate: summary.lastPurchaseDate,
@@ -757,8 +586,6 @@ const getSalesByCustomerId = async (req, res) => {
         purchaseFrequency: totalSales > 0 ? (totalSales / (daysSinceFirstPurchase || 1) * 30).toFixed(2) : 0 // Average purchases per month
       },
       analytics: {
-        paymentStatus: paymentStatusDistribution,
-        paymentMethods: paymentMethodDistribution,
         topProducts,
         purchasesByMonth: purchaseFrequency
       },

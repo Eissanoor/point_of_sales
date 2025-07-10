@@ -60,27 +60,6 @@ const salesSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
-    paymentMethod: {
-      type: String,
-      enum: ['cash', 'credit', 'bank', 'online'],
-      default: 'cash',
-    },
-    paymentStatus: {
-      type: String,
-      enum: ['unpaid', 'partial', 'paid'],
-      default: 'unpaid',
-    },
-    paidAmount: {
-      type: Number,
-      default: 0,
-    },
-    dueAmount: {
-      type: Number,
-      default: 0,
-    },
-    notes: {
-      type: String,
-    },
     user: {
       type: mongoose.Schema.Types.ObjectId,
       required: true,
@@ -98,12 +77,6 @@ const salesSchema = new mongoose.Schema(
 
 // Apply the auto-increment plugin
 salesSchema.plugin(autoIncrementPlugin);
-
-// Virtual for calculating due amount
-salesSchema.pre('save', function (next) {
-  this.dueAmount = this.grandTotal - this.paidAmount;
-  next();
-});
 
 const Sales = mongoose.model('Sales', salesSchema);
 
