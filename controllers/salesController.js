@@ -42,7 +42,7 @@ const createSale = async (req, res) => {
       tax,
       grandTotal,
       paymentStatus: 'unpaid',
-      dueDate: req.body.dueDate || undefined, // Use provided dueDate or default
+      dueDate: req.body.dueDate || new Date(), // Use provided dueDate or default
       user: req.user._id, // Assuming req.user is set by auth middleware
     });
 
