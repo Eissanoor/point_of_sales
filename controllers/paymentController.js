@@ -63,6 +63,7 @@ const createPayment = async (req, res) => {
     const payment = await Payment.create({
       paymentNumber,
       sale,
+      customer: saleRecord.customer, // Add customer reference from the sale
       amount,
       paymentMethod,
       paymentDate: paymentDate || Date.now(),
@@ -1003,6 +1004,14 @@ const createCustomerPayment = async (req, res) => {
       distributionStrategy = 'oldest-first' // Options: 'oldest-first', 'newest-first', 'proportional'
     } = req.body;
 
+    // Ensure amount is positive
+    if (amount <= 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Payment amount must be greater than zero',
+      });
+    }
+
     // Automatically set payment date to current date/time
     const paymentDate = new Date();
     
@@ -1025,9 +1034,49 @@ const createCustomerPayment = async (req, res) => {
     }).sort({ createdAt: distributionStrategy === 'newest-first' ? -1 : 1 }); // Sort by date based on strategy
 
     if (unpaidSales.length === 0) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'No unpaid sales found for this customer',
+      // Create a record of the payment even if there are no unpaid sales
+      const paymentNumber = generatePaymentNumber();
+      
+      const payment = await Payment.create({
+        paymentNumber,
+        customer: customerId, // Store customer reference directly
+        amount,
+        paymentMethod,
+        paymentDate,
+        transactionId,
+        status,
+        notes: notes ? `${notes} (Advance payment - no unpaid invoices)` : 'Advance payment - no unpaid invoices',
+        attachments,
+        user: req.user._id,
+        isPartial: false,
+        currency,
+        isAdvancePayment: true // Flag to indicate this is an advance payment
+      });
+      
+      // Create payment journey record
+      await PaymentJourney.create({
+        payment: payment._id,
+        user: req.user._id,
+        action: 'created',
+        changes: [],
+        notes: `Advance payment ${paymentNumber} created for customer ${customer.name}`,
+      });
+      
+      return res.status(201).json({
+        status: 'success',
+        data: {
+          customer: {
+            id: customer._id,
+            name: customer.name
+          },
+          totalPaid: amount,
+          paymentNumber,
+          transactionId,
+          paymentDate,
+          paymentStatus: status,
+          isAdvancePayment: true,
+          message: 'Advance payment recorded - no unpaid invoices found'
+        }
       });
     }
 
@@ -1047,14 +1096,6 @@ const createCustomerPayment = async (req, res) => {
         proportion: remainingBalance // Will be converted to actual proportion later
       };
     }));
-
-    // Check if payment amount exceeds total unpaid amount
-    if (amount > totalUnpaidAmount) {
-      return res.status(400).json({
-        status: 'fail',
-        message: `Payment amount (${amount}) exceeds total unpaid balance (${totalUnpaidAmount})`,
-      });
-    }
 
     // Calculate proportions for proportional distribution
     if (distributionStrategy === 'proportional') {
@@ -1083,6 +1124,7 @@ const createCustomerPayment = async (req, res) => {
     let remainingPaymentAmount = amount;
     const payments = [];
     const updatedSales = [];
+    let excessAmount = 0;
 
     for (const saleData of salesWithRemainingBalances) {
       if (remainingPaymentAmount <= 0) break;
@@ -1106,6 +1148,7 @@ const createCustomerPayment = async (req, res) => {
       const payment = await Payment.create({
         paymentNumber: `${paymentNumber}-${payments.length + 1}`,
         sale: saleData.sale._id,
+        customer: customerId, // Also store customer reference directly
         amount: paymentAmount,
         paymentMethod,
         paymentDate,
@@ -1157,6 +1200,39 @@ const createCustomerPayment = async (req, res) => {
       remainingPaymentAmount -= paymentAmount;
     }
 
+    // If there's excess payment amount after paying all invoices
+    if (remainingPaymentAmount > 0) {
+      excessAmount = remainingPaymentAmount;
+      
+      // Create a record for the excess payment
+      const excessPayment = await Payment.create({
+        paymentNumber: `${paymentNumber}-excess`,
+        customer: customerId, // Store customer reference directly
+        amount: excessAmount,
+        paymentMethod,
+        paymentDate,
+        transactionId: `${transactionId}-excess`,
+        status,
+        notes: notes ? `${notes} (Excess payment - advance for future invoices)` : 'Excess payment - advance for future invoices',
+        attachments,
+        user: req.user._id,
+        isPartial: false,
+        currency,
+        isAdvancePayment: true // Flag to indicate this is an advance payment
+      });
+      
+      payments.push(excessPayment);
+      
+      // Create payment journey record for excess payment
+      await PaymentJourney.create({
+        payment: excessPayment._id,
+        user: req.user._id,
+        action: 'created',
+        changes: [],
+        notes: `Excess payment ${excessPayment.paymentNumber} created for customer ${customer.name} for future use`,
+      });
+    }
+
     res.status(201).json({
       status: 'success',
       data: {
@@ -1173,10 +1249,70 @@ const createCustomerPayment = async (req, res) => {
           id: p._id,
           paymentNumber: p.paymentNumber,
           amount: p.amount,
-          sale: p.sale
+          sale: p.sale || null,
+          isAdvancePayment: p.isAdvancePayment || false
         })),
         updatedSales,
+        excessAmount: excessAmount > 0 ? excessAmount : undefined,
         distributionStrategy
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// Helper function to generate payment number
+const generatePaymentNumber = () => {
+  const date = new Date();
+  const year = date.getFullYear().toString().slice(-2);
+  const month = (date.getMonth() + 1).toString().padStart(2, '0');
+  const day = date.getDate().toString().padStart(2, '0');
+  
+  // Use a timestamp to ensure uniqueness
+  const timestamp = Date.now().toString().slice(-6);
+  
+  return `PAY-${year}${month}${day}-${timestamp}`;
+};
+
+// @desc    Get all advance payments for a customer
+// @route   GET /api/payments/customer/:customerId/advance
+// @access  Private
+const getCustomerAdvancePayments = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    
+    // Verify the customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Customer not found',
+      });
+    }
+    
+    // Find all advance payments for this customer
+    const advancePayments = await Payment.find({ 
+      customer: customerId,
+      isAdvancePayment: true
+    }).sort({ paymentDate: -1 });
+    
+    // Calculate total advance amount
+    const totalAdvance = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
+    
+    res.json({
+      status: 'success',
+      results: advancePayments.length,
+      data: {
+        advancePayments,
+        totalAdvance,
+        customer: {
+          id: customer._id,
+          name: customer.name
+        }
       }
     });
   } catch (error) {
@@ -1198,5 +1334,6 @@ module.exports = {
   getPaymentJourney,
   checkOverduePayments,
   getCustomerPaymentAnalytics,
-  createCustomerPayment
+  createCustomerPayment,
+  getCustomerAdvancePayments
 }; 

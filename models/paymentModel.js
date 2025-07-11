@@ -10,8 +10,13 @@ const paymentSchema = new mongoose.Schema(
     },
     sale: {
       type: mongoose.Schema.Types.ObjectId,
-      required: true,
+      required: false, // Changed from true to false to make it optional
       ref: 'Sales',
+    },
+    customer: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true, // Required field to ensure we know which customer made the payment
+      ref: 'Customer',
     },
     amount: {
       type: Number,
@@ -55,6 +60,10 @@ const paymentSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isAdvancePayment: {
+      type: Boolean,
+      default: false,
+    },
     currency: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Currency',
@@ -74,8 +83,9 @@ paymentSchema.virtual('remainingBalance').get(function() {
   return 0;
 });
 
-// Create compound index for faster queries
+// Create compound indices for faster queries
 paymentSchema.index({ sale: 1, paymentDate: -1 });
+paymentSchema.index({ customer: 1, paymentDate: -1 }); // Add index for customer queries
 
 const Payment = mongoose.model('Payment', paymentSchema);
 
