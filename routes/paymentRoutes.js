@@ -10,7 +10,8 @@ const {
   getPaymentStats,
   getPaymentJourney,
   checkOverduePayments,
-  getCustomerPaymentAnalytics
+  getCustomerPaymentAnalytics,
+  createCustomerPayment
 } = require('../controllers/paymentController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 
@@ -24,6 +25,10 @@ router.route('/stats')
 
 router.route('/check-overdue')
   .get(protect, admin, checkOverduePayments);
+
+// New route for creating payment by customer ID
+router.route('/customer')
+  .post(protect, createCustomerPayment);
 
 router.route('/sale/:saleId')
   .get(protect, getPaymentsBySaleId);

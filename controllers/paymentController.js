@@ -1,6 +1,8 @@
-const Payment = require('../models/paymentModel');
 const Sales = require('../models/salesModel');
+const Product = require('../models/productModel');
+const Payment = require('../models/paymentModel');
 const PaymentJourney = require('../models/paymentJourneyModel');
+const Customer = require('../models/customerModel');
 
 // @desc    Create a new payment
 // @route   POST /api/payments
@@ -761,7 +763,6 @@ const getCustomerPaymentAnalytics = async (req, res) => {
     const { startDate, endDate } = req.query;
     
     // Verify the customer exists
-    const Customer = require('../models/customerModel');
     const customer = await Customer.findById(customerId);
     if (!customer) {
       return res.status(404).json({
@@ -986,6 +987,206 @@ const getCustomerPaymentAnalytics = async (req, res) => {
   }
 };
 
+// @desc    Create payment for a customer (distributed across unpaid sales)
+// @route   POST /api/payments/customer
+// @access  Private
+const createCustomerPayment = async (req, res) => {
+  try {
+    const { 
+      customerId, 
+      amount, 
+      paymentMethod, 
+      notes,
+      attachments,
+      currency,
+      status = 'completed',
+      distributionStrategy = 'oldest-first' // Options: 'oldest-first', 'newest-first', 'proportional'
+    } = req.body;
+
+    // Automatically set payment date to current date/time
+    const paymentDate = new Date();
+    
+    // Generate a unique transaction ID
+    const transactionId = `TRX-${Date.now()}-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
+
+    // Verify the customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Customer not found',
+      });
+    }
+
+    // Find all unpaid or partially paid sales for this customer
+    const unpaidSales = await Sales.find({
+      customer: customerId,
+      paymentStatus: { $in: ['unpaid', 'partially_paid', 'overdue'] }
+    }).sort({ createdAt: distributionStrategy === 'newest-first' ? -1 : 1 }); // Sort by date based on strategy
+
+    if (unpaidSales.length === 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'No unpaid sales found for this customer',
+      });
+    }
+
+    // Calculate total unpaid amount across all sales
+    let totalUnpaidAmount = 0;
+    const salesWithRemainingBalances = await Promise.all(unpaidSales.map(async (sale) => {
+      // Get existing payments for this sale
+      const existingPayments = await Payment.find({ sale: sale._id });
+      const totalPaid = existingPayments.reduce((sum, payment) => sum + payment.amount, 0);
+      const remainingBalance = sale.grandTotal - totalPaid;
+      
+      totalUnpaidAmount += remainingBalance;
+      
+      return {
+        sale,
+        remainingBalance,
+        proportion: remainingBalance // Will be converted to actual proportion later
+      };
+    }));
+
+    // Check if payment amount exceeds total unpaid amount
+    if (amount > totalUnpaidAmount) {
+      return res.status(400).json({
+        status: 'fail',
+        message: `Payment amount (${amount}) exceeds total unpaid balance (${totalUnpaidAmount})`,
+      });
+    }
+
+    // Calculate proportions for proportional distribution
+    if (distributionStrategy === 'proportional') {
+      salesWithRemainingBalances.forEach(item => {
+        item.proportion = item.remainingBalance / totalUnpaidAmount;
+      });
+    }
+
+    // Generate payment number
+    const date = new Date(paymentDate);
+    const year = date.getFullYear().toString().slice(-2);
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const day = date.getDate().toString().padStart(2, '0');
+    
+    // Get count of payments for today to generate sequential number
+    const paymentsCount = await Payment.countDocuments({
+      createdAt: {
+        $gte: new Date(date.setHours(0, 0, 0, 0)),
+        $lt: new Date(date.setHours(23, 59, 59, 999)),
+      },
+    });
+    
+    const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
+
+    // Distribute payment across sales based on strategy
+    let remainingPaymentAmount = amount;
+    const payments = [];
+    const updatedSales = [];
+
+    for (const saleData of salesWithRemainingBalances) {
+      if (remainingPaymentAmount <= 0) break;
+      
+      let paymentAmount;
+      
+      if (distributionStrategy === 'proportional') {
+        // Distribute proportionally
+        paymentAmount = Math.min(
+          Math.round((amount * saleData.proportion) * 100) / 100, // Round to 2 decimal places
+          saleData.remainingBalance
+        );
+      } else {
+        // For oldest-first or newest-first strategies
+        paymentAmount = Math.min(remainingPaymentAmount, saleData.remainingBalance);
+      }
+      
+      if (paymentAmount <= 0) continue;
+      
+      // Create payment record for this sale
+      const payment = await Payment.create({
+        paymentNumber: `${paymentNumber}-${payments.length + 1}`,
+        sale: saleData.sale._id,
+        amount: paymentAmount,
+        paymentMethod,
+        paymentDate,
+        transactionId: `${transactionId}-${payments.length + 1}`,
+        status,
+        notes: notes ? `${notes} (Part of customer payment distribution)` : 'Part of customer payment distribution',
+        attachments,
+        user: req.user._id,
+        isPartial: paymentAmount < saleData.remainingBalance,
+        currency
+      });
+      
+      payments.push(payment);
+      
+      // Create payment journey record
+      await PaymentJourney.create({
+        payment: payment._id,
+        user: req.user._id,
+        action: 'created',
+        changes: [],
+        notes: `Payment ${payment.paymentNumber} created for invoice ${saleData.sale.invoiceNumber} as part of customer payment distribution`,
+      });
+      
+      // Update sale payment status
+      const newRemainingBalance = saleData.remainingBalance - paymentAmount;
+      let paymentStatus = 'unpaid';
+      
+      if (newRemainingBalance <= 0) {
+        paymentStatus = 'paid';
+      } else {
+        paymentStatus = 'partially_paid';
+        
+        // Check if payment is overdue
+        const today = new Date();
+        if (saleData.sale.dueDate && today > saleData.sale.dueDate) {
+          paymentStatus = 'overdue';
+        }
+      }
+      
+      await Sales.findByIdAndUpdate(saleData.sale._id, { paymentStatus });
+      updatedSales.push({
+        saleId: saleData.sale._id,
+        invoiceNumber: saleData.sale.invoiceNumber,
+        amountPaid: paymentAmount,
+        remainingBalance: newRemainingBalance,
+        newStatus: paymentStatus
+      });
+      
+      remainingPaymentAmount -= paymentAmount;
+    }
+
+    res.status(201).json({
+      status: 'success',
+      data: {
+        customer: {
+          id: customer._id,
+          name: customer.name
+        },
+        totalPaid: amount,
+        paymentNumber,
+        transactionId,
+        paymentDate,
+        paymentStatus: status,
+        payments: payments.map(p => ({
+          id: p._id,
+          paymentNumber: p.paymentNumber,
+          amount: p.amount,
+          sale: p.sale
+        })),
+        updatedSales,
+        distributionStrategy
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   createPayment,
   getPayments,
@@ -996,5 +1197,6 @@ module.exports = {
   getPaymentStats,
   getPaymentJourney,
   checkOverduePayments,
-  getCustomerPaymentAnalytics
+  getCustomerPaymentAnalytics,
+  createCustomerPayment
 }; 
