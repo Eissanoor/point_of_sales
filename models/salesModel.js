@@ -60,6 +60,19 @@ const salesSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    paymentStatus: {
+      type: String,
+      enum: ['unpaid', 'partially_paid', 'paid', 'overdue'],
+      default: 'unpaid',
+    },
+    dueDate: {
+      type: Date,
+      default: function() {
+        const date = new Date();
+        date.setDate(date.getDate() + 30); // Default 30 days due date
+        return date;
+      },
+    },
     user: {
       type: mongoose.Schema.Types.ObjectId,
       required: true,

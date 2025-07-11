@@ -41,6 +41,8 @@ const createSale = async (req, res) => {
       discount,
       tax,
       grandTotal,
+      paymentStatus: 'unpaid',
+      dueDate: req.body.dueDate || undefined, // Use provided dueDate or default
       user: req.user._id, // Assuming req.user is set by auth middleware
     });
 
@@ -166,9 +168,30 @@ const getSaleById = async (req, res) => {
       .populate('user', 'name');
 
     if (sale) {
+      // Get payment information for this sale
+      const Payment = require('../models/paymentModel');
+      const payments = await Payment.find({ sale: req.params.id })
+        .sort({ paymentDate: -1 })
+        .populate('user', 'name')
+        .populate('currency', 'name code symbol');
+      
+      // Calculate payment summary
+      const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
+      const remainingBalance = sale.grandTotal - totalPaid;
+      
       res.json({
         status: 'success',
-        data: sale,
+        data: {
+          ...sale._doc,
+          payments: {
+            records: payments,
+            summary: {
+              totalPaid,
+              remainingBalance,
+              paymentPercentage: (totalPaid / sale.grandTotal * 100).toFixed(2)
+            }
+          }
+        },
       });
     } else {
       res.status(404).json({
