@@ -1373,6 +1373,230 @@ const getCustomerAdvancePayments = async (req, res) => {
   }
 };
 
+// @desc    Get payment journey by customer ID
+// @route   GET /api/payments/customer/:customerId/journey
+// @access  Private
+const getPaymentJourneyByCustomerId = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { startDate, endDate } = req.query;
+    
+    // Verify the customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Customer not found',
+      });
+    }
+    
+    // Build date filter if provided
+    let dateFilter = {};
+    if (startDate && endDate) {
+      dateFilter = {
+        paymentDate: {
+          $gte: new Date(startDate),
+          $lte: new Date(endDate),
+        }
+      };
+    }
+    
+    // Get all sales for this customer
+    const sales = await Sales.find({ customer: customerId })
+      .sort({ createdAt: -1 });
+    
+    // Get all payments for this customer (both regular and advance)
+    const payments = await Payment.find({
+      $or: [
+        { customer: customerId, isAdvancePayment: true },
+        { sale: { $in: sales.map(sale => sale._id) } }
+      ],
+      ...dateFilter
+    })
+    .populate('sale', 'invoiceNumber grandTotal dueDate createdAt items')
+    .populate('user', 'name email')
+    .populate('currency', 'name code symbol')
+    .sort({ paymentDate: 1 });
+    
+    // Get all payment journeys for these payments
+    const paymentIds = payments.map(payment => payment._id);
+    const paymentJourneys = await PaymentJourney.find({
+      payment: { $in: paymentIds }
+    })
+    .populate('user', 'name email')
+    .sort({ createdAt: 1 });
+    
+    // Group journeys by payment
+    const journeysByPayment = {};
+    paymentJourneys.forEach(journey => {
+      if (!journeysByPayment[journey.payment.toString()]) {
+        journeysByPayment[journey.payment.toString()] = [];
+      }
+      journeysByPayment[journey.payment.toString()].push(journey);
+    });
+    
+    // Calculate running balance over time
+    let runningBalance = 0;
+    const salesMap = {};
+    sales.forEach(sale => {
+      salesMap[sale._id.toString()] = sale;
+      runningBalance += sale.grandTotal;
+    });
+    
+    // Create timeline of all transactions
+    const timeline = [];
+    
+    // Add sales to timeline
+    sales.forEach(sale => {
+      timeline.push({
+        type: 'invoice',
+        date: sale.createdAt,
+        invoiceNumber: sale.invoiceNumber,
+        amount: sale.grandTotal,
+        dueDate: sale.dueDate,
+        saleId: sale._id,
+        items: sale.items,
+        balanceAfter: null, // Will calculate this after sorting
+        description: `Invoice created: ${sale.invoiceNumber}`
+      });
+    });
+    
+    // Add payments to timeline with enriched data
+    payments.forEach(payment => {
+      const journeys = journeysByPayment[payment._id.toString()] || [];
+      const creationJourney = journeys.find(j => j.action === 'created');
+      
+      timeline.push({
+        type: 'payment',
+        date: payment.paymentDate,
+        paymentNumber: payment.paymentNumber,
+        amount: payment.amount,
+        paymentMethod: payment.paymentMethod,
+        status: payment.status,
+        paymentId: payment._id,
+        isAdvancePayment: payment.isAdvancePayment || false,
+        sale: payment.sale ? {
+          id: payment.sale._id,
+          invoiceNumber: payment.sale.invoiceNumber,
+          total: payment.sale.grandTotal
+        } : null,
+        createdBy: creationJourney?.user?.name || payment.user?.name || 'System',
+        journeys: journeys.map(j => ({
+          action: j.action,
+          date: j.createdAt,
+          user: j.user?.name || 'System',
+          notes: j.notes,
+          changes: j.changes
+        })),
+        balanceAfter: null, // Will calculate this after sorting
+        description: payment.isAdvancePayment ? 
+          `Advance payment: ${payment.paymentNumber}` : 
+          `Payment: ${payment.paymentNumber} for invoice ${payment.sale?.invoiceNumber || 'N/A'}`
+      });
+    });
+    
+    // Sort timeline by date
+    timeline.sort((a, b) => new Date(a.date) - new Date(b.date));
+    
+    // Calculate running balance for each event
+    let currentBalance = 0;
+    timeline.forEach(event => {
+      if (event.type === 'invoice') {
+        currentBalance += event.amount;
+      } else if (event.type === 'payment') {
+        currentBalance -= event.amount;
+      }
+      event.balanceAfter = currentBalance;
+    });
+    
+    // Calculate payment statistics
+    const totalInvoiced = sales.reduce((sum, sale) => sum + sale.grandTotal, 0);
+    const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
+    const currentOutstandingBalance = currentBalance;
+    
+    // Calculate on-time vs late payments
+    const onTimePayments = [];
+    const latePayments = [];
+    
+    payments.forEach(payment => {
+      if (!payment.sale || !payment.sale.dueDate) return;
+      
+      const paymentDate = new Date(payment.paymentDate);
+      const dueDate = new Date(payment.sale.dueDate);
+      
+      if (paymentDate <= dueDate) {
+        onTimePayments.push(payment);
+      } else {
+        latePayments.push(payment);
+      }
+    });
+    
+    // Calculate average days to payment
+    const daysToPayment = [];
+    payments.forEach(payment => {
+      if (!payment.sale || !payment.sale.createdAt) return;
+      
+      const invoiceDate = new Date(payment.sale.createdAt);
+      const paymentDate = new Date(payment.paymentDate);
+      const days = Math.floor((paymentDate - invoiceDate) / (1000 * 60 * 60 * 24));
+      
+      daysToPayment.push(days);
+    });
+    
+    const avgDaysToPayment = daysToPayment.length > 0 ? 
+      daysToPayment.reduce((sum, days) => sum + days, 0) / daysToPayment.length : 0;
+    
+    // Calculate payment method breakdown
+    const paymentMethodBreakdown = {};
+    payments.forEach(payment => {
+      if (!paymentMethodBreakdown[payment.paymentMethod]) {
+        paymentMethodBreakdown[payment.paymentMethod] = {
+          count: 0,
+          amount: 0
+        };
+      }
+      paymentMethodBreakdown[payment.paymentMethod].count++;
+      paymentMethodBreakdown[payment.paymentMethod].amount += payment.amount;
+    });
+    
+    // Find advance payments
+    const advancePayments = payments.filter(payment => payment.isAdvancePayment);
+    const totalAdvanceAmount = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
+    
+    res.json({
+      status: 'success',
+      data: {
+        customer: {
+          _id: customer._id,
+          name: customer.name,
+          email: customer.email,
+          phoneNumber: customer.phoneNumber
+        },
+        summary: {
+          totalInvoiced,
+          totalPaid,
+          currentOutstandingBalance,
+          totalSales: sales.length,
+          totalPayments: payments.length,
+          totalAdvancePayments: advancePayments.length,
+          totalAdvanceAmount,
+          paymentCompletion: totalInvoiced > 0 ? ((totalPaid / totalInvoiced) * 100).toFixed(2) : 100,
+          onTimePayments: onTimePayments.length,
+          latePayments: latePayments.length,
+          avgDaysToPayment: avgDaysToPayment.toFixed(1),
+          paymentMethodBreakdown
+        },
+        timeline
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   createPayment,
   getPayments,
@@ -1385,5 +1609,6 @@ module.exports = {
   checkOverduePayments,
   getCustomerPaymentAnalytics,
   createCustomerPayment,
-  getCustomerAdvancePayments
+  getCustomerAdvancePayments,
+  getPaymentJourneyByCustomerId
 }; 

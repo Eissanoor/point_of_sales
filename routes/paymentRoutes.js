@@ -5,31 +5,40 @@ const {
   getPayments, 
   getPaymentById, 
   updatePayment, 
-  deletePayment,
+  deletePayment, 
   getPaymentsBySaleId,
   getPaymentStats,
   getPaymentJourney,
   checkOverduePayments,
   getCustomerPaymentAnalytics,
   createCustomerPayment,
-  getCustomerAdvancePayments
+  getCustomerAdvancePayments,
+  getPaymentJourneyByCustomerId
 } = require('../controllers/paymentController');
-const { protect, admin } = require('../middlewares/authMiddleware');
+const { protect } = require('../middlewares/authMiddleware');
 
-// Routes for payments
+// Routes that don't need a specific ID
 router.route('/')
-  .post(protect, createPayment)
-  .get(protect, getPayments);
+  .get(protect, getPayments)
+  .post(protect, createPayment);
 
 router.route('/stats')
   .get(protect, getPaymentStats);
 
 router.route('/check-overdue')
-  .get(protect, admin, checkOverduePayments);
+  .get(protect, checkOverduePayments);
 
-// New route for creating payment by customer ID
 router.route('/customer')
   .post(protect, createCustomerPayment);
+
+// Routes that need a specific ID
+router.route('/:id')
+  .get(protect, getPaymentById)
+  .put(protect, updatePayment)
+  .delete(protect, deletePayment);
+
+router.route('/:id/journey')
+  .get(protect, getPaymentJourney);
 
 router.route('/sale/:saleId')
   .get(protect, getPaymentsBySaleId);
@@ -37,16 +46,11 @@ router.route('/sale/:saleId')
 router.route('/customer/:customerId/analytics')
   .get(protect, getCustomerPaymentAnalytics);
 
-// New route for getting customer advance payments
 router.route('/customer/:customerId/advance')
   .get(protect, getCustomerAdvancePayments);
 
-router.route('/:id')
-  .get(protect, getPaymentById)
-  .put(protect, updatePayment)
-  .delete(protect, admin, deletePayment);
-
-router.route('/:id/journey')
-  .get(protect, getPaymentJourney);
+// Add new route for customer payment journey
+router.route('/customer/:customerId/journey')
+  .get(protect, getPaymentJourneyByCustomerId);
 
 module.exports = router; 
