@@ -35,14 +35,9 @@ const createPayment = async (req, res) => {
     const existingPayments = await Payment.find({ sale });
     const totalPaid = existingPayments.reduce((sum, payment) => sum + payment.amount, 0);
     
-    // Check if payment amount is valid
-    if (totalPaid + amount > saleRecord.grandTotal) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Payment amount exceeds the remaining balance',
-      });
-    }
-
+    // Calculate remaining balance
+    const remainingBalance = saleRecord.grandTotal - totalPaid;
+    
     // Generate payment number
     const date = new Date(paymentDate || Date.now());
     const year = date.getFullYear().toString().slice(-2);
@@ -58,13 +53,22 @@ const createPayment = async (req, res) => {
     });
     
     const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
+    let excessAmount = 0;
+    let regularPaymentAmount = amount;
+    let advancePayment = null;
 
-    // Create new payment
+    // Check if payment amount exceeds remaining balance
+    if (amount > remainingBalance) {
+      excessAmount = amount - remainingBalance;
+      regularPaymentAmount = remainingBalance;
+    }
+
+    // Create new payment for the invoice (up to the remaining balance)
     const payment = await Payment.create({
       paymentNumber,
       sale,
-      customer: saleRecord.customer, // Add customer reference from the sale
-      amount,
+      customer: saleRecord.customer,
+      amount: regularPaymentAmount,
       paymentMethod,
       paymentDate: paymentDate || Date.now(),
       transactionId,
@@ -72,49 +76,66 @@ const createPayment = async (req, res) => {
       notes,
       attachments,
       user: req.user._id,
-      isPartial: isPartial || (totalPaid + amount < saleRecord.grandTotal),
+      isPartial: false, // Since we're handling excess separately, this payment completes the invoice
       currency
     });
 
-    if (payment) {
-      // Create payment journey record
+    // Create payment journey record
+    await PaymentJourney.create({
+      payment: payment._id,
+      user: req.user._id,
+      action: 'created',
+      changes: [],
+      notes: `Payment ${paymentNumber} created for invoice ${saleRecord.invoiceNumber}`,
+    });
+    
+    // Update sale payment status to paid
+    await Sales.findByIdAndUpdate(sale, { paymentStatus: 'paid' });
+    
+    // If there's excess payment, create an advance payment record
+    if (excessAmount > 0) {
+      const advancePaymentNumber = `${paymentNumber}-ADV`;
+      
+      advancePayment = await Payment.create({
+        paymentNumber: advancePaymentNumber,
+        customer: saleRecord.customer,
+        amount: excessAmount,
+        paymentMethod,
+        paymentDate: paymentDate || Date.now(),
+        transactionId: transactionId ? `${transactionId}-ADV` : undefined,
+        status: status || 'completed',
+        notes: notes ? `${notes} (Excess payment - advance for future invoices)` : 'Excess payment - advance for future invoices',
+        attachments,
+        user: req.user._id,
+        isPartial: false,
+        currency,
+        isAdvancePayment: true
+      });
+      
+      // Create payment journey record for advance payment
       await PaymentJourney.create({
-        payment: payment._id,
+        payment: advancePayment._id,
         user: req.user._id,
         action: 'created',
         changes: [],
-        notes: `Payment ${paymentNumber} created for invoice ${saleRecord.invoiceNumber}`,
-      });
-      
-      // Update sale payment status
-      const newTotalPaid = totalPaid + amount;
-      let paymentStatus = 'unpaid';
-      
-      if (newTotalPaid >= saleRecord.grandTotal) {
-        paymentStatus = 'paid';
-      } else if (newTotalPaid > 0) {
-        paymentStatus = 'partially_paid';
-      }
-      
-      // Check if payment is overdue
-      const today = new Date();
-      if (saleRecord.dueDate && today > saleRecord.dueDate && newTotalPaid < saleRecord.grandTotal) {
-        paymentStatus = 'overdue';
-      }
-      
-      await Sales.findByIdAndUpdate(sale, { paymentStatus });
-      
-      res.status(201).json({
-        status: 'success',
-        data: payment,
-        remainingBalance: saleRecord.grandTotal - newTotalPaid
-      });
-    } else {
-      res.status(400).json({
-        status: 'fail',
-        message: 'Invalid payment data',
+        notes: `Excess payment ${advancePaymentNumber} created for customer ${saleRecord.customer.name || saleRecord.customer} for future use`,
       });
     }
+    
+    res.status(201).json({
+      status: 'success',
+      data: {
+        payment,
+        advancePayment,
+        excessAmount,
+        originalAmount: amount,
+        invoiceAmount: regularPaymentAmount,
+        remainingBalance: 0, // Since we've fully paid the invoice
+        message: excessAmount > 0 ? 
+          `Payment of ${regularPaymentAmount} applied to invoice. Excess amount of ${excessAmount} recorded as advance payment.` : 
+          `Payment of ${regularPaymentAmount} completed the invoice.`
+      }
+    });
   } catch (error) {
     res.status(500).json({
       status: 'error',
@@ -795,6 +816,15 @@ const getCustomerPaymentAnalytics = async (req, res) => {
       sale: { $in: saleIds }
     }).populate('sale', 'invoiceNumber grandTotal dueDate createdAt');
     
+    // Get all advance payments for this customer
+    const advancePayments = await Payment.find({
+      customer: customerId,
+      isAdvancePayment: true,
+      ...dateFilter
+    });
+    
+    const totalAdvanceAmount = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
+    
     // Group sales by payment status
     const today = new Date();
     
@@ -953,6 +983,19 @@ const getCustomerPaymentAnalytics = async (req, res) => {
       { $sort: { totalAmount: -1 } }
     ]);
     
+    // Get recent advance payments
+    const recentAdvancePayments = advancePayments
+      .sort((a, b) => new Date(b.paymentDate) - new Date(a.paymentDate))
+      .slice(0, 5)
+      .map(payment => ({
+        _id: payment._id,
+        paymentNumber: payment.paymentNumber,
+        amount: payment.amount,
+        paymentDate: payment.paymentDate,
+        paymentMethod: payment.paymentMethod,
+        notes: payment.notes
+      }));
+    
     res.json({
       status: 'success',
       data: {
@@ -972,12 +1015,19 @@ const getCustomerPaymentAnalytics = async (req, res) => {
           paidSales: paidSales.length,
           partiallyPaidSales: partiallyPaidSales.length,
           unpaidSales: unpaidSales.length,
-          overdueSales: overdueSales.length
+          overdueSales: overdueSales.length,
+          totalAdvanceAmount,
+          advancePaymentsCount: advancePayments.length
         },
         aging: agingBuckets,
         trends: paymentTrends,
         paymentMethods: paymentMethodBreakdown,
-        sales: salesAnalytics
+        sales: salesAnalytics,
+        advancePayments: {
+          total: totalAdvanceAmount,
+          count: advancePayments.length,
+          recent: recentAdvancePayments
+        }
       }
     });
   } catch (error) {
