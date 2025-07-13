@@ -1597,6 +1597,164 @@ const getPaymentJourneyByCustomerId = async (req, res) => {
   }
 };
 
+// @desc    Get simplified customer transaction history
+// @route   GET /api/payments/customer/:customerId/transactions
+// @access  Private
+const getCustomerTransactionHistory = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { startDate, endDate } = req.query;
+    
+    // Verify the customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Customer not found',
+      });
+    }
+    
+    // Build date filter if provided
+    let dateFilter = {};
+    if (startDate && endDate) {
+      dateFilter = {
+        $or: [
+          { createdAt: { $gte: new Date(startDate), $lte: new Date(endDate) } }, // For sales
+          { paymentDate: { $gte: new Date(startDate), $lte: new Date(endDate) } } // For payments
+        ]
+      };
+    }
+    
+    // Get all sales for this customer
+    const sales = await Sales.find({ 
+      customer: customerId,
+      ...dateFilter
+    }).select('invoiceNumber grandTotal createdAt dueDate notes paymentStatus');
+    
+    // Get all payments for this customer
+    const payments = await Payment.find({
+      $or: [
+        { customer: customerId, isAdvancePayment: true },
+        { sale: { $in: sales.map(sale => sale._id) } }
+      ],
+      ...dateFilter
+    })
+    .select('paymentNumber amount paymentDate paymentMethod notes sale isAdvancePayment')
+    .populate('sale', 'invoiceNumber');
+    
+    // Create transactions array combining both sales and payments
+    const transactions = [];
+    
+    // Add sales to transactions
+    sales.forEach(sale => {
+      transactions.push({
+        type: 'invoice',
+        date: sale.createdAt,
+        reference: sale.invoiceNumber,
+        amount: sale.grandTotal,
+        notes: `Invoice created: ${sale.invoiceNumber}`,
+        dueDate: sale.dueDate,
+        status: sale.paymentStatus
+      });
+    });
+    
+    // Add payments to transactions
+    payments.forEach(payment => {
+      transactions.push({
+        type: 'payment',
+        date: payment.paymentDate,
+        reference: payment.paymentNumber,
+        amount: payment.amount,
+        notes: payment.notes || (payment.isAdvancePayment ? 
+          'Advance payment' : 
+          `Payment for invoice ${payment.sale?.invoiceNumber || 'Unknown'}`),
+        paymentMethod: payment.paymentMethod,
+        invoiceReference: payment.sale?.invoiceNumber || 'N/A',
+        isAdvance: payment.isAdvancePayment || false
+      });
+    });
+    
+    // Sort transactions by date
+    transactions.sort((a, b) => new Date(a.date) - new Date(b.date));
+    
+    // Calculate running balance for each transaction
+    let runningBalance = 0;
+    const transactionsWithBalance = transactions.map(transaction => {
+      if (transaction.type === 'invoice') {
+        runningBalance += transaction.amount;
+      } else if (transaction.type === 'payment') {
+        runningBalance -= transaction.amount;
+      }
+      
+      return {
+        ...transaction,
+        balanceAfter: runningBalance
+      };
+    });
+    
+    // Calculate summary
+    const totalInvoiced = sales.reduce((sum, sale) => sum + sale.grandTotal, 0);
+    const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
+    const totalRemaining = totalInvoiced - totalPaid;
+    
+    // Calculate additional financial insights
+    const paidPercentage = totalInvoiced > 0 ? ((totalPaid / totalInvoiced) * 100).toFixed(2) : 0;
+    
+    // Calculate overdue amount
+    const today = new Date();
+    const overdueInvoices = sales.filter(sale => 
+      sale.dueDate && new Date(sale.dueDate) < today && 
+      ['unpaid', 'partially_paid', 'overdue'].includes(sale.paymentStatus)
+    );
+    
+    const totalOverdue = overdueInvoices.reduce((sum, sale) => sum + sale.grandTotal, 0);
+    
+    // Count invoices by payment status
+    const invoiceStatusCounts = {
+      paid: sales.filter(sale => sale.paymentStatus === 'paid').length,
+      partially_paid: sales.filter(sale => sale.paymentStatus === 'partially_paid').length,
+      unpaid: sales.filter(sale => sale.paymentStatus === 'unpaid').length,
+      overdue: sales.filter(sale => sale.paymentStatus === 'overdue').length
+    };
+    
+    // Get advance payments
+    const advancePayments = payments.filter(payment => payment.isAdvancePayment);
+    const totalAdvance = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
+    
+    res.json({
+      status: 'success',
+      data: {
+        customer: {
+          id: customer._id,
+          name: customer.name,
+          email: customer.email,
+          phoneNumber: customer.phoneNumber
+        },
+        financialSummary: {
+          totalInvoiced,
+          totalPaid,
+          totalRemaining,
+          paidPercentage,
+          totalOverdue,
+          totalAdvance
+        },
+        transactionSummary: {
+          totalTransactions: transactions.length,
+          invoiceCount: sales.length,
+          paymentCount: payments.length,
+          invoiceStatusCounts
+        },
+        transactions: transactionsWithBalance
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   createPayment,
   getPayments,
@@ -1610,5 +1768,6 @@ module.exports = {
   getCustomerPaymentAnalytics,
   createCustomerPayment,
   getCustomerAdvancePayments,
-  getPaymentJourneyByCustomerId
+  getPaymentJourneyByCustomerId,
+  getCustomerTransactionHistory
 }; 

@@ -13,7 +13,8 @@ const {
   getCustomerPaymentAnalytics,
   createCustomerPayment,
   getCustomerAdvancePayments,
-  getPaymentJourneyByCustomerId
+  getPaymentJourneyByCustomerId,
+  getCustomerTransactionHistory
 } = require('../controllers/paymentController');
 const { protect } = require('../middlewares/authMiddleware');
 
@@ -49,8 +50,12 @@ router.route('/customer/:customerId/analytics')
 router.route('/customer/:customerId/advance')
   .get(protect, getCustomerAdvancePayments);
 
-// Add new route for customer payment journey
+// Routes for customer payment journey
 router.route('/customer/:customerId/journey')
   .get(protect, getPaymentJourneyByCustomerId);
+
+// Route for simplified customer transaction history
+router.route('/customer/:customerId/transactions')
+  .get(protect, getCustomerTransactionHistory);
 
 module.exports = router; 
