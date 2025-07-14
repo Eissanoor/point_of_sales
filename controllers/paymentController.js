@@ -1618,19 +1618,20 @@ const getCustomerTransactionHistory = async (req, res) => {
     let dateFilter = {};
     if (startDate && endDate) {
       dateFilter = {
-        paymentDate: {
-          $gte: new Date(startDate),
-          $lte: new Date(endDate)
-        }
+        $or: [
+          { createdAt: { $gte: new Date(startDate), $lte: new Date(endDate) } }, // For sales
+          { paymentDate: { $gte: new Date(startDate), $lte: new Date(endDate) } } // For payments
+        ]
       };
     }
     
-    // Get all sales for this customer (needed for calculations and references)
+    // Get all sales for this customer
     const sales = await Sales.find({ 
-      customer: customerId
+      customer: customerId,
+      ...dateFilter
     }).select('invoiceNumber grandTotal createdAt dueDate notes paymentStatus');
     
-    // Get all payments for this customer
+    // Get all payments for this customer, sorted by date
     const payments = await Payment.find({
       $or: [
         { customer: customerId, isAdvancePayment: true },
@@ -1638,160 +1639,104 @@ const getCustomerTransactionHistory = async (req, res) => {
       ],
       ...dateFilter
     })
-    .select('paymentNumber amount paymentDate paymentMethod notes sale isAdvancePayment transactionId')
-    .populate('sale', 'invoiceNumber grandTotal');
+    .select('paymentNumber amount paymentDate paymentMethod notes sale isAdvancePayment isAdvanceUsed')
+    .populate('sale', 'invoiceNumber grandTotal')
+    .sort({ paymentDate: 1 }); // Sort by payment date ascending
     
-    // Create a more robust grouping key
-    const getGroupKey = (payment) => {
-      // If payment has a transactionId, use that (but remove any suffix like -1, -2, etc.)
-      if (payment.transactionId) {
-        // Extract the base transaction ID without any numeric suffix
-        const baseTransactionId = payment.transactionId.split('-').filter(part => 
-          !part.match(/^\d+$/) && part !== 'excess' && part !== 'ADV'
-        ).join('-');
-        return baseTransactionId;
-      }
-      
-      // Extract the base payment number (without the suffix)
-      const paymentParts = payment.paymentNumber.split('-');
-      
-      // If it's a standard format like PAY-YYMMDD-NNN, use the first 3 parts
-      if (paymentParts.length >= 3) {
-        return paymentParts.slice(0, 3).join('-');
-      }
-      
-      // Fallback to payment date
-      return payment.paymentDate.toISOString().split('T')[0];
-    };
-    
-    // Group payments by transaction ID or date to identify related payments
-    const paymentGroups = {};
-    payments.forEach(payment => {
-      const groupKey = getGroupKey(payment);
-      
-      if (!paymentGroups[groupKey]) {
-        paymentGroups[groupKey] = [];
-      }
-      paymentGroups[groupKey].push(payment);
-    });
-    
-    // Create transactions array with only payment transactions
+    // Create transactions array for payment-related transactions only
     const transactions = [];
     
-    // Track excess payments by sale
-    const excessPaymentsBySale = {};
+    // Create a map of sales by ID for quick lookup
+    const salesMap = {};
+    sales.forEach(sale => {
+      salesMap[sale._id.toString()] = sale;
+    });
     
-    // Process each payment group
-    Object.values(paymentGroups).forEach(paymentGroup => {
-      // Skip empty groups
-      if (paymentGroup.length === 0) return;
-      
-      // Sort payments by date
-      paymentGroup.sort((a, b) => new Date(a.paymentDate) - new Date(b.paymentDate));
-      
-      // Group payments by sale within this payment group
-      const paymentsBySale = {};
-      const advancePayments = [];
-      
-      // First, separate advance payments and organize regular payments by sale
-      paymentGroup.forEach(payment => {
-        if (payment.isAdvancePayment) {
-          advancePayments.push(payment);
-        } else if (payment.sale) {
-          const saleId = payment.sale._id.toString();
-          if (!paymentsBySale[saleId]) {
-            paymentsBySale[saleId] = [];
-          }
-          paymentsBySale[saleId].push(payment);
-        }
-      });
-      
-      // For each sale, create a single consolidated transaction
-      Object.entries(paymentsBySale).forEach(([saleId, salePayments]) => {
-        // Get the sale information from the first payment
-        const sale = salePayments[0].sale;
-        const saleTotal = sale.grandTotal;
+    // Track running balances for each sale
+    const saleBalances = {};
+    sales.forEach(sale => {
+      saleBalances[sale._id.toString()] = sale.grandTotal;
+    });
+    
+    // Track which sales we've already processed
+    const processedSales = new Set();
+    
+    // First, handle the first payment for each sale
+    payments.forEach(payment => {
+      if (payment.sale) {
+        const saleId = payment.sale._id.toString();
         
-        // Calculate the total amount paid in this transaction group for this sale
-        const totalPaidInGroup = salePayments.reduce((sum, p) => sum + p.amount, 0);
-        
-        // Find all payments for this sale up to and including this payment group
-        const allSalePayments = payments.filter(p => 
-          p.sale && 
-          p.sale._id.toString() === saleId &&
-          new Date(p.paymentDate) <= new Date(salePayments[salePayments.length - 1].paymentDate)
-        );
-        
-        const totalPaidForSale = allSalePayments.reduce((sum, p) => sum + p.amount, 0);
-        const remainingBalance = saleTotal - totalPaidForSale;
-        
-        // Check for excess payment
-        const isExcessPayment = remainingBalance < 0;
-        
-        // Track excess payment amount for this sale
-        if (isExcessPayment) {
-          const excessAmount = Math.abs(remainingBalance);
-          if (!excessPaymentsBySale[saleId]) {
-            excessPaymentsBySale[saleId] = excessAmount;
-          } else {
-            excessPaymentsBySale[saleId] += excessAmount;
-          }
+        // Skip if we've already processed this sale
+        if (processedSales.has(saleId)) {
+          return;
         }
         
-        // Use the first payment's details as the base for the transaction
-        const basePayment = salePayments[0];
+        processedSales.add(saleId);
         
-        // Create transaction object
-        const transaction = {
+        const relatedSale = salesMap[saleId];
+        if (relatedSale) {
+          // Get current balance for this sale
+          const currentBalance = saleBalances[saleId] || 0;
+          
+          // Calculate how much of this payment applies to the sale
+          const appliedAmount = Math.min(payment.amount, currentBalance);
+          
+          // Update the sale balance
+          saleBalances[saleId] = Math.max(0, currentBalance - payment.amount);
+          
+          // Create transaction for this payment
+          transactions.push({
+            type: 'payment',
+            date: payment.paymentDate,
+            reference: payment.paymentNumber,
+            amount: payment.amount,
+            notes: payment.notes || `${saleBalances[saleId]} is remaining (Part of customer payment distribution)`,
+            paymentMethod: payment.paymentMethod,
+            invoiceReference: relatedSale.invoiceNumber,
+            remainingBalance: saleBalances[saleId],
+            balanceAfter: saleBalances[saleId]
+          });
+        }
+      }
+    });
+    
+    // Then, handle pure advance payments or excess payments
+    payments.forEach(payment => {
+      if (payment.isAdvancePayment && !payment.sale) {
+        // This is a pure advance payment
+        transactions.push({
           type: 'payment',
-          date: basePayment.paymentDate,
-          reference: basePayment.paymentNumber.split('-').slice(0, 3).join('-'), // Use base payment number
-          amount: totalPaidInGroup,
-          notes: basePayment.notes || `Payment for invoice ${sale.invoiceNumber}`,
-          paymentMethod: basePayment.paymentMethod,
-          invoiceReference: sale.invoiceNumber,
-          invoiceAmount: saleTotal,
-          remainingBalance: remainingBalance,
-          isAdvance: false,
-          isExcessPayment: isExcessPayment,
-          balanceAfter: remainingBalance
-        };
+          date: payment.paymentDate,
+          reference: payment.paymentNumber,
+          amount: payment.amount,
+          notes: payment.notes || `${payment.amount} is extra (Excess payment - advance for future invoices)`,
+          paymentMethod: payment.paymentMethod,
+          remainingBalance: -payment.amount, // Show as negative for advance
+          balanceAfter: 0
+        });
+      } else if (payment.sale) {
+        const saleId = payment.sale._id.toString();
+        const relatedSale = salesMap[saleId];
         
-        // Add additional information for excess payments
-        if (isExcessPayment) {
-          transaction.excessAmount = Math.abs(remainingBalance);
-          transaction.notes = transaction.notes + (transaction.notes ? ' ' : '') + 
-            `(Excess payment: ${transaction.excessAmount} available as credit)`;
+        if (relatedSale) {
+          // Calculate excess amount
+          const excessAmount = payment.amount - relatedSale.grandTotal;
+          
+          // Only add excess payments
+          if (excessAmount > 0) {
+            // Create transaction for the excess portion
+            transactions.push({
+              type: 'payment',
+              date: payment.paymentDate,
+              reference: `${payment.paymentNumber}-excess`,
+              amount: excessAmount,
+              notes: payment.notes || `${excessAmount} is extra (Excess payment - advance for future invoices)`,
+              paymentMethod: payment.paymentMethod,
+              remainingBalance: -excessAmount, // Show as negative for advance
+              balanceAfter: 0
+            });
+          }
         }
-        
-        transactions.push(transaction);
-      });
-      
-      // Handle advance payments - consolidate into a single transaction if multiple exist
-      if (advancePayments.length > 0) {
-        // Use the first advance payment as the base
-        const baseAdvancePayment = advancePayments[0];
-        
-        // Calculate total advance amount in this group
-        const totalAdvanceAmount = advancePayments.reduce((sum, p) => sum + p.amount, 0);
-        
-        const transaction = {
-          type: 'payment',
-          date: baseAdvancePayment.paymentDate,
-          reference: baseAdvancePayment.paymentNumber.split('-').slice(0, 3).join('-'), // Use base payment number
-          amount: totalAdvanceAmount,
-          notes: baseAdvancePayment.notes || 'Advance payment',
-          paymentMethod: baseAdvancePayment.paymentMethod,
-          invoiceReference: 'N/A',
-          invoiceAmount: 0,
-          remainingBalance: -totalAdvanceAmount,
-          isAdvance: true,
-          isExcessPayment: true,
-          balanceAfter: -totalAdvanceAmount,
-          excessAmount: totalAdvanceAmount
-        };
-        
-        transactions.push(transaction);
       }
     });
     
@@ -1801,15 +1746,7 @@ const getCustomerTransactionHistory = async (req, res) => {
     // Calculate summary
     const totalInvoiced = sales.reduce((sum, sale) => sum + sale.grandTotal, 0);
     const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
-    const totalRemaining = Math.max(0, totalInvoiced - totalPaid);
-    
-    // Calculate total excess payments (customer credit)
-    const totalExcessPayments = Object.values(excessPaymentsBySale).reduce((sum, amount) => sum + amount, 0);
-    const advancePayments = payments.filter(payment => payment.isAdvancePayment);
-    const totalAdvanceAmount = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
-    
-    // Total customer credit is advance payments plus excess payments
-    const totalCustomerCredit = totalAdvanceAmount + totalExcessPayments;
+    const totalRemaining = totalInvoiced - totalPaid;
     
     // Calculate additional financial insights
     const paidPercentage = totalInvoiced > 0 ? ((totalPaid / totalInvoiced) * 100).toFixed(2) : 0;
@@ -1831,6 +1768,10 @@ const getCustomerTransactionHistory = async (req, res) => {
       overdue: sales.filter(sale => sale.paymentStatus === 'overdue').length
     };
     
+    // Get advance payments
+    const advancePayments = payments.filter(payment => payment.isAdvancePayment);
+    const totalAdvance = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
+    
     res.json({
       status: 'success',
       data: {
@@ -1844,18 +1785,14 @@ const getCustomerTransactionHistory = async (req, res) => {
           totalInvoiced,
           totalPaid,
           totalRemaining,
-          totalCustomerCredit,
-          netBalance: totalRemaining - totalCustomerCredit,
           paidPercentage,
           totalOverdue,
-          totalAdvance: totalAdvanceAmount,
-          totalExcessPayments
+          totalAdvance
         },
         transactionSummary: {
           totalTransactions: transactions.length,
           invoiceCount: sales.length,
           paymentCount: payments.length,
-          excessPaymentsCount: transactions.filter(t => t.isExcessPayment).length,
           invoiceStatusCounts
         },
         transactions: transactions
