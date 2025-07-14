@@ -1618,17 +1618,16 @@ const getCustomerTransactionHistory = async (req, res) => {
     let dateFilter = {};
     if (startDate && endDate) {
       dateFilter = {
-        $or: [
-          { createdAt: { $gte: new Date(startDate), $lte: new Date(endDate) } }, // For sales
-          { paymentDate: { $gte: new Date(startDate), $lte: new Date(endDate) } } // For payments
-        ]
+        paymentDate: {
+          $gte: new Date(startDate),
+          $lte: new Date(endDate)
+        }
       };
     }
     
-    // Get all sales for this customer
+    // Get all sales for this customer (needed for calculations and references)
     const sales = await Sales.find({ 
-      customer: customerId,
-      ...dateFilter
+      customer: customerId
     }).select('invoiceNumber grandTotal createdAt dueDate notes paymentStatus');
     
     // Get all payments for this customer
@@ -1640,26 +1639,31 @@ const getCustomerTransactionHistory = async (req, res) => {
       ...dateFilter
     })
     .select('paymentNumber amount paymentDate paymentMethod notes sale isAdvancePayment')
-    .populate('sale', 'invoiceNumber');
+    .populate('sale', 'invoiceNumber grandTotal');
     
-    // Create transactions array combining both sales and payments
+    // Create transactions array with only payment transactions
     const transactions = [];
-    
-    // Add sales to transactions
-    sales.forEach(sale => {
-      transactions.push({
-        type: 'invoice',
-        date: sale.createdAt,
-        reference: sale.invoiceNumber,
-        amount: sale.grandTotal,
-        notes: `Invoice created: ${sale.invoiceNumber}`,
-        dueDate: sale.dueDate,
-        status: sale.paymentStatus
-      });
-    });
     
     // Add payments to transactions
     payments.forEach(payment => {
+      // Calculate remaining balance after this payment for the associated sale
+      let remainingBalance = 0;
+      
+      if (payment.sale) {
+        const saleTotal = payment.sale.grandTotal;
+        
+        // Find all payments for this sale up to and including this payment
+        const salePayments = payments
+          .filter(p => 
+            p.sale && 
+            p.sale._id.toString() === payment.sale._id.toString() &&
+            new Date(p.paymentDate) <= new Date(payment.paymentDate)
+          );
+        
+        const totalPaidForSale = salePayments.reduce((sum, p) => sum + p.amount, 0);
+        remainingBalance = saleTotal - totalPaidForSale;
+      }
+      
       transactions.push({
         type: 'payment',
         date: payment.paymentDate,
@@ -1670,27 +1674,15 @@ const getCustomerTransactionHistory = async (req, res) => {
           `Payment for invoice ${payment.sale?.invoiceNumber || 'Unknown'}`),
         paymentMethod: payment.paymentMethod,
         invoiceReference: payment.sale?.invoiceNumber || 'N/A',
-        isAdvance: payment.isAdvancePayment || false
+        invoiceAmount: payment.sale?.grandTotal || 0,
+        remainingBalance: remainingBalance,
+        isAdvance: payment.isAdvancePayment || false,
+        balanceAfter: remainingBalance // For consistency with previous structure
       });
     });
     
     // Sort transactions by date
     transactions.sort((a, b) => new Date(a.date) - new Date(b.date));
-    
-    // Calculate running balance for each transaction
-    let runningBalance = 0;
-    const transactionsWithBalance = transactions.map(transaction => {
-      if (transaction.type === 'invoice') {
-        runningBalance += transaction.amount;
-      } else if (transaction.type === 'payment') {
-        runningBalance -= transaction.amount;
-      }
-      
-      return {
-        ...transaction,
-        balanceAfter: runningBalance
-      };
-    });
     
     // Calculate summary
     const totalInvoiced = sales.reduce((sum, sale) => sum + sale.grandTotal, 0);
@@ -1744,7 +1736,7 @@ const getCustomerTransactionHistory = async (req, res) => {
           paymentCount: payments.length,
           invoiceStatusCounts
         },
-        transactions: transactionsWithBalance
+        transactions: transactions
       }
     });
   } catch (error) {
