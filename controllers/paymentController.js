@@ -1808,13 +1808,30 @@ const getCustomerTransactionHistory = async (req, res) => {
     // Sort transactions by date
     transactions.sort((a, b) => new Date(a.date) - new Date(b.date));
     
+    // Get the final values from the last transaction
+    let finalAdvanceBalance = 0;
+    let finalRemainingBalance = 0;
+    
+    if (transactions.length > 0) {
+      const lastTransaction = transactions[transactions.length - 1];
+      // If the last remainingBalance is negative, it's advance balance
+      if (lastTransaction.remainingBalance < 0) {
+        finalAdvanceBalance = -lastTransaction.remainingBalance;
+        finalRemainingBalance = 0;
+      } else {
+        finalAdvanceBalance = 0;
+        finalRemainingBalance = lastTransaction.remainingBalance;
+      }
+    }
+    
     // Calculate summary
     const totalInvoiced = sales.reduce((sum, sale) => sum + sale.grandTotal, 0);
-    const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
-    const totalRemaining = totalInvoiced - totalPaid;
+    
+    // Calculate total paid differently - use the actual sales amounts and remaining balance
+    const effectiveTotalPaid = totalInvoiced - finalRemainingBalance;
     
     // Calculate additional financial insights
-    const paidPercentage = totalInvoiced > 0 ? ((totalPaid / totalInvoiced) * 100).toFixed(2) : 0;
+    const paidPercentage = totalInvoiced > 0 ? ((effectiveTotalPaid / totalInvoiced) * 100).toFixed(2) : 0;
     
     // Calculate overdue amount
     const today = new Date();
@@ -1833,8 +1850,11 @@ const getCustomerTransactionHistory = async (req, res) => {
       overdue: sales.filter(sale => sale.paymentStatus === 'overdue').length
     };
     
-    // Get advance payments
-    const advancePayments = payments.filter(payment => payment.isAdvancePayment || payment.notes?.includes('advance'));
+    // Get advance payments (only the positive ones)
+    const advancePayments = payments.filter(payment => 
+      (payment.isAdvancePayment || payment.notes?.includes('advance')) && 
+      payment.amount > 0
+    );
     const totalAdvance = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
     
     res.json({
@@ -1848,12 +1868,12 @@ const getCustomerTransactionHistory = async (req, res) => {
         },
         financialSummary: {
           totalInvoiced,
-          totalPaid,
-          totalRemaining,
+          totalPaid: effectiveTotalPaid,
+          totalRemaining: finalRemainingBalance,
           paidPercentage,
           totalOverdue,
           totalAdvance,
-          currentAdvanceBalance: availableAdvance
+          currentAdvanceBalance: finalAdvanceBalance
         },
         transactionSummary: {
           totalTransactions: transactions.length,
