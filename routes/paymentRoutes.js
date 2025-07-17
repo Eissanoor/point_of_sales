@@ -33,7 +33,7 @@ router.route('/check-overdue')
 router.route('/customer')
   .post(protect, createCustomerPayment);
 
-router.route('/apply-advance')
+router.route('/apply-customer-advance')
   .post(protect, applyAdvancePaymentToSale);
 
 // Routes that need a specific ID

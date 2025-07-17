@@ -1847,31 +1847,6 @@ const applyAdvancePaymentToSale = async (req, res) => {
       });
     }
 
-    // Verify the sale exists
-    const sale = await Sales.findById(saleId);
-    if (!sale) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Sale not found',
-      });
-    }
-
-    // Verify the sale belongs to the customer
-    if (sale.customer.toString() !== customerId) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'This sale does not belong to the specified customer',
-      });
-    }
-
-    // Check if sale is already paid
-    if (sale.paymentStatus === 'paid') {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'This sale is already fully paid',
-      });
-    }
-
     // Find all advance payments for this customer
     const advancePayments = await Payment.find({ 
       customer: customerId,
@@ -1890,103 +1865,159 @@ const applyAdvancePaymentToSale = async (req, res) => {
       });
     }
 
-    // Calculate remaining balance for the sale
-    const existingPayments = await Payment.find({ sale: saleId });
-    const totalPaid = existingPayments.reduce((sum, payment) => sum + payment.amount, 0);
-    const remainingBalance = sale.grandTotal - totalPaid;
+    // Find all unpaid or partially paid sales for this customer
+    const unpaidSales = await Sales.find({
+      customer: customerId,
+      paymentStatus: { $in: ['unpaid', 'partially_paid', 'overdue'] }
+    }).sort({ createdAt: 1 }); // Process oldest sales first
 
-    if (remainingBalance <= 0) {
+    if (unpaidSales.length === 0) {
       return res.status(400).json({
         status: 'fail',
-        message: 'This sale has no remaining balance to pay',
+        message: 'No unpaid sales found for this customer',
       });
     }
 
-    // Determine how much advance payment to apply
-    const amountToApply = Math.min(totalAdvanceAvailable, remainingBalance);
+    // Process each sale until advance payment is exhausted
+    let remainingAdvance = totalAdvanceAvailable;
+    const processedSales = [];
+    const payments = [];
 
-    // Generate payment number
-    const date = new Date();
-    const year = date.getFullYear().toString().slice(-2);
-    const month = (date.getMonth() + 1).toString().padStart(2, '0');
-    const day = date.getDate().toString().padStart(2, '0');
-    
-    // Get count of payments for today to generate sequential number
-    const paymentsCount = await Payment.countDocuments({
-      createdAt: {
-        $gte: new Date(date.setHours(0, 0, 0, 0)),
-        $lt: new Date(date.setHours(23, 59, 59, 999)),
-      },
-    });
-    
-    const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
+    for (const sale of unpaidSales) {
+      if (remainingAdvance <= 0) break;
 
-    // Create a new payment record using the advance payment
-    const payment = await Payment.create({
-      paymentNumber,
-      sale: saleId,
-      customer: customerId,
-      amount: amountToApply,
-      paymentMethod: 'advance', // Special payment method to indicate it's from advance payment
-      paymentDate: new Date(),
-      status: 'completed',
-      notes: `Payment applied from customer's advance payment balance`,
-      user: req.user._id,
-      isPartial: amountToApply < remainingBalance,
-      currency: sale.currency // Assuming sale has currency field, otherwise adjust accordingly
-    });
+      // Calculate remaining balance for the sale
+      const existingPayments = await Payment.find({ sale: sale._id });
+      const totalPaid = existingPayments.reduce((sum, payment) => sum + payment.amount, 0);
+      const remainingBalance = sale.grandTotal - totalPaid;
 
-    // Create payment journey record
-    await PaymentJourney.create({
-      payment: payment._id,
-      user: req.user._id,
-      action: 'created',
-      changes: [],
-      notes: `Payment ${paymentNumber} created from advance payment for invoice ${sale.invoiceNumber}`,
-    });
+      if (remainingBalance <= 0) continue; // Skip if already paid
 
-    // Update sale payment status
-    let paymentStatus = 'unpaid';
-    if (amountToApply >= remainingBalance) {
-      paymentStatus = 'paid';
-    } else if (amountToApply > 0) {
-      paymentStatus = 'partially_paid';
+      // Determine how much advance payment to apply
+      const amountToApply = Math.min(remainingAdvance, remainingBalance);
+
+      // Generate payment number
+      const date = new Date();
+      const year = date.getFullYear().toString().slice(-2);
+      const month = (date.getMonth() + 1).toString().padStart(2, '0');
+      const day = date.getDate().toString().padStart(2, '0');
+      
+      // Get count of payments for today to generate sequential number
+      const paymentsCount = await Payment.countDocuments({
+        createdAt: {
+          $gte: new Date(date.setHours(0, 0, 0, 0)),
+          $lt: new Date(date.setHours(23, 59, 59, 999)),
+        },
+      });
+      
+      const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + payments.length + 1).toString().padStart(3, '0')}`;
+
+      // Create a new payment record using the advance payment
+      const payment = await Payment.create({
+        paymentNumber,
+        sale: sale._id,
+        customer: customerId,
+        amount: amountToApply,
+        paymentMethod: 'advance', // Special payment method to indicate it's from advance payment
+        paymentDate: new Date(),
+        status: 'completed',
+        notes: `Payment applied from customer's advance payment balance`,
+        user: req.user._id,
+        isPartial: amountToApply < remainingBalance,
+        currency: sale.currency // Assuming sale has currency field, otherwise adjust accordingly
+      });
+
+      payments.push(payment);
+
+      // Create payment journey record
+      await PaymentJourney.create({
+        payment: payment._id,
+        user: req.user._id,
+        action: 'created',
+        changes: [],
+        notes: `Payment ${paymentNumber} created from advance payment for invoice ${sale.invoiceNumber}`,
+      });
+
+      // Update sale payment status
+      let paymentStatus = 'unpaid';
+      if (amountToApply >= remainingBalance) {
+        paymentStatus = 'paid';
+      } else if (amountToApply > 0) {
+        paymentStatus = 'partially_paid';
+      }
+      
+      await Sales.findByIdAndUpdate(sale._id, { paymentStatus });
+
+      // Track processed sale
+      processedSales.push({
+        saleId: sale._id,
+        invoiceNumber: sale.invoiceNumber,
+        amountApplied: amountToApply,
+        remainingBalance: remainingBalance - amountToApply,
+        newPaymentStatus: paymentStatus
+      });
+
+      // Reduce remaining advance amount
+      remainingAdvance -= amountToApply;
     }
-    
-    await Sales.findByIdAndUpdate(saleId, { paymentStatus });
 
     // Update advance payments (mark as used or reduce amount)
-    let remainingAmountToApply = amountToApply;
+    let totalAmountApplied = totalAdvanceAvailable - remainingAdvance;
+    let remainingAmountToApply = totalAmountApplied;
+    const updatedAdvancePayments = [];
+
     for (const advancePayment of advancePayments) {
       if (remainingAmountToApply <= 0) break;
 
       const amountFromThisAdvance = Math.min(advancePayment.amount, remainingAmountToApply);
       remainingAmountToApply -= amountFromThisAdvance;
 
+      let updatedAdvancePayment;
       if (amountFromThisAdvance >= advancePayment.amount) {
         // Mark this advance payment as fully used
-        await Payment.findByIdAndUpdate(advancePayment._id, { 
-          isAdvanceUsed: true,
-          notes: advancePayment.notes + ` (Used for invoice ${sale.invoiceNumber})`
-        });
+        updatedAdvancePayment = await Payment.findByIdAndUpdate(
+          advancePayment._id, 
+          { 
+            isAdvanceUsed: true,
+            notes: advancePayment.notes + ` (Used for multiple invoices)`
+          },
+          { new: true }
+        );
       } else {
         // Reduce the amount of this advance payment
-        await Payment.findByIdAndUpdate(advancePayment._id, { 
-          amount: advancePayment.amount - amountFromThisAdvance,
-          notes: advancePayment.notes + ` (${amountFromThisAdvance} used for invoice ${sale.invoiceNumber})`
-        });
+        updatedAdvancePayment = await Payment.findByIdAndUpdate(
+          advancePayment._id, 
+          { 
+            amount: advancePayment.amount - amountFromThisAdvance,
+            notes: advancePayment.notes + ` (${amountFromThisAdvance} used for multiple invoices)`
+          },
+          { new: true }
+        );
       }
+
+      updatedAdvancePayments.push(updatedAdvancePayment);
     }
 
     res.status(200).json({
       status: 'success',
       data: {
-        payment,
-        amountApplied: amountToApply,
-        remainingBalance: remainingBalance - amountToApply,
-        newPaymentStatus: paymentStatus,
-        remainingAdvanceBalance: totalAdvanceAvailable - amountToApply,
-        message: `${amountToApply} applied from advance payment to invoice ${sale.invoiceNumber}`
+        customer: {
+          id: customer._id,
+          name: customer.name
+        },
+        totalAdvanceAvailable,
+        totalAmountApplied,
+        remainingAdvance,
+        processedSales,
+        payments: payments.map(p => ({
+          id: p._id,
+          paymentNumber: p.paymentNumber,
+          amount: p.amount,
+          sale: p.sale
+        })),
+        message: processedSales.length > 0 
+          ? `Applied ${totalAmountApplied} from advance payment to ${processedSales.length} invoices` 
+          : 'No sales were processed'
       }
     });
   } catch (error) {
