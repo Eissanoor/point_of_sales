@@ -14,7 +14,8 @@ const {
   createCustomerPayment,
   getCustomerAdvancePayments,
   getPaymentJourneyByCustomerId,
-  getCustomerTransactionHistory
+  getCustomerTransactionHistory,
+  applyAdvancePaymentToSale
 } = require('../controllers/paymentController');
 const { protect } = require('../middlewares/authMiddleware');
 
@@ -31,6 +32,9 @@ router.route('/check-overdue')
 
 router.route('/customer')
   .post(protect, createCustomerPayment);
+
+router.route('/apply-advance')
+  .post(protect, applyAdvancePaymentToSale);
 
 // Routes that need a specific ID
 router.route('/:id')
