@@ -1683,9 +1683,9 @@ const getCustomerTransactionHistory = async (req, res) => {
           date: payment.paymentDate,
           reference: payment.paymentNumber,
           amount: payment.amount,
-          notes: payment.notes || `${payment.amount} is extra (Excess payment - advance for future invoices)`,
+          notes: payment.notes || `now ${availableAdvance} is advanced (Advance payment - no unpaid invoices)`,
           paymentMethod: payment.paymentMethod,
-          remainingBalance: -payment.amount, // Show as negative for advance
+          remainingBalance: -availableAdvance, // Show cumulative advance as negative
           balanceAfter: 0
         });
         continue;
@@ -1756,7 +1756,7 @@ const getCustomerTransactionHistory = async (req, res) => {
               ),
               paymentMethod: payment.paymentMethod,
               invoiceReference: relatedSale.invoiceNumber,
-              remainingBalance: excessAmount > 0 ? -excessAmount : saleBalances[saleId],
+              remainingBalance: excessAmount > 0 ? -availableAdvance : saleBalances[saleId],
               balanceAfter: saleBalances[saleId]
             });
           }
