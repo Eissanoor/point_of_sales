@@ -1635,6 +1635,8 @@ const getCustomerTransactionHistory = async (req, res) => {
     const payments = await Payment.find({
       $or: [
         { customer: customerId, isAdvancePayment: true },
+        { customer: customerId, paymentMethod: 'advance' },
+        { customer: customerId, paymentMethod: 'advance_adjustment' },
         { sale: { $in: sales.map(sale => sale._id) } }
       ],
       ...dateFilter
@@ -1675,7 +1677,7 @@ const getCustomerTransactionHistory = async (req, res) => {
     // Process all payments in chronological order
     for (const payment of payments) {
       // Case 1: Pure advance payment
-      if (payment.isAdvancePayment && !payment.sale) {
+      if ((payment.isAdvancePayment || payment.notes?.includes('advance')) && !payment.sale) {
         availableAdvance += payment.amount;
         
         transactions.push({
@@ -1684,6 +1686,23 @@ const getCustomerTransactionHistory = async (req, res) => {
           reference: payment.paymentNumber,
           amount: payment.amount,
           notes: payment.notes || `now ${availableAdvance} is advanced (Advance payment - no unpaid invoices)`,
+          paymentMethod: payment.paymentMethod,
+          remainingBalance: -availableAdvance, // Show cumulative advance as negative
+          balanceAfter: 0
+        });
+        continue;
+      }
+
+      // Case 1.5: Advance adjustment (negative amount)
+      if (payment.paymentMethod === 'advance_adjustment') {
+        availableAdvance += payment.amount; // This will subtract since amount is negative
+        
+        transactions.push({
+          type: 'payment',
+          date: payment.paymentDate,
+          reference: payment.paymentNumber,
+          amount: payment.amount,
+          notes: payment.notes || `Advance payment adjustment`,
           paymentMethod: payment.paymentMethod,
           remainingBalance: -availableAdvance, // Show cumulative advance as negative
           balanceAfter: 0
@@ -1701,7 +1720,7 @@ const getCustomerTransactionHistory = async (req, res) => {
           const currentBalance = saleBalances[saleId] || 0;
           
           // Case 3: Use advance funds if available and needed
-          if (availableAdvance > 0 && currentBalance > 0) {
+          if (availableAdvance > 0 && currentBalance > 0 && payment.paymentMethod !== 'advance') {
             const advanceToUse = Math.min(availableAdvance, currentBalance);
             availableAdvance -= advanceToUse;
             
@@ -1726,6 +1745,28 @@ const getCustomerTransactionHistory = async (req, res) => {
           
           // Get updated balance after potential advance usage
           const updatedBalance = saleBalances[saleId] || 0;
+          
+          // Special case: Payment with method 'advance'
+          if (payment.paymentMethod === 'advance') {
+            // This is a payment from advance funds
+            saleBalances[saleId] = Math.max(0, updatedBalance - payment.amount);
+            
+            // Update available advance before creating the transaction
+            availableAdvance -= payment.amount;
+            
+            transactions.push({
+              type: 'payment',
+              date: payment.paymentDate,
+              reference: payment.paymentNumber,
+              amount: payment.amount,
+              notes: payment.notes || `Payment from advance funds for invoice ${relatedSale.invoiceNumber}`,
+              paymentMethod: payment.paymentMethod,
+              invoiceReference: relatedSale.invoiceNumber,
+              remainingBalance: -availableAdvance, // Show remaining advance balance after deduction
+              balanceAfter: saleBalances[saleId]
+            });
+            continue;
+          }
           
           // Case 1 & 2: Regular payment or excess payment
           if (payment.amount > 0) {
@@ -1793,7 +1834,7 @@ const getCustomerTransactionHistory = async (req, res) => {
     };
     
     // Get advance payments
-    const advancePayments = payments.filter(payment => payment.isAdvancePayment);
+    const advancePayments = payments.filter(payment => payment.isAdvancePayment || payment.notes?.includes('advance'));
     const totalAdvance = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
     
     res.json({
