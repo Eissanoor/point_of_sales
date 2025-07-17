@@ -1832,7 +1832,7 @@ const getCustomerTransactionHistory = async (req, res) => {
 };
 
 // @desc    Apply customer's advance payment to a sale
-// @route   POST /api/payments/apply-advance
+// @route   POST /api/payments/apply-customer-advance
 // @access  Private
 const applyAdvancePaymentToSale = async (req, res) => {
   try {
@@ -1848,11 +1848,14 @@ const applyAdvancePaymentToSale = async (req, res) => {
     }
 
     // Find all advance payments for this customer
+    // Modified query to match how advance payments are stored
     const advancePayments = await Payment.find({ 
       customer: customerId,
-      isAdvancePayment: true,
-      status: 'completed',
-      isAdvanceUsed: { $ne: true } // Only get unused or partially used advance payments
+      $or: [
+        { isAdvancePayment: true },
+        { notes: { $regex: /advance/i } }
+      ],
+      status: { $ne: 'cancelled' }
     });
 
     // Calculate total available advance amount
@@ -1862,6 +1865,15 @@ const applyAdvancePaymentToSale = async (req, res) => {
       return res.status(400).json({
         status: 'fail',
         message: 'No advance payment available for this customer',
+        debug: {
+          advancePaymentsCount: advancePayments.length,
+          advancePayments: advancePayments.map(p => ({
+            id: p._id,
+            amount: p.amount,
+            isAdvancePayment: p.isAdvancePayment,
+            notes: p.notes
+          }))
+        }
       });
     }
 
@@ -1873,8 +1885,15 @@ const applyAdvancePaymentToSale = async (req, res) => {
 
     if (unpaidSales.length === 0) {
       return res.status(400).json({
-        status: 'fail',
-        message: 'No unpaid sales found for this customer',
+        status: 'success',
+        message: 'No unpaid sales found for this customer. Advance payment remains available.',
+        data: {
+          customer: {
+            id: customer._id,
+            name: customer.name
+          },
+          totalAdvanceAvailable
+        }
       });
     }
 
@@ -1921,7 +1940,7 @@ const applyAdvancePaymentToSale = async (req, res) => {
         paymentMethod: 'advance', // Special payment method to indicate it's from advance payment
         paymentDate: new Date(),
         status: 'completed',
-        notes: `Payment applied from customer's advance payment balance`,
+        notes: `Payment applied from customer's advance payment balance (${remainingAdvance} available, ${amountToApply} applied)`,
         user: req.user._id,
         isPartial: amountToApply < remainingBalance,
         currency: sale.currency // Assuming sale has currency field, otherwise adjust accordingly
@@ -1961,41 +1980,27 @@ const applyAdvancePaymentToSale = async (req, res) => {
       remainingAdvance -= amountToApply;
     }
 
-    // Update advance payments (mark as used or reduce amount)
-    let totalAmountApplied = totalAdvanceAvailable - remainingAdvance;
-    let remainingAmountToApply = totalAmountApplied;
-    const updatedAdvancePayments = [];
-
-    for (const advancePayment of advancePayments) {
-      if (remainingAmountToApply <= 0) break;
-
-      const amountFromThisAdvance = Math.min(advancePayment.amount, remainingAmountToApply);
-      remainingAmountToApply -= amountFromThisAdvance;
-
-      let updatedAdvancePayment;
-      if (amountFromThisAdvance >= advancePayment.amount) {
-        // Mark this advance payment as fully used
-        updatedAdvancePayment = await Payment.findByIdAndUpdate(
-          advancePayment._id, 
-          { 
-            isAdvanceUsed: true,
-            notes: advancePayment.notes + ` (Used for multiple invoices)`
-          },
-          { new: true }
-        );
-      } else {
-        // Reduce the amount of this advance payment
-        updatedAdvancePayment = await Payment.findByIdAndUpdate(
-          advancePayment._id, 
-          { 
-            amount: advancePayment.amount - amountFromThisAdvance,
-            notes: advancePayment.notes + ` (${amountFromThisAdvance} used for multiple invoices)`
-          },
-          { new: true }
-        );
-      }
-
-      updatedAdvancePayments.push(updatedAdvancePayment);
+    // Create a new "negative" advance payment to track used amount
+    if (processedSales.length > 0) {
+      const date = new Date();
+      const year = date.getFullYear().toString().slice(-2);
+      const month = (date.getMonth() + 1).toString().padStart(2, '0');
+      const day = date.getDate().toString().padStart(2, '0');
+      const timestamp = Date.now().toString().slice(-6);
+      const negativePaymentNumber = `ADV-${year}${month}${day}-${timestamp}`;
+      
+      // Create a negative advance payment to track usage
+      await Payment.create({
+        paymentNumber: negativePaymentNumber,
+        customer: customerId,
+        amount: -(totalAdvanceAvailable - remainingAdvance), // Negative amount
+        paymentMethod: 'advance_adjustment',
+        paymentDate: new Date(),
+        status: 'completed',
+        notes: `Advance payment used for ${processedSales.length} invoices`,
+        user: req.user._id,
+        isAdvanceUsed: true
+      });
     }
 
     res.status(200).json({
@@ -2006,7 +2011,7 @@ const applyAdvancePaymentToSale = async (req, res) => {
           name: customer.name
         },
         totalAdvanceAvailable,
-        totalAmountApplied,
+        totalAmountApplied: totalAdvanceAvailable - remainingAdvance,
         remainingAdvance,
         processedSales,
         payments: payments.map(p => ({
@@ -2016,7 +2021,7 @@ const applyAdvancePaymentToSale = async (req, res) => {
           sale: p.sale
         })),
         message: processedSales.length > 0 
-          ? `Applied ${totalAmountApplied} from advance payment to ${processedSales.length} invoices` 
+          ? `Applied ${totalAdvanceAvailable - remainingAdvance} from advance payment to ${processedSales.length} invoices` 
           : 'No sales were processed'
       }
     });
