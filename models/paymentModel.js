@@ -26,7 +26,7 @@ const paymentSchema = new mongoose.Schema(
     paymentMethod: {
       type: String,
       required: true,
-      enum: ['cash', 'credit_card', 'debit_card', 'bank_transfer', 'check', 'online_payment', 'mobile_payment', 'other','advance'],
+      enum: ['cash', 'credit_card', 'debit_card', 'advance_adjustment','bank_transfer', 'check', 'online_payment', 'mobile_payment', 'other','advance'],
     },
     paymentDate: {
       type: Date,
