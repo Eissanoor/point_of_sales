@@ -82,7 +82,7 @@ paymentSchema.virtual('remainingBalance').get(function() {
   // This will be populated when needed by the controller
   return 0;
 });
-
+//
 // Create compound indices for faster queries
 paymentSchema.index({ sale: 1, paymentDate: -1 });
 paymentSchema.index({ customer: 1, paymentDate: -1 }); // Add index for customer queries
