@@ -1781,8 +1781,33 @@ const getCustomerTransactionHistory = async (req, res) => {
       }
     }
     
-    // Sort transactions by date
+    // First sort transactions by date
     transactions.sort((a, b) => new Date(a.date) - new Date(b.date));
+    
+    // Then re-sort transactions to show invoice payments first, then advance payments
+    // For transactions on the same date, prioritize invoice payments over advance payments
+    transactions.sort((a, b) => {
+      // First compare dates
+      const dateA = new Date(a.date);
+      const dateB = new Date(b.date);
+      const dateDiff = dateA - dateB;
+      
+      // If dates are different, maintain chronological order
+      if (Math.abs(dateDiff) > 1000) { // Allow 1 second difference
+        return dateDiff;
+      }
+      
+      // For same date, prioritize invoice payments (positive or zero remainingBalance) 
+      // over advance payments (negative remainingBalance)
+      const aIsAdvance = a.remainingBalance < 0;
+      const bIsAdvance = b.remainingBalance < 0;
+      
+      if (aIsAdvance && !bIsAdvance) return 1; // b comes first (invoice payment)
+      if (!aIsAdvance && bIsAdvance) return -1; // a comes first (invoice payment)
+      
+      // If both are the same type, maintain the original order
+      return 0;
+    });
     
     // Get the final values
     let finalAdvanceBalance = availableAdvance;
