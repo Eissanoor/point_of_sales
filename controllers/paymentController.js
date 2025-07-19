@@ -1822,6 +1822,16 @@ const getCustomerTransactionHistory = async (req, res) => {
         finalAdvanceBalance = 0;
         finalRemainingBalance = lastTransaction.remainingBalance;
       }
+    } else if (sales.length > 0) {
+      // If there are no transactions but there are sales, use the sales data
+      finalRemainingBalance = sales.reduce((sum, sale) => {
+        // Check if the sale has a payment status
+        if (sale.paymentStatus === 'paid') {
+          return sum;
+        } else {
+          return sum + sale.grandTotal;
+        }
+      }, 0);
     }
     
     // Calculate summary
@@ -1856,6 +1866,29 @@ const getCustomerTransactionHistory = async (req, res) => {
       payment.amount > 0
     );
     const totalAdvance = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
+
+    // Ensure consistency between payment status and calculated values
+    if (invoiceStatusCounts.unpaid > 0 && effectiveTotalPaid >= totalInvoiced) {
+      // If there are unpaid invoices but effectiveTotalPaid shows everything is paid,
+      // adjust the effectiveTotalPaid to match the payment status
+      const unpaidAmount = sales
+        .filter(sale => sale.paymentStatus === 'unpaid' || sale.paymentStatus === 'overdue')
+        .reduce((sum, sale) => sum + sale.grandTotal, 0);
+      
+      const partiallyPaidAmount = sales
+        .filter(sale => sale.paymentStatus === 'partially_paid')
+        .reduce((sum, sale) => {
+          // Estimate the partially paid amount (this is an approximation)
+          return sum + (sale.grandTotal * 0.5); // Assume 50% paid as a fallback
+        }, 0);
+      
+      const correctedTotalPaid = totalInvoiced - unpaidAmount - partiallyPaidAmount;
+      
+      // Use the corrected value if it's significantly different
+      if (Math.abs(correctedTotalPaid - effectiveTotalPaid) > 1) { // Allow for small rounding differences
+        finalRemainingBalance = unpaidAmount + partiallyPaidAmount;
+      }
+    }
     
     res.json({
       status: 'success',
@@ -1868,9 +1901,9 @@ const getCustomerTransactionHistory = async (req, res) => {
         },
         financialSummary: {
           totalInvoiced,
-          totalPaid: effectiveTotalPaid,
+          totalPaid: totalInvoiced - finalRemainingBalance,
           totalRemaining: finalRemainingBalance,
-          paidPercentage,
+          paidPercentage: totalInvoiced > 0 ? (((totalInvoiced - finalRemainingBalance) / totalInvoiced) * 100).toFixed(2) : 0,
           totalOverdue,
           totalAdvance,
           currentAdvanceBalance: finalAdvanceBalance
