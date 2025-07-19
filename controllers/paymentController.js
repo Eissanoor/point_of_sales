@@ -1674,133 +1674,109 @@ const getCustomerTransactionHistory = async (req, res) => {
       availableAdvance = previousAdvancePayments.reduce((sum, payment) => sum + payment.amount, 0);
     }
     
+    // Group payments by date and reference to combine related transactions
+    const paymentGroups = {};
+    
     // Process all payments in chronological order
     for (const payment of payments) {
-      // Case 1: Pure advance payment
-      if ((payment.isAdvancePayment || payment.notes?.includes('advance')) && !payment.sale) {
-        availableAdvance += payment.amount;
+      const paymentDate = payment.paymentDate.toISOString();
+      const saleId = payment.sale ? payment.sale._id.toString() : null;
+      const invoiceRef = payment.sale ? payment.sale.invoiceNumber : null;
+      
+      // Create a unique key for grouping related payments
+      const groupKey = `${paymentDate}_${invoiceRef || 'advance'}_${payment.paymentMethod}`;
+      
+      if (!paymentGroups[groupKey]) {
+        paymentGroups[groupKey] = {
+          payments: [],
+          totalAmount: 0,
+          date: payment.paymentDate,
+          paymentMethod: payment.paymentMethod,
+          invoiceReference: invoiceRef,
+          saleId: saleId
+        };
+      }
+      
+      paymentGroups[groupKey].payments.push(payment);
+      paymentGroups[groupKey].totalAmount += payment.amount;
+    }
+    
+    // Process each group to create simplified transactions
+    for (const groupKey in paymentGroups) {
+      const group = paymentGroups[groupKey];
+      const firstPayment = group.payments[0];
+      
+      // Case 1: Pure advance payment (no sale)
+      if (!group.saleId && (firstPayment.isAdvancePayment || firstPayment.notes?.includes('advance'))) {
+        availableAdvance += group.totalAmount;
         
         transactions.push({
           type: 'payment',
-          date: payment.paymentDate,
-          reference: payment.paymentNumber,
-          amount: payment.amount,
-          notes: payment.notes || `now ${availableAdvance} is advanced (Advance payment - no unpaid invoices)`,
-          paymentMethod: payment.paymentMethod,
+          date: group.date,
+          reference: firstPayment.paymentNumber,
+          amount: group.totalAmount,
+          notes: `Advance payment: ${availableAdvance} available`,
+          paymentMethod: group.paymentMethod,
           remainingBalance: -availableAdvance, // Show cumulative advance as negative
           balanceAfter: 0
         });
         continue;
       }
 
-      // Case 1.5: Advance adjustment (negative amount)
-      if (payment.paymentMethod === 'advance_adjustment') {
-        availableAdvance += payment.amount; // This will subtract since amount is negative
+      // Case 2: Advance adjustment
+      if (group.paymentMethod === 'advance_adjustment') {
+        availableAdvance += group.totalAmount; // This will subtract since amount is negative
         
         transactions.push({
           type: 'payment',
-          date: payment.paymentDate,
-          reference: payment.paymentNumber,
-          amount: payment.amount,
-          notes: payment.notes || `Advance payment adjustment`,
-          paymentMethod: payment.paymentMethod,
-          remainingBalance: -availableAdvance, // Show cumulative advance as negative
+          date: group.date,
+          reference: firstPayment.paymentNumber,
+          amount: group.totalAmount,
+          notes: firstPayment.notes || `Advance payment adjustment`,
+          paymentMethod: group.paymentMethod,
+          remainingBalance: -availableAdvance,
           balanceAfter: 0
         });
         continue;
       }
       
-      // Case 2 & 3: Payment for a sale or using advance
-      if (payment.sale) {
-        const saleId = payment.sale._id.toString();
-        const relatedSale = salesMap[saleId];
+      // Case 3: Payment for a sale
+      if (group.saleId) {
+        const relatedSale = salesMap[group.saleId];
         
         if (relatedSale) {
-          // Get current balance for this sale
-          const currentBalance = saleBalances[saleId] || 0;
+          // Get current balance for this sale before this payment
+          const currentBalance = saleBalances[group.saleId] || 0;
           
-          // Case 3: Use advance funds if available and needed
-          if (availableAdvance > 0 && currentBalance > 0 && payment.paymentMethod !== 'advance') {
-            const advanceToUse = Math.min(availableAdvance, currentBalance);
-            availableAdvance -= advanceToUse;
-            
-            // Update the sale balance
-            saleBalances[saleId] = Math.max(0, currentBalance - advanceToUse);
-            
-            // Create transaction for using advance funds
-            if (advanceToUse > 0) {
-              transactions.push({
-                type: 'payment',
-                date: payment.paymentDate, // Use payment date
-                reference: `ADV-${relatedSale.invoiceNumber}`,
-                amount: advanceToUse,
-                notes: `Used ${advanceToUse} from advance funds for invoice ${relatedSale.invoiceNumber}`,
-                paymentMethod: 'advance',
-                invoiceReference: relatedSale.invoiceNumber,
-                remainingBalance: saleBalances[saleId],
-                balanceAfter: saleBalances[saleId]
-              });
-            }
+          // Calculate how much to apply to the sale
+          const appliedAmount = Math.min(group.totalAmount, currentBalance);
+          
+          // Calculate excess amount if any
+          const excessAmount = Math.max(0, group.totalAmount - currentBalance);
+          
+          // Update the sale balance
+          saleBalances[group.saleId] = Math.max(0, currentBalance - appliedAmount);
+          
+          // If there's excess, add it to available advance
+          if (excessAmount > 0) {
+            availableAdvance += excessAmount;
           }
           
-          // Get updated balance after potential advance usage
-          const updatedBalance = saleBalances[saleId] || 0;
-          
-          // Special case: Payment with method 'advance'
-          if (payment.paymentMethod === 'advance') {
-            // This is a payment from advance funds
-            saleBalances[saleId] = Math.max(0, updatedBalance - payment.amount);
-            
-            // Update available advance before creating the transaction
-            availableAdvance -= payment.amount;
-            
-            transactions.push({
-              type: 'payment',
-              date: payment.paymentDate,
-              reference: payment.paymentNumber,
-              amount: payment.amount,
-              notes: payment.notes || `Payment from advance funds for invoice ${relatedSale.invoiceNumber}`,
-              paymentMethod: payment.paymentMethod,
-              invoiceReference: relatedSale.invoiceNumber,
-              remainingBalance: -availableAdvance, // Show remaining advance balance after deduction
-              balanceAfter: saleBalances[saleId]
-            });
-            continue;
-          }
-          
-          // Case 1 & 2: Regular payment or excess payment
-          if (payment.amount > 0) {
-            // Calculate how much of this payment applies to the sale
-            const appliedAmount = Math.min(payment.amount, updatedBalance);
-            
-            // Calculate excess amount if any (Case 2)
-            const excessAmount = payment.amount - appliedAmount > 0 ? payment.amount - appliedAmount : 0;
-            
-            // Update the sale balance
-            saleBalances[saleId] = Math.max(0, updatedBalance - payment.amount);
-            
-            // If there's excess, add it to available advance
-            if (excessAmount > 0) {
-              availableAdvance += excessAmount;
-            }
-            
-            // Create transaction for this payment
-            transactions.push({
-              type: 'payment',
-              date: payment.paymentDate,
-              reference: payment.paymentNumber,
-              amount: payment.amount,
-              notes: payment.notes || (
-                excessAmount > 0 
-                  ? `${excessAmount} is extra (Part of customer payment distribution)` 
-                  : `${saleBalances[saleId]} is remaining (Part of customer payment distribution)`
-              ),
-              paymentMethod: payment.paymentMethod,
-              invoiceReference: relatedSale.invoiceNumber,
-              remainingBalance: excessAmount > 0 ? -availableAdvance : saleBalances[saleId],
-              balanceAfter: saleBalances[saleId]
-            });
-          }
+          // Create a single transaction for this payment
+          transactions.push({
+            type: 'payment',
+            date: group.date,
+            reference: firstPayment.paymentNumber,
+            amount: group.totalAmount,
+            notes: excessAmount > 0 
+              ? `Payment: ${appliedAmount} applied to invoice, ${excessAmount} added to advance (${availableAdvance} available)`
+              : `Payment: ${saleBalances[group.saleId]} remaining on invoice`,
+            paymentMethod: group.paymentMethod,
+            invoiceReference: group.invoiceReference,
+            remainingBalance: saleBalances[group.saleId],
+            balanceAfter: saleBalances[group.saleId],
+            advanceBalance: availableAdvance
+          });
         }
       }
     }
@@ -1808,31 +1784,9 @@ const getCustomerTransactionHistory = async (req, res) => {
     // Sort transactions by date
     transactions.sort((a, b) => new Date(a.date) - new Date(b.date));
     
-    // Get the final values from the last transaction
-    let finalAdvanceBalance = 0;
-    let finalRemainingBalance = 0;
-    
-    if (transactions.length > 0) {
-      const lastTransaction = transactions[transactions.length - 1];
-      // If the last remainingBalance is negative, it's advance balance
-      if (lastTransaction.remainingBalance < 0) {
-        finalAdvanceBalance = -lastTransaction.remainingBalance;
-        finalRemainingBalance = 0;
-      } else {
-        finalAdvanceBalance = 0;
-        finalRemainingBalance = lastTransaction.remainingBalance;
-      }
-    } else if (sales.length > 0) {
-      // If there are no transactions but there are sales, use the sales data
-      finalRemainingBalance = sales.reduce((sum, sale) => {
-        // Check if the sale has a payment status
-        if (sale.paymentStatus === 'paid') {
-          return sum;
-        } else {
-          return sum + sale.grandTotal;
-        }
-      }, 0);
-    }
+    // Get the final values
+    let finalAdvanceBalance = availableAdvance;
+    let finalRemainingBalance = Object.values(saleBalances).reduce((sum, balance) => sum + balance, 0);
     
     // Calculate summary
     const totalInvoiced = sales.reduce((sum, sale) => sum + sale.grandTotal, 0);
@@ -1866,29 +1820,6 @@ const getCustomerTransactionHistory = async (req, res) => {
       payment.amount > 0
     );
     const totalAdvance = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
-
-    // Ensure consistency between payment status and calculated values
-    if (invoiceStatusCounts.unpaid > 0 && effectiveTotalPaid >= totalInvoiced) {
-      // If there are unpaid invoices but effectiveTotalPaid shows everything is paid,
-      // adjust the effectiveTotalPaid to match the payment status
-      const unpaidAmount = sales
-        .filter(sale => sale.paymentStatus === 'unpaid' || sale.paymentStatus === 'overdue')
-        .reduce((sum, sale) => sum + sale.grandTotal, 0);
-      
-      const partiallyPaidAmount = sales
-        .filter(sale => sale.paymentStatus === 'partially_paid')
-        .reduce((sum, sale) => {
-          // Estimate the partially paid amount (this is an approximation)
-          return sum + (sale.grandTotal * 0.5); // Assume 50% paid as a fallback
-        }, 0);
-      
-      const correctedTotalPaid = totalInvoiced - unpaidAmount - partiallyPaidAmount;
-      
-      // Use the corrected value if it's significantly different
-      if (Math.abs(correctedTotalPaid - effectiveTotalPaid) > 1) { // Allow for small rounding differences
-        finalRemainingBalance = unpaidAmount + partiallyPaidAmount;
-      }
-    }
     
     res.json({
       status: 'success',
