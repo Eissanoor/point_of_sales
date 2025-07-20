@@ -1674,7 +1674,7 @@ const getCustomerTransactionHistory = async (req, res) => {
       availableAdvance = previousAdvancePayments.reduce((sum, payment) => sum + payment.amount, 0);
     }
     
-    // Group payments by date and reference to combine related transactions
+    // Group payments by date and reference to combine related payments
     const paymentGroups = {};
     
     // Process all payments in chronological order
@@ -2030,24 +2030,24 @@ const applyAdvancePaymentToSale = async (req, res) => {
       remainingAdvance -= amountToApply;
     }
 
-    // Create a new "negative" advance payment to track used amount
+    // Create a record to track used amount (using positive amount instead of negative)
     if (processedSales.length > 0) {
       const date = new Date();
       const year = date.getFullYear().toString().slice(-2);
       const month = (date.getMonth() + 1).toString().padStart(2, '0');
       const day = date.getDate().toString().padStart(2, '0');
       const timestamp = Date.now().toString().slice(-6);
-      const negativePaymentNumber = `ADV-${year}${month}${day}-${timestamp}`;
+      const adjustmentPaymentNumber = `ADV-${year}${month}${day}-${timestamp}`;
       
-      // Create a negative advance payment to track usage
+      // Create an advance_adjustment record with positive amount
       await Payment.create({
-        paymentNumber: negativePaymentNumber,
+        paymentNumber: adjustmentPaymentNumber,
         customer: customerId,
-        amount: -(totalAdvanceAvailable - remainingAdvance), // Negative amount
+        amount: (totalAdvanceAvailable - remainingAdvance), // Using positive amount
         paymentMethod: 'advance_adjustment',
         paymentDate: new Date(),
         status: 'completed',
-        notes: `Advance payment used for ${processedSales.length} invoices`,
+        notes: `Advance payment used for ${processedSales.length} invoices (adjustment record)`,
         user: req.user._id,
         isAdvanceUsed: true
       });
