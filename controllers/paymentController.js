@@ -1732,7 +1732,7 @@ const getCustomerTransactionHistory = async (req, res) => {
           date: group.date,
           reference: firstPayment.paymentNumber,
           amount: group.totalAmount,
-          notes: firstPayment.notes || `Advance payment adjustment`,
+          notes: firstPayment.notes || `Advance payment used: ${availableAdvance} remaining`,
           paymentMethod: group.paymentMethod,
           remainingBalance: -availableAdvance,
           balanceAfter: 0
@@ -2030,7 +2030,7 @@ const applyAdvancePaymentToSale = async (req, res) => {
       remainingAdvance -= amountToApply;
     }
 
-    // Create a record to track used amount (using positive amount instead of negative)
+    // Create a record to track used amount (using negative amount to reduce advance balance)
     if (processedSales.length > 0) {
       const date = new Date();
       const year = date.getFullYear().toString().slice(-2);
@@ -2039,11 +2039,11 @@ const applyAdvancePaymentToSale = async (req, res) => {
       const timestamp = Date.now().toString().slice(-6);
       const adjustmentPaymentNumber = `ADV-${year}${month}${day}-${timestamp}`;
       
-      // Create an advance_adjustment record with positive amount
+      // Create an advance_adjustment record with negative amount to properly reduce the advance balance
       await Payment.create({
         paymentNumber: adjustmentPaymentNumber,
         customer: customerId,
-        amount: (totalAdvanceAvailable - remainingAdvance), // Using positive amount
+        amount: -(totalAdvanceAvailable - remainingAdvance), // Using negative amount to reduce advance balance
         paymentMethod: 'advance_adjustment',
         paymentDate: new Date(),
         status: 'completed',
@@ -2071,7 +2071,7 @@ const applyAdvancePaymentToSale = async (req, res) => {
           sale: p.sale
         })),
         message: processedSales.length > 0 
-          ? `Applied ${totalAdvanceAvailable - remainingAdvance} from advance payment to ${processedSales.length} invoices` 
+          ? `Applied ${totalAdvanceAvailable - remainingAdvance} from advance payment to ${processedSales.length} invoices. Remaining advance balance: ${remainingAdvance}` 
           : 'No sales were processed'
       }
     });
