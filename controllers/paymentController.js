@@ -1701,6 +1701,9 @@ const getCustomerTransactionHistory = async (req, res) => {
       paymentGroups[groupKey].totalAmount += payment.amount;
     }
     
+    // First process advance payments to establish the initial advance balance
+    let advancePaymentsProcessed = [];
+    
     // Process each group to create simplified transactions
     for (const groupKey in paymentGroups) {
       const group = paymentGroups[groupKey];
@@ -1709,6 +1712,7 @@ const getCustomerTransactionHistory = async (req, res) => {
       // Case 1: Pure advance payment (no sale)
       if (!group.saleId && (firstPayment.isAdvancePayment || firstPayment.notes?.includes('advance'))) {
         availableAdvance += group.totalAmount;
+        advancePaymentsProcessed.push(group);
         
         transactions.push({
           type: 'payment',
@@ -1720,27 +1724,94 @@ const getCustomerTransactionHistory = async (req, res) => {
           remainingBalance: -availableAdvance, // Show cumulative advance as negative
           balanceAfter: 0
         });
+      }
+    }
+    
+    // Then process payments that use advance funds
+    for (const groupKey in paymentGroups) {
+      const group = paymentGroups[groupKey];
+      const firstPayment = group.payments[0];
+      
+      // Skip advance payments as they've already been processed
+      if (advancePaymentsProcessed.includes(group)) {
         continue;
       }
-
-      // Case 2: Advance adjustment
+      
+      // Case 2: Payment using advance funds
+      if (group.paymentMethod === 'advance') {
+        const relatedSale = group.saleId ? salesMap[group.saleId] : null;
+        
+        if (relatedSale) {
+          // Get current balance for this sale before this payment
+          const currentBalance = saleBalances[group.saleId] || 0;
+          
+          // Calculate how much to apply to the sale
+          const appliedAmount = Math.min(group.totalAmount, currentBalance);
+          
+          // Update the sale balance
+          saleBalances[group.saleId] = Math.max(0, currentBalance - appliedAmount);
+          
+          // When using advance payment, reduce the available advance
+          availableAdvance -= appliedAmount;
+          
+          // Create a single transaction for this payment
+          transactions.push({
+            type: 'payment',
+            date: group.date,
+            reference: firstPayment.paymentNumber,
+            amount: group.totalAmount,
+            notes: `Payment: ${saleBalances[group.saleId]} remaining on invoice, ${availableAdvance} advance remaining`,
+            paymentMethod: group.paymentMethod,
+            invoiceReference: group.invoiceReference,
+            remainingBalance: saleBalances[group.saleId],
+            balanceAfter: saleBalances[group.saleId],
+            advanceBalance: availableAdvance
+          });
+        }
+      }
+    }
+    
+    // Then process advance adjustments
+    for (const groupKey in paymentGroups) {
+      const group = paymentGroups[groupKey];
+      const firstPayment = group.payments[0];
+      
+      // Skip advance payments as they've already been processed
+      if (advancePaymentsProcessed.includes(group)) {
+        continue;
+      }
+      
+      // Case 3: Advance adjustment
       if (group.paymentMethod === 'advance_adjustment') {
-        availableAdvance += group.totalAmount; // This will subtract since amount is negative
+        // For advance_adjustment, we don't need to modify the available advance again
+        // since it was already adjusted when processing the 'advance' payment method
         
         transactions.push({
           type: 'payment',
           date: group.date,
           reference: firstPayment.paymentNumber,
-          amount: group.totalAmount,
+          amount: Math.abs(group.totalAmount), // Display the absolute value for better readability
           notes: firstPayment.notes || `Advance payment used: ${availableAdvance} remaining`,
           paymentMethod: group.paymentMethod,
-          remainingBalance: -availableAdvance,
+          remainingBalance: -availableAdvance, // This should reflect the actual remaining advance
           balanceAfter: 0
         });
+      }
+    }
+    
+    // Finally process regular payments
+    for (const groupKey in paymentGroups) {
+      const group = paymentGroups[groupKey];
+      const firstPayment = group.payments[0];
+      
+      // Skip advance payments and advance adjustments as they've already been processed
+      if (advancePaymentsProcessed.includes(group) || 
+          group.paymentMethod === 'advance' || 
+          group.paymentMethod === 'advance_adjustment') {
         continue;
       }
       
-      // Case 3: Payment for a sale
+      // Case 4: Regular payment for a sale
       if (group.saleId) {
         const relatedSale = salesMap[group.saleId];
         
@@ -1846,6 +1917,9 @@ const getCustomerTransactionHistory = async (req, res) => {
     );
     const totalAdvance = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
     
+    // The actual current advance balance is what we've calculated through our transaction processing
+    const actualAdvanceBalance = availableAdvance;
+    
     res.json({
       status: 'success',
       data: {
@@ -1862,7 +1936,7 @@ const getCustomerTransactionHistory = async (req, res) => {
           paidPercentage: totalInvoiced > 0 ? (((totalInvoiced - finalRemainingBalance) / totalInvoiced) * 100).toFixed(2) : 0,
           totalOverdue,
           totalAdvance,
-          currentAdvanceBalance: finalAdvanceBalance
+          currentAdvanceBalance: actualAdvanceBalance
         },
         transactionSummary: {
           totalTransactions: transactions.length,
@@ -2039,18 +2113,9 @@ const applyAdvancePaymentToSale = async (req, res) => {
       const timestamp = Date.now().toString().slice(-6);
       const adjustmentPaymentNumber = `ADV-${year}${month}${day}-${timestamp}`;
       
-      // Create an advance_adjustment record with negative amount to properly reduce the advance balance
-      await Payment.create({
-        paymentNumber: adjustmentPaymentNumber,
-        customer: customerId,
-        amount: -(totalAdvanceAvailable - remainingAdvance), // Using negative amount to reduce advance balance
-        paymentMethod: 'advance_adjustment',
-        paymentDate: new Date(),
-        status: 'completed',
-        notes: `Advance payment used for ${processedSales.length} invoices (adjustment record)`,
-        user: req.user._id,
-        isAdvanceUsed: true
-      });
+      // We don't need to create an advance_adjustment record anymore since we're directly
+      // handling the advance balance reduction in the 'advance' payment method
+      // This prevents double-counting the reduction
     }
 
     res.status(200).json({
