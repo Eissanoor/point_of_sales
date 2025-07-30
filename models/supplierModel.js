@@ -20,11 +20,35 @@ const supplierSchema = new mongoose.Schema(
     
       trim: true,
     },
+    cnicNumber: {
+      type: String,
+      trim: true,
+    },
+    manager: {
+      type: String,
+      trim: true,
+    },
+    country: {
+      type: String,
+      trim: true,
+    },
+    state: {
+      type: String,
+      trim: true,
+    },
+    city: {
+      type: String,
+      trim: true,
+    },
     image: {
       type: String,
       default: '',
     },
     address: {
+      type: String,
+      trim: true,
+    },
+    deliveryAddress: {
       type: String,
       trim: true,
     },

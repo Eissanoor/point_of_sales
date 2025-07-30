@@ -6,7 +6,7 @@ const { uploadImage, deleteImage, getPublicIdFromUrl } = require('../config/clou
 // @route   POST /api/suppliers
 // @access  Private
 const createSupplier = asyncHandler(async (req, res) => {
-  const { name, email, phoneNumber, address } = req.body;
+  const { name, email, phoneNumber, cnicNumber, manager, country, state, city, address, deliveryAddress } = req.body;
 
   const supplierExists = await Supplier.findOne({ name });
   if (supplierExists) {
@@ -27,8 +27,14 @@ const createSupplier = asyncHandler(async (req, res) => {
     name,
     email,
     phoneNumber,
+    cnicNumber,
+    manager,
+    country,
+    state,
+    city,
     image: imageUrl,
     address,
+    deliveryAddress,
     isActive: true,
   });
 
@@ -98,8 +104,14 @@ const updateSupplier = asyncHandler(async (req, res) => {
     supplier.name = req.body.name || supplier.name;
     supplier.email = req.body.email || supplier.email;
     supplier.phoneNumber = req.body.phoneNumber || supplier.phoneNumber;
+    supplier.cnicNumber = req.body.cnicNumber || supplier.cnicNumber;
+    supplier.manager = req.body.manager || supplier.manager;
+    supplier.country = req.body.country || supplier.country;
+    supplier.state = req.body.state || supplier.state;
+    supplier.city = req.body.city || supplier.city;
     supplier.image = imageUrl;
     supplier.address = req.body.address || supplier.address;
+    supplier.deliveryAddress = req.body.deliveryAddress || supplier.deliveryAddress;
     supplier.isActive = req.body.isActive !== undefined ? req.body.isActive : supplier.isActive;
 
     const updatedSupplier = await supplier.save();
