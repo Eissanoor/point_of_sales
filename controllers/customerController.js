@@ -5,7 +5,7 @@ const Customer = require('../models/customerModel');
 // @access  Private
 const createCustomer = async (req, res) => {
   try {
-    const { name, email, phoneNumber, address, customerType } = req.body;
+    const { name, email, phoneNumber, cnicNumber, address, customerType, manager, country, state, city, deliveryAddress } = req.body;
 
     // Check if customer already exists with the same email
     const customerExists = await Customer.findOne({ name });
@@ -21,8 +21,14 @@ const createCustomer = async (req, res) => {
       name,
       email,
       phoneNumber,
+      cnicNumber,
       address,
       customerType,
+      manager,
+      country,
+      state,
+      city,
+      deliveryAddress,
     });
 
     if (customer) {
@@ -63,6 +69,10 @@ const getCustomers = async (req, res) => {
           { name: { $regex: search, $options: 'i' } },
           { email: { $regex: search, $options: 'i' } },
           { phoneNumber: { $regex: search, $options: 'i' } },
+          { cnicNumber: { $regex: search, $options: 'i' } },
+          { manager: { $regex: search, $options: 'i' } },
+          { country: { $regex: search, $options: 'i' } },
+          { city: { $regex: search, $options: 'i' } },
         ],
       };
     }
@@ -129,8 +139,14 @@ const updateCustomer = async (req, res) => {
       customer.name = req.body.name || customer.name;
       customer.email = req.body.email || customer.email;
       customer.phoneNumber = req.body.phoneNumber || customer.phoneNumber;
+      customer.cnicNumber = req.body.cnicNumber || customer.cnicNumber;
       customer.address = req.body.address || customer.address;
       customer.customerType = req.body.customerType || customer.customerType;
+      customer.manager = req.body.manager || customer.manager;
+      customer.country = req.body.country || customer.country;
+      customer.state = req.body.state || customer.state;
+      customer.city = req.body.city || customer.city;
+      customer.deliveryAddress = req.body.deliveryAddress || customer.deliveryAddress;
 
       const updatedCustomer = await customer.save();
 
