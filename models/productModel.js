@@ -139,7 +139,6 @@ const productSchema = new mongoose.Schema(
     },
     countInStock: {
       type: Number,
-      required: [true, 'Please enter product count in stock'],
       default: 0,
     },
     isActive: {
