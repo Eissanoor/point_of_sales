@@ -1,5 +1,6 @@
 const Product = require('../models/productModel');
 const ProductJourney = require('../models/productJourneyModel');
+const SupplierJourney = require('../models/supplierJourneyModel');
 const { uploadImage, deleteImage } = require('../config/cloudinary');
 
 // @desc    Fetch all products
@@ -113,6 +114,22 @@ const deleteProduct = async (req, res) => {
         notes: 'Product deleted'
       });
       
+      // If product has a supplier, create supplier journey entry
+      if (product.supplier) {
+        await SupplierJourney.create({
+          supplier: product.supplier,
+          user: req.user._id,
+          action: 'product_updated',
+          product: product._id,
+          changes: [{
+            field: 'product_status',
+            oldValue: 'active',
+            newValue: 'deleted'
+          }],
+          notes: `Product "${product.name}" was deleted`
+        });
+      }
+      
       // Delete the product first for quick response
       await Product.deleteOne({ _id: req.params.id });
       
@@ -212,6 +229,21 @@ const createProduct = async (req, res) => {
       }],
       notes: 'Product created'
     });
+    
+    // Create supplier journey entry if supplier is specified
+    if (supplier) {
+      await SupplierJourney.create({
+        supplier,
+        user: req.user._id,
+        action: 'product_added',
+        product: createdProduct._id,
+        changes: [{
+          field: 'product',
+          newValue: createdProduct.name
+        }],
+        notes: `Product "${createdProduct.name}" added to supplier with purchase rate ${purchaseRate}`
+      });
+    }
     
     // Send response immediately
     res.status(201).json({
@@ -574,6 +606,9 @@ const updateProduct = async (req, res) => {
       product.currency = currency;
     }
     
+    // Store old supplier for journey tracking
+    const oldSupplier = product.supplier;
+    
     if (supplier !== undefined) {
       if (hasValueChanged(product.supplier, supplier)) {
         allChanges.push({
@@ -688,6 +723,89 @@ const updateProduct = async (req, res) => {
           changes: allChanges,
           notes: noteText
         });
+        
+        // Handle supplier journey updates
+        const supplierChange = allChanges.find(change => change.field === 'supplier');
+        if (supplierChange) {
+          // If supplier was removed
+          if (oldSupplier && (!supplier || supplier === '')) {
+            await SupplierJourney.create({
+              supplier: oldSupplier,
+              user: req.user._id,
+              action: 'product_updated',
+              product: product._id,
+              changes: [{
+                field: 'supplier_association',
+                oldValue: 'associated',
+                newValue: 'removed'
+              }],
+              notes: `Product "${product.name}" removed from supplier`
+            });
+          }
+          // If supplier was changed
+          else if (oldSupplier && supplier && oldSupplier.toString() !== supplier.toString()) {
+            // Create entry for old supplier (product removed)
+            await SupplierJourney.create({
+              supplier: oldSupplier,
+              user: req.user._id,
+              action: 'product_updated',
+              product: product._id,
+              changes: [{
+                field: 'supplier_association',
+                oldValue: 'associated',
+                newValue: 'removed'
+              }],
+              notes: `Product "${product.name}" moved to different supplier`
+            });
+            
+            // Create entry for new supplier (product added)
+            await SupplierJourney.create({
+              supplier: supplier,
+              user: req.user._id,
+              action: 'product_added',
+              product: product._id,
+              changes: [{
+                field: 'supplier_association',
+                oldValue: 'none',
+                newValue: 'associated'
+              }],
+              notes: `Product "${product.name}" added to supplier with purchase rate ${product.purchaseRate}`
+            });
+          }
+          // If supplier was newly added
+          else if (!oldSupplier && supplier) {
+            await SupplierJourney.create({
+              supplier: supplier,
+              user: req.user._id,
+              action: 'product_added',
+              product: product._id,
+              changes: [{
+                field: 'supplier_association',
+                oldValue: 'none',
+                newValue: 'associated'
+              }],
+              notes: `Product "${product.name}" added to supplier with purchase rate ${product.purchaseRate}`
+            });
+          }
+        }
+        // If purchase rate was updated and there's a supplier, log that too
+        else if (product.supplier) {
+          const purchaseRateChange = allChanges.find(change => change.field === 'purchaseRate');
+          if (purchaseRateChange) {
+            await SupplierJourney.create({
+              supplier: product.supplier,
+              user: req.user._id,
+              action: 'product_updated',
+              product: product._id,
+              changes: [{
+                field: 'purchaseRate',
+                oldValue: purchaseRateChange.oldValue,
+                newValue: purchaseRateChange.newValue
+              }],
+              notes: `Purchase rate updated for product "${product.name}" from ${purchaseRateChange.oldValue} to ${purchaseRateChange.newValue}`
+            });
+          }
+        }
       }
     };
 

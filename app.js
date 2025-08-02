@@ -18,6 +18,8 @@ const productJourneyRoutes = require('./routes/productJourneyRoutes');
 const salesRoutes = require('./routes/salesRoutes');
 const salesJourneyRoutes = require('./routes/salesJourneyRoutes');
 const supplierRoutes = require('./routes/supplierRoutes');
+const supplierJourneyRoutes = require('./routes/supplierJourneyRoutes');
+const supplierPaymentRoutes = require('./routes/supplierPaymentRoutes');
 const currencyRoutes = require('./routes/currencyRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 
@@ -48,6 +50,8 @@ app.use('/api/productjourney', productJourneyRoutes);
 app.use('/api/sales', salesRoutes);
 app.use('/api/sales-journey', salesJourneyRoutes);
 app.use('/api/suppliers', supplierRoutes);
+app.use('/api/supplier-journey', supplierJourneyRoutes);
+app.use('/api/supplier-payments', supplierPaymentRoutes);
 app.use('/api/currencies', currencyRoutes);
 app.use('/api/payments', paymentRoutes);
 
