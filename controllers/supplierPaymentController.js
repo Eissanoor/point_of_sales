@@ -12,8 +12,6 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
     supplier, 
     amount, 
     paymentMethod, 
-    paymentDate, 
-    transactionId, 
     status, 
     notes, 
     attachments,
@@ -31,6 +29,14 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
   // Generate payment number
   const paymentCount = await SupplierPayment.countDocuments();
   const paymentNumber = `SP-${paymentCount + 1}`;
+  
+  // Generate transaction ID automatically
+  const timestamp = new Date().getTime();
+  const randomPart = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+  const transactionId = `TRX-${timestamp}-${randomPart}`;
+  
+  // Set payment date to current date and time
+  const paymentDate = new Date();
 
   // Create payment
   const payment = await SupplierPayment.create({
@@ -38,7 +44,7 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
     supplier,
     amount,
     paymentMethod,
-    paymentDate: paymentDate || Date.now(),
+    paymentDate,
     transactionId,
     status: status || 'completed',
     notes,
@@ -57,11 +63,11 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
     payment: {
       amount,
       method: paymentMethod,
-      date: paymentDate || Date.now(),
+      date: paymentDate,
       status: status || 'completed',
       transactionId
     },
-    notes: `Payment of ${amount} made to supplier via ${paymentMethod}. ${notes || ''}`
+    notes: `Payment of ${amount} made to supplier via ${paymentMethod}. Transaction ID: ${transactionId}. ${notes || ''}`
   });
 
   res.status(201).json(payment);
