@@ -23,7 +23,78 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
     .populate('product', 'name price purchaseRate')
     .populate('supplier', 'name');
 
-  res.status(200).json(journeyEntries);
+  // Get all products for this supplier with detailed information
+  const products = await Product.find({ supplier: supplierId })
+    .populate('category', 'name')
+    .select('name purchaseRate availableQuantity soldOutQuantity category packingUnit');
+  
+  // Calculate summary statistics
+  const productCount = products.length;
+  const totalQuantity = products.reduce((sum, product) => sum + (product.availableQuantity || 0), 0);
+  const totalAmount = products.reduce((sum, product) => sum + (product.purchaseRate * product.availableQuantity || 0), 0);
+  const soldQuantity = products.reduce((sum, product) => sum + (product.soldOutQuantity || 0), 0);
+  const soldAmount = products.reduce((sum, product) => sum + (product.purchaseRate * product.soldOutQuantity || 0), 0);
+
+  // Format product details for response
+  const productDetails = products.map(product => ({
+    id: product._id,
+    name: product.name,
+    category: product.category ? product.category.name : 'Uncategorized',
+    availableQuantity: product.availableQuantity || 0,
+    soldQuantity: product.soldOutQuantity || 0,
+    purchaseRate: product.purchaseRate || 0,
+    totalValue: (product.purchaseRate * product.availableQuantity) || 0,
+    soldValue: (product.purchaseRate * product.soldOutQuantity) || 0,
+    packingUnit: product.packingUnit || '',
+  }));
+
+  // Group products by category
+  const productsByCategory = products.reduce((acc, product) => {
+    const categoryName = product.category ? product.category.name : 'Uncategorized';
+    const categoryId = product.category ? product.category._id.toString() : 'uncategorized';
+    
+    if (!acc[categoryId]) {
+      acc[categoryId] = {
+        name: categoryName,
+        count: 0,
+        quantity: 0,
+        amount: 0,
+        products: []
+      };
+    }
+    
+    acc[categoryId].count += 1;
+    acc[categoryId].quantity += (product.availableQuantity || 0);
+    acc[categoryId].amount += (product.purchaseRate * product.availableQuantity || 0);
+    acc[categoryId].products.push({
+      id: product._id,
+      name: product.name,
+      quantity: product.availableQuantity || 0,
+      value: (product.purchaseRate * product.availableQuantity) || 0
+    });
+    
+    return acc;
+  }, {});
+
+  res.status(200).json({
+    supplier: {
+      id: supplier._id,
+      name: supplier.name,
+      email: supplier.email,
+      phoneNumber: supplier.phoneNumber
+    },
+    summary: {
+      productCount,
+      totalQuantity,
+      totalAmount,
+      soldQuantity,
+      soldAmount,
+      balance: totalAmount - soldAmount
+    },
+    products: productDetails,
+    productsByCategory,
+    journeyEntries
+  });
 });
 
 // @desc    Get supplier product summary
