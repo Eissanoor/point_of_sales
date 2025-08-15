@@ -92,8 +92,7 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
       balance: totalAmount - soldAmount
     },
     products: productDetails,
-    productsByCategory,
-    journeyEntries
+    productsByCategory
   });
 });
 
