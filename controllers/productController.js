@@ -47,6 +47,7 @@ const getProducts = async (req, res) => {
       .populate('category', 'name description')
       .populate('currency', 'name code symbol')
       .populate('supplier', 'name email phone')
+      .populate('warehouse', 'name location')
       .limit(pageSize)
       .skip(pageSize * (page - 1));
 
@@ -73,7 +74,8 @@ const getProductById = async (req, res) => {
     const product = await Product.findById(req.params.id)
       .populate('category', 'name description')
       .populate('currency', 'name code symbol')
-      .populate('supplier', 'name email phone');
+      .populate('supplier', 'name email phone')
+      .populate('warehouse', 'name location');
 
     if (product) {
       res.json({
@@ -186,6 +188,7 @@ const createProduct = async (req, res) => {
       location,
       currency,
       supplier,
+      warehouse,
     } = req.body;
 
     // Create product with placeholder image if needed
@@ -214,6 +217,7 @@ const createProduct = async (req, res) => {
       location: location || '',
       currency,
       supplier,
+      warehouse,
     });
 
     const createdProduct = await product.save();
@@ -318,6 +322,7 @@ const updateProduct = async (req, res) => {
       location,
       currency,
       supplier,
+      warehouse,
     } = req.body;
 
     const product = await Product.findById(req.params.id);
@@ -619,6 +624,18 @@ const updateProduct = async (req, res) => {
         updatedFields.push('supplier');
       }
       product.supplier = supplier;
+    }
+    
+    if (warehouse !== undefined) {
+      if (hasValueChanged(product.warehouse, warehouse)) {
+        allChanges.push({
+          field: 'warehouse',
+          oldValue: product.warehouse,
+          newValue: warehouse
+        });
+        updatedFields.push('warehouse');
+      }
+      product.warehouse = warehouse;
     }
     
     // Save product first for quick response

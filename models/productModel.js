@@ -57,6 +57,10 @@ const productSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Supplier',
     },
+    warehouse: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Warehouse',
+    },
     currency: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Currency',
