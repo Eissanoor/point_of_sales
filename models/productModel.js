@@ -84,11 +84,7 @@ const productSchema = new mongoose.Schema(
       required: true,
       default: 0,
     },
-    price: {
-      type: Number,
-     
-      default: 0,
-    },
+  
     purchaseRate: {
       type: Number,
       required: [true, 'Please enter product purchase rate'],

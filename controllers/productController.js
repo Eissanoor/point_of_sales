@@ -168,7 +168,6 @@ const createProduct = async (req, res) => {
   try {
     const {
       name,
-      price,
       purchaseRate,
       saleRate,
       wholesaleRate,
@@ -194,7 +193,6 @@ const createProduct = async (req, res) => {
     // Create product with placeholder image if needed
     const product = new Product({
       name,
-      price,
       purchaseRate,
       saleRate,
       wholesaleRate,
@@ -301,7 +299,6 @@ const updateProduct = async (req, res) => {
   try {
     const {
       name,
-      price,
       purchaseRate,
       saleRate,
       wholesaleRate,
@@ -380,17 +377,6 @@ const updateProduct = async (req, res) => {
       product.name = name;
     }
     
-    if (price !== undefined) {
-      if (hasValueChanged(product.price, price)) {
-        allChanges.push({
-          field: 'price',
-          oldValue: product.price,
-          newValue: price
-        });
-        updatedFields.push('price');
-      }
-      product.price = price;
-    }
     
     if (purchaseRate !== undefined) {
       if (hasValueChanged(product.purchaseRate, purchaseRate)) {
