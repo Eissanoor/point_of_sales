@@ -174,8 +174,7 @@ const createProduct = async (req, res) => {
       retailRate,
       size,
       color,
-      barcode,
-      availableQuantity,
+
       soldOutQuantity,
       packingUnit,
       additionalUnit,
@@ -184,7 +183,7 @@ const createProduct = async (req, res) => {
       category,
       countInStock,
       isActive,
-      location,
+
       currency,
       supplier,
       warehouse,
@@ -199,8 +198,7 @@ const createProduct = async (req, res) => {
       retailRate,
       size,
       color,
-      barcode,
-      availableQuantity,
+
       soldOutQuantity,
       packingUnit,
       additionalUnit,
@@ -212,7 +210,6 @@ const createProduct = async (req, res) => {
       countInStock,
       description,
       isActive: isActive !== undefined ? isActive : true,
-      location: location || '',
       currency,
       supplier,
       warehouse,
@@ -305,8 +302,7 @@ const updateProduct = async (req, res) => {
       retailRate,
       size,
       color,
-      barcode,
-      availableQuantity,
+
       soldOutQuantity,
       packingUnit,
       additionalUnit,
@@ -316,7 +312,7 @@ const updateProduct = async (req, res) => {
       countInStock,
       isActive,
       removeImage,
-      location,
+
       currency,
       supplier,
       warehouse,
@@ -450,29 +446,7 @@ const updateProduct = async (req, res) => {
       product.color = color;
     }
     
-    if (barcode !== undefined) {
-      if (hasValueChanged(product.barcode, barcode)) {
-        allChanges.push({
-          field: 'barcode',
-          oldValue: product.barcode,
-          newValue: barcode
-        });
-        updatedFields.push('barcode');
-      }
-      product.barcode = barcode;
-    }
-    
-    if (availableQuantity !== undefined) {
-      if (hasValueChanged(product.availableQuantity, availableQuantity)) {
-        allChanges.push({
-          field: 'availableQuantity',
-          oldValue: product.availableQuantity,
-          newValue: availableQuantity
-        });
-        updatedFields.push('available quantity');
-      }
-      product.availableQuantity = availableQuantity;
-    }
+
     
     if (soldOutQuantity !== undefined) {
       if (hasValueChanged(product.soldOutQuantity, soldOutQuantity)) {
@@ -573,17 +547,7 @@ const updateProduct = async (req, res) => {
       product.isActive = isActiveBool;
     }
     
-    if (location !== undefined) {
-      if (hasValueChanged(product.location, location)) {
-        allChanges.push({
-          field: 'location',
-          oldValue: product.location,
-          newValue: location
-        });
-        updatedFields.push('location');
-      }
-      product.location = location;
-    }
+
     
     if (currency !== undefined) {
       if (hasValueChanged(product.currency, currency)) {

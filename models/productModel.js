@@ -65,10 +65,7 @@ const productSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Currency',
     },
-    location: {
-      type: String,
-      default: '',
-    },
+
     description: {
       type: String,
       required: [true, 'Please enter product description'],
@@ -113,14 +110,7 @@ const productSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
-    barcode: {
-      type: String,
-      default: '',
-    },
-    availableQuantity: {
-      type: Number,
-      default: 0,
-    },
+
     soldOutQuantity: {
       type: Number,
       default: 0,
