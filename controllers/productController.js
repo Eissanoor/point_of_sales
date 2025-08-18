@@ -1,62 +1,98 @@
 const Product = require('../models/productModel');
 const ProductJourney = require('../models/productJourneyModel');
-const SupplierJourney = require('../models/supplierJourneyModel');
-const { uploadImage, deleteImage } = require('../config/cloudinary');
+const Category = require('../models/categoryModel');
+const cloudinary = require('../config/cloudinary');
 
-// @desc    Fetch all products
+// @desc    Get all products
 // @route   GET /api/products
 // @access  Public
 const getProducts = async (req, res) => {
   try {
-    const pageSize = 10;
-    const page = Number(req.query.page) || 1;
-    const showAll = req.query.showAll === 'true';
+    const { 
+      keyword = '', 
+      category,
+      supplier,
+      warehouse,
+      page = 1, 
+      limit = 10,
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+      minPrice,
+      maxPrice,
+      inStock
+    } = req.query;
 
-    let searchQuery = { isActive: true }; // Default to only active products
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
     
-    // If showAll is true and user is admin, show all products (active and inactive)
-    if (showAll && req.user && req.user.isAdmin) {
-      searchQuery = {};
+    // Build filter object
+    const filter = {};
+    
+    // Search by keyword in name or description
+    if (keyword) {
+      filter.$or = [
+        { name: { $regex: keyword, $options: 'i' } },
+        { description: { $regex: keyword, $options: 'i' } }
+      ];
     }
     
-    if (req.query.search) {
-      // Get category IDs that match the search term
-      const Category = require('../models/categoryModel');
-      const categories = await Category.find({
-        name: { $regex: req.query.search, $options: 'i' }
-      });
-      
-      const categoryIds = categories.map(cat => cat._id);
-      
-      // Search by product name OR category ID while maintaining isActive filter
-      const searchCondition = {
-        $or: [
-          { name: { $regex: req.query.search, $options: 'i' } },
-          { category: { $in: categoryIds } }
-        ]
-      };
-      
-      // Combine search condition with isActive filter
-      searchQuery = showAll && req.user && req.user.isAdmin 
-        ? searchCondition 
-        : { ...searchCondition, isActive: true };
+    // Filter by category
+    if (category) {
+      filter.category = category;
     }
-
-    const count = await Product.countDocuments(searchQuery);
-    const products = await Product.find(searchQuery)
-      .populate('category', 'name description')
+    
+    // Filter by supplier
+    if (supplier) {
+      filter.supplier = supplier;
+    }
+    
+    // Filter by warehouse
+    if (warehouse) {
+      filter.warehouse = warehouse;
+    }
+    
+    // Filter by price range
+    if (minPrice || maxPrice) {
+      filter.saleRate = {};
+      if (minPrice) filter.saleRate.$gte = parseFloat(minPrice);
+      if (maxPrice) filter.saleRate.$lte = parseFloat(maxPrice);
+    }
+    
+    // Filter by stock availability
+    if (inStock === 'true') {
+      filter.countInStock = { $gt: 0 };
+    } else if (inStock === 'false') {
+      filter.countInStock = { $eq: 0 };
+    }
+    
+    // Only show active products
+    filter.isActive = true;
+    
+    // Determine sort options
+    const sort = {};
+    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    
+    // Count total documents for pagination info
+    const totalProducts = await Product.countDocuments(filter);
+    
+    // Find products based on filters with pagination and sorting
+    const products = await Product.find(filter)
+      .populate('category', 'name')
+      .populate('supplier', 'name')
+      .populate('warehouse', 'name code')
       .populate('currency', 'name code symbol')
-      .populate('supplier', 'name email phone')
-      .populate('warehouse', 'name location')
-      .limit(pageSize)
-      .skip(pageSize * (page - 1));
+      .sort(sort)
+      .skip(skip)
+      .limit(limitNum);
 
     res.json({
       status: 'success',
       results: products.length,
+      totalPages: Math.ceil(totalProducts / limitNum),
+      currentPage: pageNum,
+      totalProducts,
       data: products,
-      page,
-      pages: Math.ceil(count / pageSize),
     });
   } catch (error) {
     res.status(500).json({
@@ -66,16 +102,17 @@ const getProducts = async (req, res) => {
   }
 };
 
-// @desc    Fetch single product
+// @desc    Get product by ID
 // @route   GET /api/products/:id
 // @access  Public
 const getProductById = async (req, res) => {
   try {
     const product = await Product.findById(req.params.id)
-      .populate('category', 'name description')
+      .populate('category', 'name')
+      .populate('supplier', 'name email phoneNumber')
+      .populate('warehouse', 'name code')
       .populate('currency', 'name code symbol')
-      .populate('supplier', 'name email phone')
-      .populate('warehouse', 'name location');
+      .populate('reviews.user', 'name email');
 
     if (product) {
       res.json({
@@ -96,7 +133,7 @@ const getProductById = async (req, res) => {
   }
 };
 
-// @desc    Delete a product
+// @desc    Delete product
 // @route   DELETE /api/products/:id
 // @access  Private/Admin
 const deleteProduct = async (req, res) => {
@@ -104,49 +141,26 @@ const deleteProduct = async (req, res) => {
     const product = await Product.findById(req.params.id);
 
     if (product) {
-      // Create product journey record for deletion
+      // Delete product image from cloudinary if exists
+      if (product.imagePublicId) {
+        await cloudinary.uploader.destroy(product.imagePublicId);
+      }
+      
+      // Create product journey record before deleting
       await ProductJourney.create({
         product: product._id,
         user: req.user._id,
         action: 'deleted',
-        changes: [{
-          field: 'product',
-          oldValue: product.name
-        }],
-        notes: 'Product deleted'
+        changes: [],
+        notes: `Product ${product.name} deleted`,
       });
       
-      // If product has a supplier, create supplier journey entry
-      if (product.supplier) {
-        await SupplierJourney.create({
-          supplier: product.supplier,
-          user: req.user._id,
-          action: 'product_updated',
-          product: product._id,
-          changes: [{
-            field: 'product_status',
-            oldValue: 'active',
-            newValue: 'deleted'
-          }],
-          notes: `Product "${product.name}" was deleted`
-        });
-      }
-      
-      // Delete the product first for quick response
       await Product.deleteOne({ _id: req.params.id });
       
-      // Send response immediately
       res.json({
         status: 'success',
         message: 'Product removed',
       });
-      
-      // Delete image from Cloudinary asynchronously
-      if (product.imagePublicId) {
-        deleteImage(product.imagePublicId).catch(err => 
-          console.error('Error deleting image from Cloudinary:', err)
-        );
-      }
     } else {
       res.status(404).json({
         status: 'fail',
@@ -161,125 +175,93 @@ const deleteProduct = async (req, res) => {
   }
 };
 
-// @desc    Create a product
+// @desc    Create product
 // @route   POST /api/products
 // @access  Private/Admin
 const createProduct = async (req, res) => {
   try {
     const {
       name,
+      category,
+      supplier,
+      warehouse,
+      currency,
+      description,
       purchaseRate,
       saleRate,
       wholesaleRate,
       retailRate,
       size,
       color,
-
-      soldOutQuantity,
       packingUnit,
       additionalUnit,
       pouchesOrPieces,
-      description,
-      category,
-      countInStock,
-      isActive,
-
-      currency,
-      supplier,
-      warehouse,
+      countInStock
     } = req.body;
-
-    // Create product with placeholder image if needed
-    const product = new Product({
-      name,
-      purchaseRate,
-      saleRate,
-      wholesaleRate,
-      retailRate,
-      size,
-      color,
-
-      soldOutQuantity,
-      packingUnit,
-      additionalUnit,
-      pouchesOrPieces,
-      user: req.user._id,
-      image: '',
-      imagePublicId: '',
-      category,
-      countInStock,
-      description,
-      isActive: isActive !== undefined ? isActive : true,
-      currency,
-      supplier,
-      warehouse,
-    });
-
-    const createdProduct = await product.save();
     
-    // Create product journey record for creation
-    await ProductJourney.create({
-      product: createdProduct._id,
-      user: req.user._id,
-      action: 'created',
-      changes: [{
-        field: 'product',
-        newValue: createdProduct.name
-      }],
-      notes: 'Product created'
-    });
-    
-    // Create supplier journey entry if supplier is specified
-    if (supplier) {
-      await SupplierJourney.create({
-        supplier,
-        user: req.user._id,
-        action: 'product_added',
-        product: createdProduct._id,
-        changes: [{
-          field: 'product',
-          newValue: createdProduct.name
-        }],
-        notes: `Product "${createdProduct.name}" added to supplier with purchase rate ${purchaseRate}`
+    // Check if category exists
+    const categoryExists = await Category.findById(category);
+    if (!categoryExists) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid category',
       });
     }
     
-    // Send response immediately
+    // Upload image to cloudinary if provided
+    let imageUrl = '';
+    let imagePublicId = '';
+    
+    if (req.file) {
+      const result = await cloudinary.uploader.upload(req.file.path, {
+        folder: 'products',
+      });
+      
+      imageUrl = result.secure_url;
+      imagePublicId = result.public_id;
+    }
+    
+    const product = await Product.create({
+      user: req.user._id,
+      name,
+      image: imageUrl,
+      imagePublicId,
+      category,
+      supplier: supplier || null,
+      warehouse: warehouse || null,
+      currency: currency || null,
+      description,
+      purchaseRate: purchaseRate || 0,
+      saleRate: saleRate || 0,
+      wholesaleRate: wholesaleRate || 0,
+      retailRate: retailRate || 0,
+      size: size || '',
+      color: color || '',
+      packingUnit: packingUnit || '',
+      additionalUnit: additionalUnit || '',
+      pouchesOrPieces: pouchesOrPieces || 0,
+      countInStock: countInStock || 0,
+    });
+    
+    // Create product journey record
+    await ProductJourney.create({
+      product: product._id,
+      user: req.user._id,
+      action: 'created',
+      changes: [],
+      notes: 'Product created',
+    });
+    
+    if (product) {
     res.status(201).json({
       status: 'success',
-      message: 'Product created successfully',
-    });
-
-    // Handle image upload to Cloudinary asynchronously
-    if (req.file) {
-      try {
-        // Convert buffer to base64 string for Cloudinary
-        const b64 = Buffer.from(req.file.buffer).toString('base64');
-        const dataURI = `data:${req.file.mimetype};base64,${b64}`;
-        
-        const result = await uploadImage(dataURI);
-        
-        // Update product with image info
-        await Product.findByIdAndUpdate(createdProduct._id, {
-          image: result.secure_url,
-          imagePublicId: result.public_id,
-        });
-        
-        // Create product journey record for image update
-        await ProductJourney.create({
-          product: createdProduct._id,
-          user: req.user._id,
-          action: 'updated',
-          changes: [{
-            field: 'image',
-            oldValue: '',
-            newValue: result.secure_url
-          }],
-          notes: 'Updated image'
-        });
-      } catch (uploadError) {
-        console.error('Error uploading image:', uploadError);
-      }
+        data: product,
+      });
+    } else {
+      res.status(400).json({
+        status: 'fail',
+        message: 'Invalid product data',
+      });
     }
   } catch (error) {
     res.status(500).json({
@@ -289,506 +271,81 @@ const createProduct = async (req, res) => {
   }
 };
 
-// @desc    Update a product
+// @desc    Update product
 // @route   PUT /api/products/:id
 // @access  Private/Admin
 const updateProduct = async (req, res) => {
   try {
-    const {
-      name,
-      purchaseRate,
-      saleRate,
-      wholesaleRate,
-      retailRate,
-      size,
-      color,
-
-      soldOutQuantity,
-      packingUnit,
-      additionalUnit,
-      pouchesOrPieces,
-      description,
-      category,
-      countInStock,
-      isActive,
-      removeImage,
-
-      currency,
-      supplier,
-      warehouse,
-    } = req.body;
-
     const product = await Product.findById(req.params.id);
-
-    if (!product) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Product not found',
-      });
-    }
-
-    // Collect all changes in a single array
-    const allChanges = [];
     
-    // Track what fields were updated for the notes
-    const updatedFields = [];
-    
-    // Helper function to check if values are actually different
-    const hasValueChanged = (oldVal, newVal) => {
-      // Handle null/undefined/empty string equivalence
-      if ((oldVal === null || oldVal === undefined || oldVal === '') && 
-          (newVal === null || newVal === undefined || newVal === '')) {
-        return false;
+    if (product) {
+      const oldProduct = { ...product.toObject() };
+      const changes = [];
+      
+      // Update fields if provided
+      for (const [key, value] of Object.entries(req.body)) {
+        if (key !== 'image' && product[key] !== value) {
+          changes.push({
+            field: key,
+            oldValue: product[key],
+            newValue: value,
+          });
+          product[key] = value;
+        }
       }
       
-      // Handle numeric comparisons - convert string numbers to actual numbers
-      const oldNum = typeof oldVal === 'string' ? Number(oldVal) : oldVal;
-      const newNum = typeof newVal === 'string' ? Number(newVal) : newVal;
-      
-      // If both are valid numbers after conversion, compare them numerically
-      if (!isNaN(oldNum) && !isNaN(newNum) && 
-          (typeof oldNum === 'number' && typeof newNum === 'number')) {
-        return oldNum !== newNum;
-      }
-      
-      // For string comparison, trim and compare
-      if (typeof oldVal === 'string' && typeof newVal === 'string') {
-        return oldVal.trim() !== newVal.trim();
-      }
-      
-      // Default comparison
-      return oldVal !== newVal;
-    };
-
-    // Check for changes and update product
-    if (name !== undefined) {
-      if (hasValueChanged(product.name, name)) {
-        allChanges.push({
-          field: 'name',
-          oldValue: product.name,
-          newValue: name
-        });
-        updatedFields.push('name');
-      }
-      product.name = name;
-    }
-    
-    
-    if (purchaseRate !== undefined) {
-      if (hasValueChanged(product.purchaseRate, purchaseRate)) {
-        allChanges.push({
-          field: 'purchaseRate',
-          oldValue: product.purchaseRate,
-          newValue: purchaseRate
-        });
-        updatedFields.push('purchase rate');
-      }
-      product.purchaseRate = purchaseRate;
-    }
-    
-    if (saleRate !== undefined) {
-      if (hasValueChanged(product.saleRate, saleRate)) {
-        allChanges.push({
-          field: 'saleRate',
-          oldValue: product.saleRate,
-          newValue: saleRate
-        });
-        updatedFields.push('sale rate');
-      }
-      product.saleRate = saleRate;
-    }
-    
-    if (wholesaleRate !== undefined) {
-      if (hasValueChanged(product.wholesaleRate, wholesaleRate)) {
-        allChanges.push({
-          field: 'wholesaleRate',
-          oldValue: product.wholesaleRate,
-          newValue: wholesaleRate
-        });
-        updatedFields.push('wholesale rate');
-      }
-      product.wholesaleRate = wholesaleRate;
-    }
-    
-    if (retailRate !== undefined) {
-      if (hasValueChanged(product.retailRate, retailRate)) {
-        allChanges.push({
-          field: 'retailRate',
-          oldValue: product.retailRate,
-          newValue: retailRate
-        });
-        updatedFields.push('retail rate');
-      }
-      product.retailRate = retailRate;
-    }
-    
-    if (size !== undefined) {
-      if (hasValueChanged(product.size, size)) {
-        allChanges.push({
-          field: 'size',
-          oldValue: product.size,
-          newValue: size
-        });
-        updatedFields.push('size');
-      }
-      product.size = size;
-    }
-    
-    if (color !== undefined) {
-      if (hasValueChanged(product.color, color)) {
-        allChanges.push({
-          field: 'color',
-          oldValue: product.color,
-          newValue: color
-        });
-        updatedFields.push('color');
-      }
-      product.color = color;
-    }
-    
-
-    
-    if (soldOutQuantity !== undefined) {
-      if (hasValueChanged(product.soldOutQuantity, soldOutQuantity)) {
-        allChanges.push({
-          field: 'soldOutQuantity',
-          oldValue: product.soldOutQuantity,
-          newValue: soldOutQuantity
-        });
-        updatedFields.push('sold out quantity');
-      }
-      product.soldOutQuantity = soldOutQuantity;
-    }
-    
-    if (packingUnit !== undefined) {
-      if (hasValueChanged(product.packingUnit, packingUnit)) {
-        allChanges.push({
-          field: 'packingUnit',
-          oldValue: product.packingUnit,
-          newValue: packingUnit
-        });
-        updatedFields.push('packing unit');
-      }
-      product.packingUnit = packingUnit;
-    }
-    
-    if (additionalUnit !== undefined) {
-      if (hasValueChanged(product.additionalUnit, additionalUnit)) {
-        allChanges.push({
-          field: 'additionalUnit',
-          oldValue: product.additionalUnit,
-          newValue: additionalUnit
-        });
-        updatedFields.push('additional unit');
-      }
-      product.additionalUnit = additionalUnit;
-    }
-    
-    if (pouchesOrPieces !== undefined) {
-      if (hasValueChanged(product.pouchesOrPieces, pouchesOrPieces)) {
-        allChanges.push({
-          field: 'pouchesOrPieces',
-          oldValue: product.pouchesOrPieces,
-          newValue: pouchesOrPieces
-        });
-        updatedFields.push('pouches/pieces');
-      }
-      product.pouchesOrPieces = pouchesOrPieces;
-    }
-    
-    if (description !== undefined) {
-      if (hasValueChanged(product.description, description)) {
-        allChanges.push({
-          field: 'description',
-          oldValue: product.description,
-          newValue: description
-        });
-        updatedFields.push('description');
-      }
-      product.description = description;
-    }
-    
-    if (category !== undefined && category !== null) {
-      if (category.toString() !== product.category.toString()) {
-        allChanges.push({
-          field: 'category',
-          oldValue: product.category,
-          newValue: category
-        });
-        updatedFields.push('category');
-      }
-      product.category = category;
-    }
-    
-    if (countInStock !== undefined) {
-      if (hasValueChanged(product.countInStock, countInStock)) {
-        allChanges.push({
-          field: 'countInStock',
-          oldValue: product.countInStock,
-          newValue: countInStock
-        });
-        updatedFields.push('count in stock');
-      }
-      product.countInStock = countInStock;
-    }
-    
-    if (isActive !== undefined) {
-      // Convert to proper boolean value
-      const isActiveBool = isActive === true || isActive === 'true' || isActive === 1;
-      
-      if (hasValueChanged(product.isActive, isActiveBool)) {
-        allChanges.push({
-          field: 'isActive',
-          oldValue: product.isActive,
-          newValue: isActiveBool
-        });
-        updatedFields.push('active status');
-      }
-      product.isActive = isActiveBool;
-    }
-    
-
-    
-    if (currency !== undefined) {
-      if (hasValueChanged(product.currency, currency)) {
-        allChanges.push({
-          field: 'currency',
-          oldValue: product.currency,
-          newValue: currency
-        });
-        updatedFields.push('currency');
-      }
-      product.currency = currency;
-    }
-    
-    // Store old supplier for journey tracking
-    const oldSupplier = product.supplier;
-    
-    if (supplier !== undefined) {
-      if (hasValueChanged(product.supplier, supplier)) {
-        allChanges.push({
-          field: 'supplier',
-          oldValue: product.supplier,
-          newValue: supplier
-        });
-        updatedFields.push('supplier');
-      }
-      product.supplier = supplier;
-    }
-    
-    if (warehouse !== undefined) {
-      if (hasValueChanged(product.warehouse, warehouse)) {
-        allChanges.push({
-          field: 'warehouse',
-          oldValue: product.warehouse,
-          newValue: warehouse
-        });
-        updatedFields.push('warehouse');
-      }
-      product.warehouse = warehouse;
-    }
-    
-    // Save product first for quick response
-    await product.save();
-    
-    // Send response immediately
-    res.json({
-      status: 'success',
-      message: 'Product updated successfully',
-    });
-
-    // Handle image operations asynchronously
-    const processImage = async () => {
-      // Store current image info
-      let imageUrl = product.image;
-      let imagePublicId = product.imagePublicId;
-      let shouldUpdateImage = false;
-      let imageChange = null;
-
-      // Handle image removal request
-      if (removeImage === 'true' && !req.file) {
+      // Upload new image if provided
+      if (req.file) {
+        // Delete old image from cloudinary if exists
         if (product.imagePublicId) {
-          try {
-            await deleteImage(product.imagePublicId);
-          } catch (error) {
-            console.error('Error deleting image:', error);
-          }
+          await cloudinary.uploader.destroy(product.imagePublicId);
         }
         
-        // Prepare image change record
-        imageChange = {
+        // Upload new image
+        const result = await cloudinary.uploader.upload(req.file.path, {
+          folder: 'products',
+        });
+        
+        changes.push({
           field: 'image',
           oldValue: product.image,
-          newValue: ''
-        };
-        
-        imageUrl = '';
-        imagePublicId = '';
-        shouldUpdateImage = true;
-        updatedFields.push('image removed');
-      }
-
-      // Handle new image upload
-      if (req.file) {
-        // Delete old image if exists
-        if (product.imagePublicId) {
-          try {
-            await deleteImage(product.imagePublicId);
-          } catch (error) {
-            console.error('Error deleting old image:', error);
-          }
-        }
-
-        try {
-          // Upload new image
-          const b64 = Buffer.from(req.file.buffer).toString('base64');
-          const dataURI = `data:${req.file.mimetype};base64,${b64}`;
-          const result = await uploadImage(dataURI);
-          
-          // Prepare image change record
-          imageChange = {
-            field: 'image',
-            oldValue: product.image,
-            newValue: result.secure_url
-          };
-          
-          imageUrl = result.secure_url;
-          imagePublicId = result.public_id;
-          shouldUpdateImage = true;
-          updatedFields.push('image');
-        } catch (error) {
-          console.error('Error uploading new image:', error);
-        }
-      }
-
-      // Update product with new image info if needed
-      if (shouldUpdateImage) {
-        await Product.findByIdAndUpdate(product._id, {
-          image: imageUrl,
-          imagePublicId: imagePublicId,
+          newValue: result.secure_url,
         });
         
-        // Add image change to allChanges array
-        if (imageChange) {
-          allChanges.push(imageChange);
-        }
+        product.image = result.secure_url;
+        product.imagePublicId = result.public_id;
       }
       
-      // Create a single product journey record for all changes if there are any
-      if (allChanges.length > 0) {
-        // Create a descriptive note based on what was updated
-        const noteText = updatedFields.length > 0 
-          ? `Updated: ${updatedFields.join(', ')}`
-          : 'Product updated';
-          
-        // Use the productJourney controller directly
-        const ProductJourney = require('../models/productJourneyModel');
+      // Create product journey record
         await ProductJourney.create({
           product: product._id,
           user: req.user._id,
           action: 'updated',
-          changes: allChanges,
-          notes: noteText
-        });
-        
-        // Handle supplier journey updates
-        const supplierChange = allChanges.find(change => change.field === 'supplier');
-        if (supplierChange) {
-          // If supplier was removed
-          if (oldSupplier && (!supplier || supplier === '')) {
-            await SupplierJourney.create({
-              supplier: oldSupplier,
-              user: req.user._id,
-              action: 'product_updated',
-              product: product._id,
-              changes: [{
-                field: 'supplier_association',
-                oldValue: 'associated',
-                newValue: 'removed'
-              }],
-              notes: `Product "${product.name}" removed from supplier`
-            });
-          }
-          // If supplier was changed
-          else if (oldSupplier && supplier && oldSupplier.toString() !== supplier.toString()) {
-            // Create entry for old supplier (product removed)
-            await SupplierJourney.create({
-              supplier: oldSupplier,
-              user: req.user._id,
-              action: 'product_updated',
-              product: product._id,
-              changes: [{
-                field: 'supplier_association',
-                oldValue: 'associated',
-                newValue: 'removed'
-              }],
-              notes: `Product "${product.name}" moved to different supplier`
-            });
-            
-            // Create entry for new supplier (product added)
-            await SupplierJourney.create({
-              supplier: supplier,
-              user: req.user._id,
-              action: 'product_added',
-              product: product._id,
-              changes: [{
-                field: 'supplier_association',
-                oldValue: 'none',
-                newValue: 'associated'
-              }],
-              notes: `Product "${product.name}" added to supplier with purchase rate ${product.purchaseRate}`
-            });
-          }
-          // If supplier was newly added
-          else if (!oldSupplier && supplier) {
-            await SupplierJourney.create({
-              supplier: supplier,
-              user: req.user._id,
-              action: 'product_added',
-              product: product._id,
-              changes: [{
-                field: 'supplier_association',
-                oldValue: 'none',
-                newValue: 'associated'
-              }],
-              notes: `Product "${product.name}" added to supplier with purchase rate ${product.purchaseRate}`
-            });
-          }
-        }
-        // If purchase rate was updated and there's a supplier, log that too
-        else if (product.supplier) {
-          const purchaseRateChange = allChanges.find(change => change.field === 'purchaseRate');
-          if (purchaseRateChange) {
-            await SupplierJourney.create({
-              supplier: product.supplier,
-              user: req.user._id,
-              action: 'product_updated',
-              product: product._id,
-              changes: [{
-                field: 'purchaseRate',
-                oldValue: purchaseRateChange.oldValue,
-                newValue: purchaseRateChange.newValue
-              }],
-              notes: `Purchase rate updated for product "${product.name}" from ${purchaseRateChange.oldValue} to ${purchaseRateChange.newValue}`
-            });
-          }
-        }
-      }
-    };
-
-    // Process image and create journey record
-    processImage().catch(err => 
-      console.error('Error processing image or creating journey record:', err)
-    );
+        changes,
+        notes: 'Product updated',
+      });
+      
+      const updatedProduct = await product.save();
+      
+      res.json({
+        status: 'success',
+        data: updatedProduct,
+      });
+    } else {
+      res.status(404).json({
+        status: 'fail',
+        message: 'Product not found',
+      });
+    }
   } catch (error) {
-    return res.status(400).json({
+    res.status(500).json({
       status: 'error',
       message: error.message,
     });
   }
 };
 
-// @desc    Create new review
+// @desc    Create product review
 // @route   POST /api/products/:id/reviews
 // @access  Private
 const createProductReview = async (req, res) => {
@@ -798,8 +355,9 @@ const createProductReview = async (req, res) => {
     const product = await Product.findById(req.params.id);
 
     if (product) {
+      // Check if user already reviewed this product
       const alreadyReviewed = product.reviews.find(
-        (r) => r.user.toString() === req.user._id.toString()
+        (review) => review.user.toString() === req.user._id.toString()
       );
 
       if (alreadyReviewed) {
@@ -810,21 +368,35 @@ const createProductReview = async (req, res) => {
       }
 
       const review = {
+        user: req.user._id,
         name: req.user.name,
         rating: Number(rating),
         comment,
-        user: req.user._id,
       };
 
       product.reviews.push(review);
-
       product.numReviews = product.reviews.length;
-
       product.rating =
         product.reviews.reduce((acc, item) => item.rating + acc, 0) /
         product.reviews.length;
 
       await product.save();
+      
+      // Create product journey record
+      await ProductJourney.create({
+        product: product._id,
+        user: req.user._id,
+        action: 'review_added',
+        changes: [
+          {
+            field: 'reviews',
+            oldValue: null,
+            newValue: review,
+          },
+        ],
+        notes: 'Review added',
+      });
+      
       res.status(201).json({
         status: 'success',
         message: 'Review added',
@@ -848,10 +420,15 @@ const createProductReview = async (req, res) => {
 // @access  Private/Admin
 const getProductJourneyByProductId = async (req, res) => {
   try {
-    const productId = req.params.id;
+    const { id } = req.params;
+    const { page = 1, limit = 10 } = req.query;
+    
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
     
     // Check if product exists
-    const product = await Product.findById(productId);
+    const product = await Product.findById(id);
     if (!product) {
       return res.status(404).json({
         status: 'fail',
@@ -859,15 +436,23 @@ const getProductJourneyByProductId = async (req, res) => {
       });
     }
     
-    // Get all journey records for this product, sorted by newest first
-    const journeyRecords = await ProductJourney.find({ product: productId })
+    // Count total documents for pagination info
+    const totalJourneys = await ProductJourney.countDocuments({ product: id });
+    
+    // Get journey records
+    const journeys = await ProductJourney.find({ product: id })
       .populate('user', 'name email')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
       
     res.json({
       status: 'success',
-      results: journeyRecords.length,
-      data: journeyRecords,
+      results: journeys.length,
+      totalPages: Math.ceil(totalJourneys / limitNum),
+      currentPage: pageNum,
+      totalJourneys,
+      data: journeys,
     });
   } catch (error) {
     res.status(500).json({

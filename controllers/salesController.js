@@ -16,6 +16,37 @@ const createSale = async (req, res) => {
       grandTotal
     } = req.body;
 
+    // Check product inventory availability for all items
+    for (const item of items) {
+      // Check if product exists and has enough inventory
+      const product = await Product.findById(item.product);
+      if (!product) {
+        return res.status(404).json({
+          status: 'fail',
+          message: 'Product not found',
+        });
+      }
+
+      // Check if the product is in the specified warehouse
+      if (item.warehouse && product.warehouse && product.warehouse.toString() !== item.warehouse.toString()) {
+        return res.status(400).json({
+          status: 'fail',
+          message: `Product ${product.name} is not available in the selected warehouse`,
+          product: product.name
+        });
+      }
+
+      if (product.countInStock < item.quantity) {
+        return res.status(400).json({
+          status: 'fail',
+          message: `Insufficient inventory for product ${product.name}. Available: ${product.countInStock}, Requested: ${item.quantity}`,
+          product: product.name,
+          availableQuantity: product.countInStock,
+          requestedQuantity: item.quantity
+        });
+      }
+    }
+
     // Generate invoice number (you can customize this logic)
     const date = new Date();
     const year = date.getFullYear().toString().slice(-2);
@@ -48,20 +79,15 @@ const createSale = async (req, res) => {
 
     // Update product quantities
     for (const item of items) {
+      // Get the product
       const product = await Product.findById(item.product);
-      
-      // Initialize soldOutQuantity to 0 if it's null
       const currentSoldOutQuantity = product.soldOutQuantity || 0;
       
-      await Product.findByIdAndUpdate(
-        item.product,
-        {
-          $set: { 
-            countInStock: product.countInStock - item.quantity,
-            soldOutQuantity: currentSoldOutQuantity + item.quantity
-          }
-        }
-      );
+      // Update global counts
+      product.countInStock -= item.quantity;
+      product.soldOutQuantity = currentSoldOutQuantity + item.quantity;
+      
+      await product.save();
     }
 
     // Create sales journey record for the new sale
@@ -260,15 +286,11 @@ const deleteSale = async (req, res) => {
         const currentSoldOutQuantity = product.soldOutQuantity || 0;
         const newSoldOutQuantity = Math.max(0, currentSoldOutQuantity - item.quantity);
         
-        await Product.findByIdAndUpdate(
-          item.product,
-          {
-            $set: { 
-              countInStock: product.countInStock + item.quantity,
-              soldOutQuantity: newSoldOutQuantity
-            }
-          }
-        );
+        // Restore global counts
+        product.countInStock += item.quantity;
+        product.soldOutQuantity = newSoldOutQuantity;
+        
+        await product.save();
       }
 
       // Create sales journey record before deleting the sale

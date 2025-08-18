@@ -8,6 +8,11 @@ const salesItemSchema = new mongoose.Schema(
       required: true,
       ref: 'Product',
     },
+    warehouse: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      ref: 'Warehouse',
+    },
     quantity: {
       type: Number,
       required: true,
