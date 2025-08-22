@@ -6,6 +6,7 @@ const {
   getWarehouseById,
   updateWarehouse,
   deleteWarehouse,
+  getProductsByWarehouseId,
 } = require('../controllers/warehouseController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 
@@ -18,5 +19,9 @@ router.route('/:id')
   .get(protect, getWarehouseById)
   .put(protect, updateWarehouse)
   .delete(protect, deleteWarehouse);
+
+// Get products by warehouse ID
+router.route('/:id/products')
+  .get(protect, getProductsByWarehouseId);
 
 module.exports = router;

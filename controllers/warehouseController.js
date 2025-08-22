@@ -1,4 +1,5 @@
 const Warehouse = require('../models/warehouseModel');
+const Product = require('../models/productModel');
 
 // @desc    Create a new warehouse
 // @route   POST /api/warehouses
@@ -226,10 +227,84 @@ const deleteWarehouse = async (req, res) => {
   }
 };
 
+// @desc    Get products by warehouse ID
+// @route   GET /api/warehouses/:id/products
+// @access  Private
+const getProductsByWarehouseId = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      page = 1, 
+      limit = 10,
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+      keyword = '' 
+    } = req.query;
+    
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    // Check if warehouse exists
+    const warehouse = await Warehouse.findById(id);
+    if (!warehouse) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Warehouse not found',
+      });
+    }
+    
+    // Build filter object
+    const filter = { warehouse: id };
+    
+    // Search by keyword in name or description
+    if (keyword) {
+      filter.$or = [
+        { name: { $regex: keyword, $options: 'i' } },
+        { description: { $regex: keyword, $options: 'i' } }
+      ];
+    }
+    
+    // Only show active products
+    filter.isActive = true;
+    
+    // Determine sort options
+    const sort = {};
+    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    
+    // Count total documents for pagination info
+    const totalProducts = await Product.countDocuments(filter);
+    
+    // Find products based on warehouse ID with pagination and sorting
+    const products = await Product.find(filter)
+      .populate('category', 'name')
+      .populate('supplier', 'name')
+      .populate('currency', 'name code symbol')
+      .sort(sort)
+      .skip(skip)
+      .limit(limitNum);
+    
+    res.json({
+      status: 'success',
+      results: products.length,
+      totalPages: Math.ceil(totalProducts / limitNum),
+      currentPage: pageNum,
+      totalProducts,
+      data: products,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   createWarehouse,
   getWarehouses,
   getWarehouseById,
   updateWarehouse,
   deleteWarehouse,
+  getProductsByWarehouseId,
 };
