@@ -1,5 +1,4 @@
 const Shop = require('../models/shopModel');
-const Product = require('../models/productModel');
 
 // @desc    Create a new shop
 // @route   POST /api/shops
@@ -15,8 +14,7 @@ const createShop = async (req, res) => {
       email,
       shopType,
       openingHours,
-      status,
-      inventory
+      status
     } = req.body;
 
     // Check if shop already exists with the same code
@@ -39,7 +37,7 @@ const createShop = async (req, res) => {
       shopType: shopType || 'retail',
       openingHours,
       status: status || 'active',
-      inventory: inventory || [],
+      inventory: [],
       user: req.user._id,
     });
 
@@ -133,11 +131,7 @@ const getShops = async (req, res) => {
 // @access  Private
 const getShopById = async (req, res) => {
   try {
-    const shop = await Shop.findById(req.params.id)
-      .populate({
-        path: 'inventory.product',
-        select: 'name image description packingUnit additionalUnit'
-      });
+    const shop = await Shop.findById(req.params.id);
 
     if (shop) {
       res.json({
@@ -195,11 +189,6 @@ const updateShop = async (req, res) => {
       shop.openingHours = req.body.openingHours || shop.openingHours;
       shop.status = req.body.status || shop.status;
 
-      // Update inventory if provided
-      if (req.body.inventory) {
-        shop.inventory = req.body.inventory;
-      }
-
       const updatedShop = await shop.save();
 
       res.json({
@@ -247,113 +236,10 @@ const deleteShop = async (req, res) => {
   }
 };
 
-// @desc    Update shop inventory
-// @route   PUT /api/shops/:id/inventory
-// @access  Private
-const updateShopInventory = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { inventory } = req.body;
-
-    if (!inventory || !Array.isArray(inventory)) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Inventory data is required and must be an array',
-      });
-    }
-
-    const shop = await Shop.findById(id);
-    
-    if (!shop) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Shop not found',
-      });
-    }
-
-    // Validate all products exist
-    for (const item of inventory) {
-      if (!item.product) {
-        return res.status(400).json({
-          status: 'fail',
-          message: 'Product ID is required for each inventory item',
-        });
-      }
-
-      const productExists = await Product.findById(item.product);
-      if (!productExists) {
-        return res.status(404).json({
-          status: 'fail',
-          message: `Product with ID ${item.product} not found`,
-        });
-      }
-    }
-
-    // Update inventory
-    shop.inventory = inventory;
-    
-    const updatedShop = await shop.save();
-    
-    res.json({
-      status: 'success',
-      data: updatedShop,
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
-  }
-};
-
-// @desc    Get inventory levels for a shop
-// @route   GET /api/shops/:id/inventory
-// @access  Private
-const getShopInventory = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { lowStock } = req.query;
-    
-    const shop = await Shop.findById(id).populate({
-      path: 'inventory.product',
-      select: 'name image description packingUnit additionalUnit'
-    });
-    
-    if (!shop) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Shop not found',
-      });
-    }
-    
-    let inventory = shop.inventory;
-    
-    // Filter for low stock items if requested
-    if (lowStock === 'true') {
-      inventory = inventory.filter(item => 
-        item.quantity <= item.minimumStockLevel
-      );
-    }
-    
-    res.json({
-      status: 'success',
-      count: inventory.length,
-      data: inventory,
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
-  }
-};
-
 module.exports = {
   createShop,
   getShops,
   getShopById,
   updateShop,
-  deleteShop,
-  updateShopInventory,
-  getShopInventory
+  deleteShop
 };

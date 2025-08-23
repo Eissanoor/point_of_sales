@@ -5,9 +5,7 @@ const {
   getShops,
   getShopById,
   updateShop,
-  deleteShop,
-  updateShopInventory,
-  getShopInventory
+  deleteShop
 } = require('../controllers/shopController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 
@@ -20,10 +18,5 @@ router.route('/:id')
   .get(protect, getShopById)
   .put(protect, updateShop)
   .delete(protect, deleteShop);
-
-// Shop inventory routes
-router.route('/:id/inventory')
-  .get(protect, getShopInventory)
-  .put(protect, updateShopInventory);
 
 module.exports = router;
