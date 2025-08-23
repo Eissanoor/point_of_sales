@@ -8,15 +8,27 @@ const stockTransferSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
-    sourceWarehouse: {
-      type: mongoose.Schema.Types.ObjectId,
+    sourceType: {
+      type: String,
       required: true,
-      ref: 'Warehouse',
+      enum: ['warehouse', 'shop'],
+      default: 'warehouse',
     },
-    destinationWarehouse: {
+    sourceId: {
       type: mongoose.Schema.Types.ObjectId,
       required: true,
-      ref: 'Warehouse',
+      refPath: 'sourceType',
+    },
+    destinationType: {
+      type: String,
+      required: true,
+      enum: ['warehouse', 'shop'],
+      default: 'warehouse',
+    },
+    destinationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      refPath: 'destinationType',
     },
     transferDate: {
       type: Date,
@@ -67,8 +79,10 @@ stockTransferSchema.plugin(autoIncrementPlugin);
 
 // Create indices for faster queries
 stockTransferSchema.index({ transferNumber: 1 }, { unique: true });
-stockTransferSchema.index({ sourceWarehouse: 1 });
-stockTransferSchema.index({ destinationWarehouse: 1 });
+stockTransferSchema.index({ sourceType: 1 });
+stockTransferSchema.index({ sourceId: 1 });
+stockTransferSchema.index({ destinationType: 1 });
+stockTransferSchema.index({ destinationId: 1 });
 stockTransferSchema.index({ transferDate: 1 });
 stockTransferSchema.index({ status: 1 });
 stockTransferSchema.index({ user: 1 });

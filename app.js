@@ -24,6 +24,7 @@ const currencyRoutes = require('./routes/currencyRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const warehouseRoutes = require('./routes/warehouseRoutes');
 const stockTransferRoutes = require('./routes/stockTransferRoutes');
+const shopRoutes = require('./routes/shopRoutes');
 
 // Initialize express app
 const app = express();
@@ -58,6 +59,7 @@ app.use('/api/currencies', currencyRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/warehouses', warehouseRoutes);
 app.use('/api/stock-transfers', stockTransferRoutes);
+app.use('/api/shops', shopRoutes);
 
 // Root route
 app.get('/', (req, res) => {

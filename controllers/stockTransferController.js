@@ -1,6 +1,7 @@
 const StockTransfer = require('../models/stockTransferModel');
 const Product = require('../models/productModel');
 const Warehouse = require('../models/warehouseModel');
+const Shop = require('../models/shopModel');
 
 // @desc    Create a new stock transfer
 // @route   POST /api/stock-transfers
@@ -8,37 +9,59 @@ const Warehouse = require('../models/warehouseModel');
 const createStockTransfer = async (req, res) => {
   try {
     const {
-      sourceWarehouse,
-      destinationWarehouse,
+      sourceType,
+      sourceId,
+      destinationType,
+      destinationId,
       transferDate,
       items,
       status,
       notes
     } = req.body;
 
-    // Check if source and destination warehouses exist
-    const sourceWarehouseExists = await Warehouse.findById(sourceWarehouse);
-    const destinationWarehouseExists = await Warehouse.findById(destinationWarehouse);
-
-    if (!sourceWarehouseExists) {
-      return res.status(404).json({
+    // Validate source and destination types
+    if (!['warehouse', 'shop'].includes(sourceType) || !['warehouse', 'shop'].includes(destinationType)) {
+      return res.status(400).json({
         status: 'fail',
-        message: 'Source warehouse not found'
+        message: 'Source and destination types must be either "warehouse" or "shop"'
       });
     }
 
-    if (!destinationWarehouseExists) {
+    // Check if source exists
+    let sourceExists;
+    if (sourceType === 'warehouse') {
+      sourceExists = await Warehouse.findById(sourceId);
+    } else {
+      sourceExists = await Shop.findById(sourceId);
+    }
+
+    if (!sourceExists) {
       return res.status(404).json({
         status: 'fail',
-        message: 'Destination warehouse not found'
+        message: `Source ${sourceType} not found`
+      });
+    }
+
+    // Check if destination exists
+    let destinationExists;
+    if (destinationType === 'warehouse') {
+      destinationExists = await Warehouse.findById(destinationId);
+    } else {
+      destinationExists = await Shop.findById(destinationId);
+    }
+
+    if (!destinationExists) {
+      return res.status(404).json({
+        status: 'fail',
+        message: `Destination ${destinationType} not found`
       });
     }
 
     // Check if source and destination are different
-    if (sourceWarehouse === destinationWarehouse) {
+    if (sourceType === destinationType && sourceId === destinationId) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Source and destination warehouses cannot be the same'
+        message: 'Source and destination cannot be the same'
       });
     }
 
@@ -50,7 +73,7 @@ const createStockTransfer = async (req, res) => {
       });
     }
 
-    // Check if all products exist and have sufficient stock in source warehouse
+    // Check if all products exist and have sufficient stock in source
     for (const item of items) {
       const product = await Product.findById(item.product);
       
@@ -62,19 +85,42 @@ const createStockTransfer = async (req, res) => {
       }
 
       // Check if product belongs to source warehouse
-      if (product.warehouse.toString() !== sourceWarehouse) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Product ${product.name} does not belong to the source warehouse`
-        });
-      }
+      if (sourceType === 'warehouse') {
+        if (product.warehouse && product.warehouse.toString() !== sourceId) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Product ${product.name} does not belong to the source warehouse`
+          });
+        }
 
-      // Check if there's enough stock
-      if (product.countInStock < item.quantity) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Insufficient stock for product ${product.name}. Available: ${product.countInStock}, Requested: ${item.quantity}`
-        });
+        // Check if there's enough stock in warehouse
+        if (product.countInStock < item.quantity) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Insufficient stock for product ${product.name}. Available: ${product.countInStock}, Requested: ${item.quantity}`
+          });
+        }
+      } else {
+        // Check if product exists in shop inventory
+        const shop = await Shop.findById(sourceId);
+        const inventoryItem = shop.inventory.find(
+          invItem => invItem.product.toString() === item.product
+        );
+
+        if (!inventoryItem) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Product ${product.name} does not exist in the source shop inventory`
+          });
+        }
+
+        // Check if there's enough stock in shop
+        if (inventoryItem.quantity < item.quantity) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Insufficient stock for product ${product.name} in shop. Available: ${inventoryItem.quantity}, Requested: ${item.quantity}`
+          });
+        }
       }
     }
 
@@ -96,8 +142,10 @@ const createStockTransfer = async (req, res) => {
     // Create stock transfer
     const stockTransfer = await StockTransfer.create({
       transferNumber,
-      sourceWarehouse,
-      destinationWarehouse,
+      sourceType,
+      sourceId,
+      destinationType,
+      destinationId,
       transferDate: transferDate || Date.now(),
       items,
       status: status || 'pending',
@@ -133,8 +181,10 @@ const getStockTransfers = async (req, res) => {
       page = 1,
       limit = 10,
       status,
-      sourceWarehouse,
-      destinationWarehouse,
+      sourceType,
+      sourceId,
+      destinationType,
+      destinationId,
       startDate,
       endDate,
       search
@@ -152,14 +202,20 @@ const getStockTransfers = async (req, res) => {
       query.status = status;
     }
 
-    // Filter by source warehouse
-    if (sourceWarehouse) {
-      query.sourceWarehouse = sourceWarehouse;
+    // Filter by source
+    if (sourceType) {
+      query.sourceType = sourceType;
+    }
+    if (sourceId) {
+      query.sourceId = sourceId;
     }
 
-    // Filter by destination warehouse
-    if (destinationWarehouse) {
-      query.destinationWarehouse = destinationWarehouse;
+    // Filter by destination
+    if (destinationType) {
+      query.destinationType = destinationType;
+    }
+    if (destinationId) {
+      query.destinationId = destinationId;
     }
 
     // Filter by date range
@@ -183,8 +239,16 @@ const getStockTransfers = async (req, res) => {
 
     // Find stock transfers based on query with pagination
     const stockTransfers = await StockTransfer.find(query)
-      .populate('sourceWarehouse', 'name code')
-      .populate('destinationWarehouse', 'name code')
+      .populate({
+        path: 'sourceId',
+        select: 'name code',
+        model: doc => doc.sourceType === 'warehouse' ? 'Warehouse' : 'Shop'
+      })
+      .populate({
+        path: 'destinationId',
+        select: 'name code',
+        model: doc => doc.destinationType === 'warehouse' ? 'Warehouse' : 'Shop'
+      })
       .populate('user', 'name')
       .populate({
         path: 'items.product',
@@ -215,26 +279,41 @@ const getStockTransfers = async (req, res) => {
 // @access  Private
 const getStockTransferById = async (req, res) => {
   try {
-    const stockTransfer = await StockTransfer.findById(req.params.id)
-      .populate('sourceWarehouse', 'name code branch contactPerson phoneNumber email')
-      .populate('destinationWarehouse', 'name code branch contactPerson phoneNumber email')
-      .populate('user', 'name email')
-      .populate({
-        path: 'items.product',
-        select: 'name image description packingUnit additionalUnit'
-      });
-
-    if (stockTransfer) {
-      res.json({
-        status: 'success',
-        data: stockTransfer
-      });
-    } else {
-      res.status(404).json({
+    const stockTransfer = await StockTransfer.findById(req.params.id);
+    
+    if (!stockTransfer) {
+      return res.status(404).json({
         status: 'fail',
         message: 'Stock transfer not found'
       });
     }
+    
+    // Populate source based on type
+    let populatedTransfer;
+    if (stockTransfer.sourceType === 'warehouse') {
+      populatedTransfer = await StockTransfer.findById(req.params.id)
+        .populate('sourceId', 'name code branch contactPerson phoneNumber email')
+        .populate('destinationId', 'name code branch contactPerson phoneNumber email')
+        .populate('user', 'name email')
+        .populate({
+          path: 'items.product',
+          select: 'name image description packingUnit additionalUnit'
+        });
+    } else {
+      populatedTransfer = await StockTransfer.findById(req.params.id)
+        .populate('sourceId', 'name code location contactPerson phoneNumber email')
+        .populate('destinationId', 'name code location contactPerson phoneNumber email')
+        .populate('user', 'name email')
+        .populate({
+          path: 'items.product',
+          select: 'name image description packingUnit additionalUnit'
+        });
+    }
+
+    res.json({
+      status: 'success',
+      data: populatedTransfer
+    });
   } catch (error) {
     res.status(500).json({
       status: 'error',
@@ -278,28 +357,81 @@ const updateStockTransferStatus = async (req, res) => {
     
     // Handle status change to 'completed'
     if (status === 'completed' && stockTransfer.status !== 'completed') {
-      // Update product warehouse and stock counts
+      // Update product stock counts based on source and destination types
       for (const item of stockTransfer.items) {
         const product = await Product.findById(item.product);
         
         if (product) {
-          // Reduce stock in source warehouse
-          if (product.warehouse.toString() === stockTransfer.sourceWarehouse.toString()) {
-            product.countInStock -= item.quantity;
-            
-            // Create a clone of the product for destination warehouse
-            const newProduct = new Product({
-              ...product.toObject(),
-              _id: undefined,
-              warehouse: stockTransfer.destinationWarehouse,
-              countInStock: item.quantity,
-              user: req.user._id
-            });
-            
-            await newProduct.save();
+          // Handle source inventory reduction
+          if (stockTransfer.sourceType === 'warehouse') {
+            // Reduce stock in source warehouse
+            if (product.warehouse && product.warehouse.toString() === stockTransfer.sourceId.toString()) {
+              product.countInStock -= item.quantity;
+              await product.save();
+            }
+          } else {
+            // Reduce stock in source shop
+            const sourceShop = await Shop.findById(stockTransfer.sourceId);
+            if (sourceShop) {
+              const inventoryItem = sourceShop.inventory.find(
+                invItem => invItem.product.toString() === item.product.toString()
+              );
+              
+              if (inventoryItem) {
+                inventoryItem.quantity -= item.quantity;
+                await sourceShop.save();
+              }
+            }
           }
           
-          await product.save();
+          // Handle destination inventory increase
+          if (stockTransfer.destinationType === 'warehouse') {
+            // Check if product exists in destination warehouse
+            const existingProduct = await Product.findOne({
+              name: product.name,
+              warehouse: stockTransfer.destinationId
+            });
+            
+            if (existingProduct) {
+              // Update existing product quantity
+              existingProduct.countInStock += item.quantity;
+              await existingProduct.save();
+            } else {
+              // Create a clone of the product for destination warehouse
+              const newProduct = new Product({
+                ...product.toObject(),
+                _id: undefined,
+                warehouse: stockTransfer.destinationId,
+                countInStock: item.quantity,
+                user: req.user._id
+              });
+              
+              await newProduct.save();
+            }
+          } else {
+            // Add or update product in destination shop inventory
+            const destinationShop = await Shop.findById(stockTransfer.destinationId);
+            
+            if (destinationShop) {
+              const existingItem = destinationShop.inventory.find(
+                invItem => invItem.product.toString() === item.product.toString()
+              );
+              
+              if (existingItem) {
+                // Update existing inventory item
+                existingItem.quantity += item.quantity;
+              } else {
+                // Add new inventory item
+                destinationShop.inventory.push({
+                  product: item.product,
+                  quantity: item.quantity,
+                  minimumStockLevel: 5 // Default minimum stock level
+                });
+              }
+              
+              await destinationShop.save();
+            }
+          }
         }
       }
     }
