@@ -19,6 +19,15 @@ const currencySchema = new mongoose.Schema(
       type: String,
       required: [true, 'Please enter currency symbol'],
     },
+    exchangeRate: {
+      type: Number,
+      required: [true, 'Please enter exchange rate'],
+      default: 1, // Default exchange rate is 1 (for base currency)
+    },
+    isBaseCurrency: {
+      type: Boolean,
+      default: false, // Only one currency should be marked as base currency
+    },
     isActive: {
       type: Boolean,
       default: true,

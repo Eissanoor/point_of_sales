@@ -66,6 +66,10 @@ const productSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Currency',
     },
+    currencyExchangeRate: {
+      type: Number,
+      default: 1, // Store the exchange rate at the time of product creation/update
+    },
 
     description: {
       type: String,

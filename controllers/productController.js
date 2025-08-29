@@ -1,7 +1,9 @@
 const Product = require('../models/productModel');
 const ProductJourney = require('../models/productJourneyModel');
 const Category = require('../models/categoryModel');
+const Currency = require('../models/currencyModel');
 const cloudinary = require('../config/cloudinary');
+const currencyUtils = require('../utils/currencyUtils');
 
 // @desc    Get all products
 // @route   GET /api/products
@@ -221,6 +223,15 @@ const createProduct = async (req, res) => {
       imagePublicId = result.public_id;
     }
     
+    // Get currency exchange rate if currency is provided
+    let currencyExchangeRate = 1;
+    if (currency) {
+      const currencyDoc = await Currency.findById(currency);
+      if (currencyDoc) {
+        currencyExchangeRate = currencyDoc.exchangeRate;
+      }
+    }
+
     const product = await Product.create({
       user: req.user._id,
       name,
@@ -230,6 +241,7 @@ const createProduct = async (req, res) => {
       supplier: supplier || null,
       warehouse: warehouse || null,
       currency: currency || null,
+      currencyExchangeRate,
       description,
       purchaseRate: purchaseRate || 0,
       saleRate: saleRate || 0,
@@ -291,6 +303,19 @@ const updateProduct = async (req, res) => {
             newValue: value,
           });
           product[key] = value;
+          
+          // If currency is being updated, also update the exchange rate
+          if (key === 'currency' && value) {
+            const currencyDoc = await Currency.findById(value);
+            if (currencyDoc) {
+              changes.push({
+                field: 'currencyExchangeRate',
+                oldValue: product.currencyExchangeRate,
+                newValue: currencyDoc.exchangeRate,
+              });
+              product.currencyExchangeRate = currencyDoc.exchangeRate;
+            }
+          }
         }
       }
       
@@ -462,6 +487,125 @@ const getProductJourneyByProductId = async (req, res) => {
   }
 };
 
+// @desc    Convert product prices to a different currency
+// @route   GET /api/products/:id/convert-price
+// @access  Public
+const convertProductPrice = async (req, res) => {
+  try {
+    const { targetCurrencyId, date } = req.query;
+    
+    if (!targetCurrencyId) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Please provide a target currency ID',
+      });
+    }
+
+    const product = await Product.findById(req.params.id)
+      .populate('currency', 'name code symbol exchangeRate');
+
+    if (!product) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Product not found',
+      });
+    }
+
+    if (!product.currency) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Product does not have a currency assigned',
+      });
+    }
+
+    // Use the utility function for currency conversion
+    const conversionDate = date ? new Date(date) : null;
+    
+    // Convert each price type
+    const purchaseRateConversion = await currencyUtils.convertAmount(
+      product.currency._id, 
+      targetCurrencyId, 
+      product.purchaseRate,
+      conversionDate
+    );
+    
+    const saleRateConversion = await currencyUtils.convertAmount(
+      product.currency._id, 
+      targetCurrencyId, 
+      product.saleRate,
+      conversionDate
+    );
+    
+    const wholesaleRateConversion = await currencyUtils.convertAmount(
+      product.currency._id, 
+      targetCurrencyId, 
+      product.wholesaleRate,
+      conversionDate
+    );
+    
+    const retailRateConversion = await currencyUtils.convertAmount(
+      product.currency._id, 
+      targetCurrencyId, 
+      product.retailRate,
+      conversionDate
+    );
+
+    // Format the response
+    const convertedPrices = {
+      purchaseRate: purchaseRateConversion.to.amount,
+      saleRate: saleRateConversion.to.amount,
+      wholesaleRate: wholesaleRateConversion.to.amount,
+      retailRate: retailRateConversion.to.amount,
+    };
+
+    const formattedPrices = {
+      purchaseRate: currencyUtils.formatAmountWithCurrency(
+        convertedPrices.purchaseRate, 
+        purchaseRateConversion.to.currency
+      ),
+      saleRate: currencyUtils.formatAmountWithCurrency(
+        convertedPrices.saleRate, 
+        saleRateConversion.to.currency
+      ),
+      wholesaleRate: currencyUtils.formatAmountWithCurrency(
+        convertedPrices.wholesaleRate, 
+        wholesaleRateConversion.to.currency
+      ),
+      retailRate: currencyUtils.formatAmountWithCurrency(
+        convertedPrices.retailRate, 
+        retailRateConversion.to.currency
+      ),
+    };
+
+    res.json({
+      status: 'success',
+      data: {
+        product: {
+          _id: product._id,
+          name: product.name,
+          originalCurrency: product.currency,
+          originalPrices: {
+            purchaseRate: product.purchaseRate,
+            saleRate: product.saleRate,
+            wholesaleRate: product.wholesaleRate,
+            retailRate: product.retailRate,
+          },
+          targetCurrency: purchaseRateConversion.to.currency,
+          convertedPrices,
+          formattedPrices,
+          conversionRate: purchaseRateConversion.rate,
+          conversionDate: purchaseRateConversion.date
+        },
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   getProducts,
   getProductById,
@@ -470,4 +614,5 @@ module.exports = {
   updateProduct,
   createProductReview,
   getProductJourneyByProductId,
+  convertProductPrice,
 }; 

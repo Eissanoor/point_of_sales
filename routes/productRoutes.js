@@ -8,6 +8,7 @@ const {
   updateProduct,
   createProductReview,
   getProductJourneyByProductId,
+  convertProductPrice,
 } = require('../controllers/productController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 const upload = require('../middlewares/uploadMiddleware');
@@ -27,5 +28,8 @@ router.route('/:id/reviews')
   
 router.route('/:id/journey')
   .get(protect, admin, getProductJourneyByProductId);
+
+router.route('/:id/convert-price')
+  .get(convertProductPrice);
 
 module.exports = router; 
