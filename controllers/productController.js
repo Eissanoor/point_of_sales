@@ -4,6 +4,8 @@ const Category = require('../models/categoryModel');
 const Currency = require('../models/currencyModel');
 const cloudinary = require('../config/cloudinary');
 const currencyUtils = require('../utils/currencyUtils');
+const StockTransfer = require('../models/stockTransferModel');
+const Shop = require('../models/shopModel');
 
 // @desc    Get all products
 // @route   GET /api/products
@@ -606,6 +608,82 @@ const convertProductPrice = async (req, res) => {
   }
 };
 
+// @desc    Get products by location (warehouse or shop)
+// @route   GET /api/products/location/:locationType/:locationId
+// @access  Private
+const getProductsByLocation = async (req, res) => {
+  try {
+    const { locationType, locationId } = req.params;
+    
+    if (!['warehouse', 'shop'].includes(locationType)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Location type must be either "warehouse" or "shop"'
+      });
+    }
+    
+    let products = [];
+    
+    // Case 1: Get products from shop inventory
+    if (locationType === 'shop') {
+      const shop = await Shop.findById(locationId).populate('inventory.product');
+      if (!shop) {
+        return res.status(404).json({ status: 'fail', message: 'Shop not found' });
+      }
+      
+      products = shop.inventory.map(item => {
+        const product = item.product.toObject();
+        product.quantity = item.quantity;
+        return product;
+      });
+    } 
+    // Case 2: Get products from warehouse 
+    else {
+      // Get products originally assigned to this warehouse
+      const originalProducts = await Product.find({ warehouse: locationId });
+      
+      // Get products transferred to this warehouse through stock transfers
+      const completedTransfers = await StockTransfer.find({
+        destinationType: 'warehouse',
+        destinationId: locationId,
+      }).populate('items.product');
+      
+      // Extract products from transfers
+      const transferredProducts = [];
+      completedTransfers.forEach(transfer => {
+        transfer.items.forEach(item => {
+          const existingProduct = transferredProducts.find(
+            p => p._id.toString() === item.product._id.toString()
+          );
+          
+          if (existingProduct) {
+            existingProduct.quantity += item.quantity;
+          } else {
+            const product = item.product.toObject();
+            product.quantity = item.quantity;
+            transferredProducts.push(product);
+          }
+        });
+      });
+      
+      // Combine original and transferred products
+      products = [...originalProducts, ...transferredProducts];
+    }
+    
+    res.status(200).json({
+      status: 'success',
+      count: products.length,
+      data: products
+    });
+    
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   getProducts,
   getProductById,
@@ -615,4 +693,5 @@ module.exports = {
   createProductReview,
   getProductJourneyByProductId,
   convertProductPrice,
+  getProductsByLocation,
 }; 
