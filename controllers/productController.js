@@ -639,41 +639,80 @@ const getProductsByLocation = async (req, res) => {
     } 
     // Case 2: Get products from warehouse 
     else {
-      // Get products originally assigned to this warehouse
-      const originalProducts = await Product.find({ warehouse: locationId });
+      // Step 1: Get products originally assigned to this warehouse
+      const originalProducts = await Product.find({ warehouse: locationId }).lean();
       
-      // Get products transferred to this warehouse through stock transfers
-      const completedTransfers = await StockTransfer.find({
+      // Create a map for faster lookups
+      const productMap = {};
+      originalProducts.forEach(product => {
+        productMap[product._id.toString()] = {
+          ...product,
+          initialStock: product.countInStock,
+          currentStock: product.countInStock,
+        };
+      });
+      
+      // Step 2: Handle incoming transfers (adding stock to this warehouse)
+      const incomingTransfers = await StockTransfer.find({
         destinationType: 'warehouse',
         destinationId: locationId,
       }).populate('items.product');
       
-      // Extract products from transfers
-      const transferredProducts = [];
-      completedTransfers.forEach(transfer => {
+      incomingTransfers.forEach(transfer => {
         transfer.items.forEach(item => {
-          const existingProduct = transferredProducts.find(
-            p => p._id.toString() === item.product._id.toString()
-          );
+          const productId = item.product._id.toString();
           
-          if (existingProduct) {
-            existingProduct.quantity += item.quantity;
+          if (productMap[productId]) {
+            // Product already exists in this warehouse, add to its quantity
+            productMap[productId].currentStock += item.quantity;
           } else {
-            const product = item.product.toObject();
-            product.quantity = item.quantity;
-            transferredProducts.push(product);
+            // Product is new to this warehouse via transfer
+            const productData = item.product.toObject();
+            productMap[productId] = {
+              ...productData,
+              initialStock: 0, // Not originally in this warehouse
+              currentStock: item.quantity,
+            };
           }
         });
       });
       
-      // Combine original and transferred products
-      products = [...originalProducts, ...transferredProducts];
+      // Step 3: Handle outgoing transfers (removing stock from this warehouse)
+      const outgoingTransfers = await StockTransfer.find({
+        sourceType: 'warehouse',
+        sourceId: locationId,
+       
+      });
+      
+      outgoingTransfers.forEach(transfer => {
+        transfer.items.forEach(item => {
+          const productId = item.product.toString();
+          
+          if (productMap[productId]) {
+            // Reduce the quantity for outgoing transfers
+            productMap[productId].currentStock -= item.quantity;
+          }
+        });
+      });
+      
+      // Convert map back to array and only include products with stock > 0
+      products = Object.values(productMap).filter(product => product.currentStock > 0);
     }
     
     res.status(200).json({
       status: 'success',
       count: products.length,
-      data: products
+      data: products.map(product => {
+        // For warehouse products, standardize the quantity field
+        if (product.currentStock !== undefined) {
+          return {
+            ...product,
+            quantity: product.currentStock,
+            initialStock: product.initialStock || 0
+          };
+        }
+        return product;
+      })
     });
     
   } catch (error) {
