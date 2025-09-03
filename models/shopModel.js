@@ -73,22 +73,7 @@ const shopSchema = new mongoose.Schema(
       enum: ['active', 'inactive', 'maintenance'],
       default: 'active',
     },
-    inventory: [
-      {
-        product: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: 'Product',
-        },
-        quantity: {
-          type: Number,
-          default: 0,
-        },
-        minimumStockLevel: {
-          type: Number,
-          default: 5,
-        },
-      },
-    ],
+    
     user: {
       type: mongoose.Schema.Types.ObjectId,
       required: true,

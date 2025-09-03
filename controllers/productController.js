@@ -624,18 +624,61 @@ const getProductsByLocation = async (req, res) => {
     
     let products = [];
     
-    // Case 1: Get products from shop inventory
+    // Case 1: Get products for shop (same logic as warehouse)
     if (locationType === 'shop') {
-      const shop = await Shop.findById(locationId).populate('inventory.product');
+      // First check if shop exists
+      const shop = await Shop.findById(locationId);
       if (!shop) {
         return res.status(404).json({ status: 'fail', message: 'Shop not found' });
       }
       
-      products = shop.inventory.map(item => {
-        const product = item.product.toObject();
-        product.quantity = item.quantity;
-        return product;
+      // Create a product map to track quantities
+      const productMap = {};
+      
+      // Step 1: Handle incoming transfers TO this shop
+      const incomingTransfers = await StockTransfer.find({
+        destinationType: 'shop',
+        destinationId: locationId,
+      }).populate('items.product');
+      
+      incomingTransfers.forEach(transfer => {
+        transfer.items.forEach(item => {
+          const productId = item.product._id.toString();
+          
+          if (productMap[productId]) {
+            // Product already exists in map, add to its quantity
+            productMap[productId].currentStock += item.quantity;
+          } else {
+            // Product is new to this shop via transfer
+            const productData = item.product.toObject();
+            productMap[productId] = {
+              ...productData,
+              initialStock: 0, // Not originally in this shop
+              currentStock: item.quantity,
+            };
+          }
+        });
       });
+      
+      // Step 2: Handle outgoing transfers FROM this shop
+      const outgoingTransfers = await StockTransfer.find({
+        sourceType: 'shop',
+        sourceId: locationId,
+      });
+      
+      outgoingTransfers.forEach(transfer => {
+        transfer.items.forEach(item => {
+          const productId = item.product.toString();
+          
+          if (productMap[productId]) {
+            // Reduce the quantity for outgoing transfers
+            productMap[productId].currentStock -= item.quantity;
+          }
+        });
+      });
+      
+      // Convert map back to array and only include products with stock > 0
+      products = Object.values(productMap).filter(product => product.currentStock > 0);
     } 
     // Case 2: Get products from warehouse 
     else {
