@@ -84,41 +84,98 @@ const createStockTransfer = async (req, res) => {
         });
       }
 
-      // Check if product belongs to source warehouse
+      // Calculate available stock based on transfers
+      let availableStock = 0;
+      
       if (sourceType === 'warehouse') {
-        if (product.warehouse && product.warehouse.toString() !== sourceId) {
-          return res.status(400).json({
-            status: 'fail',
-            message: `Product ${product.name} does not belong to the source warehouse`
-          });
+        // Step 1: Start with original stock if product was originally assigned to this warehouse
+        if (product.warehouse && product.warehouse.toString() === sourceId) {
+          availableStock = product.countInStock;
         }
-
+        
+        // Step 2: Add incoming transfers TO this warehouse
+        const incomingTransfers = await StockTransfer.find({
+          destinationType: 'warehouse',
+          destinationId: sourceId,
+    
+        });
+        
+        for (const transfer of incomingTransfers) {
+          const transferredItem = transfer.items.find(
+            i => i.product.toString() === item.product.toString()
+          );
+          
+          if (transferredItem) {
+            availableStock += transferredItem.quantity;
+          }
+        }
+        
+        // Step 3: Subtract outgoing transfers FROM this warehouse
+        const outgoingTransfers = await StockTransfer.find({
+          sourceType: 'warehouse',
+          sourceId: sourceId,
+    
+        });
+        
+        for (const transfer of outgoingTransfers) {
+          const transferredItem = transfer.items.find(
+            i => i.product.toString() === item.product.toString()
+          );
+          
+          if (transferredItem) {
+            availableStock -= transferredItem.quantity;
+          }
+        }
+        
         // Check if there's enough stock in warehouse
-        if (product.countInStock < item.quantity) {
+        if (availableStock < item.quantity) {
           return res.status(400).json({
             status: 'fail',
-            message: `Insufficient stock for product ${product.name}. Available: ${product.countInStock}, Requested: ${item.quantity}`
+            message: `Insufficient stock for product ${product.name}. Available: ${availableStock}, Requested: ${item.quantity}`
           });
         }
       } else {
-        // Check if product exists in shop inventory
-        const shop = await Shop.findById(sourceId);
-        const inventoryItem = shop.inventory.find(
-          invItem => invItem.product.toString() === item.product
-        );
-
-        if (!inventoryItem) {
-          return res.status(400).json({
-            status: 'fail',
-            message: `Product ${product.name} does not exist in the source shop inventory`
-          });
+        // Shop - use the same calculation approach as we do for warehouse
+        
+        // Step 1: Get all incoming transfers to this shop
+        const incomingTransfers = await StockTransfer.find({
+          destinationType: 'shop',
+          destinationId: sourceId,
+    
+        });
+        
+        for (const transfer of incomingTransfers) {
+          const transferredItem = transfer.items.find(
+            i => i.product.toString() === item.product.toString()
+          );
+          
+          if (transferredItem) {
+            availableStock += transferredItem.quantity;
+          }
         }
-
+        
+        // Step 2: Subtract outgoing transfers from this shop
+        const outgoingTransfers = await StockTransfer.find({
+          sourceType: 'shop',
+          sourceId: sourceId,
+    
+        });
+        
+        for (const transfer of outgoingTransfers) {
+          const transferredItem = transfer.items.find(
+            i => i.product.toString() === item.product.toString()
+          );
+          
+          if (transferredItem) {
+            availableStock -= transferredItem.quantity;
+          }
+        }
+        
         // Check if there's enough stock in shop
-        if (inventoryItem.quantity < item.quantity) {
+        if (availableStock < item.quantity) {
           return res.status(400).json({
             status: 'fail',
-            message: `Insufficient stock for product ${product.name} in shop. Available: ${inventoryItem.quantity}, Requested: ${item.quantity}`
+            message: `Insufficient stock for product ${product.name} in shop. Available: ${availableStock}, Requested: ${item.quantity}`
           });
         }
       }
@@ -357,83 +414,11 @@ const updateStockTransferStatus = async (req, res) => {
     
     // Handle status change to 'completed'
     if (status === 'completed' && stockTransfer.status !== 'completed') {
-      // Update product stock counts based on source and destination types
-      for (const item of stockTransfer.items) {
-        const product = await Product.findById(item.product);
-        
-        if (product) {
-          // Handle source inventory reduction
-          if (stockTransfer.sourceType === 'warehouse') {
-            // Reduce stock in source warehouse
-            if (product.warehouse && product.warehouse.toString() === stockTransfer.sourceId.toString()) {
-              product.countInStock -= item.quantity;
-              await product.save();
-            }
-          } else {
-            // Reduce stock in source shop
-            const sourceShop = await Shop.findById(stockTransfer.sourceId);
-            if (sourceShop) {
-              const inventoryItem = sourceShop.inventory.find(
-                invItem => invItem.product.toString() === item.product.toString()
-              );
-              
-              if (inventoryItem) {
-                inventoryItem.quantity -= item.quantity;
-                await sourceShop.save();
-              }
-            }
-          }
-          
-          // Handle destination inventory increase
-          if (stockTransfer.destinationType === 'warehouse') {
-            // Check if product exists in destination warehouse
-            const existingProduct = await Product.findOne({
-              name: product.name,
-              warehouse: stockTransfer.destinationId
-            });
-            
-            if (existingProduct) {
-              // Update existing product quantity
-              existingProduct.countInStock += item.quantity;
-              await existingProduct.save();
-            } else {
-              // Create a clone of the product for destination warehouse
-              const newProduct = new Product({
-                ...product.toObject(),
-                _id: undefined,
-                warehouse: stockTransfer.destinationId,
-                countInStock: item.quantity,
-                user: req.user._id
-              });
-              
-              await newProduct.save();
-            }
-          } else {
-            // Add or update product in destination shop inventory
-            const destinationShop = await Shop.findById(stockTransfer.destinationId);
-            
-            if (destinationShop) {
-              const existingItem = destinationShop.inventory.find(
-                invItem => invItem.product.toString() === item.product.toString()
-              );
-              
-              if (existingItem) {
-                // Update existing inventory item
-                existingItem.quantity += item.quantity;
-              } else {
-                // Add new inventory item
-                destinationShop.inventory.push({
-                  product: item.product,
-                  quantity: item.quantity,
-                  minimumStockLevel: 5 // Default minimum stock level
-                });
-              }
-              
-              await destinationShop.save();
-            }
-          }
-        }
-      }
+      // For completed transfers, we don't need to update the physical stock
+      // since we're now calculating the available stock dynamically based on transfers
+      
+      // Just mark the transfer as completed, and our stock calculation logic
+      // in createStockTransfer and getProductsByLocation will handle the rest
     }
     
     // Update transfer status
