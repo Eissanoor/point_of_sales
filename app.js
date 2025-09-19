@@ -25,6 +25,17 @@ const paymentRoutes = require('./routes/paymentRoutes');
 const warehouseRoutes = require('./routes/warehouseRoutes');
 const stockTransferRoutes = require('./routes/stockTransferRoutes');
 const shopRoutes = require('./routes/shopRoutes');
+const expenseRoutes = require('./routes/expenseRoutes');
+const procurementExpenseRoutes = require('./routes/procurementExpenseRoutes');
+const logisticsExpenseRoutes = require('./routes/logisticsExpenseRoutes');
+const transporterRoutes = require('./routes/transporterRoutes');
+const shipmentRoutes = require('./routes/shipmentRoutes');
+const salesDistributionExpenseRoutes = require('./routes/salesDistributionExpenseRoutes');
+const warehouseExpenseRoutes = require('./routes/warehouseExpenseRoutes');
+const operationalExpenseRoutes = require('./routes/operationalExpenseRoutes');
+const miscellaneousExpenseRoutes = require('./routes/miscellaneousExpenseRoutes');
+const financialExpenseRoutes = require('./routes/financialExpenseRoutes');
+const bankAccountRoutes = require('./routes/bankAccountRoutes');
 
 // Initialize express app
 const app = express();
@@ -60,6 +71,17 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/warehouses', warehouseRoutes);
 app.use('/api/stock-transfers', stockTransferRoutes);
 app.use('/api/shops', shopRoutes);
+app.use('/api/expenses', expenseRoutes);
+app.use('/api/expenses/procurement', procurementExpenseRoutes);
+app.use('/api/expenses/logistics', logisticsExpenseRoutes);
+app.use('/api/transporters', transporterRoutes);
+app.use('/api/shipments', shipmentRoutes);
+app.use('/api/expenses/sales-distribution', salesDistributionExpenseRoutes);
+app.use('/api/expenses/warehouse', warehouseExpenseRoutes);
+app.use('/api/expenses/operational', operationalExpenseRoutes);
+app.use('/api/expenses/miscellaneous', miscellaneousExpenseRoutes);
+app.use('/api/expenses/financial', financialExpenseRoutes);
+app.use('/api/bank-accounts', bankAccountRoutes);
 
 // Root route
 app.get('/', (req, res) => {
