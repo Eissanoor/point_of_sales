@@ -71,16 +71,21 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/warehouses', warehouseRoutes);
 app.use('/api/stock-transfers', stockTransferRoutes);
 app.use('/api/shops', shopRoutes);
-app.use('/api/expenses', expenseRoutes);
+// Specific expense routes first
 app.use('/api/expenses/procurement', procurementExpenseRoutes);
 app.use('/api/expenses/logistics', logisticsExpenseRoutes);
-app.use('/api/transporters', transporterRoutes);
-app.use('/api/shipments', shipmentRoutes);
 app.use('/api/expenses/sales-distribution', salesDistributionExpenseRoutes);
 app.use('/api/expenses/warehouse', warehouseExpenseRoutes);
 app.use('/api/expenses/operational', operationalExpenseRoutes);
 app.use('/api/expenses/miscellaneous', miscellaneousExpenseRoutes);
 app.use('/api/expenses/financial', financialExpenseRoutes);
+
+// General expense routes after specific ones
+app.use('/api/expenses', expenseRoutes);
+
+// Other routes
+app.use('/api/transporters', transporterRoutes);
+app.use('/api/shipments', shipmentRoutes);
 app.use('/api/bank-accounts', bankAccountRoutes);
 
 // Root route

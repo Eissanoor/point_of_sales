@@ -12,32 +12,32 @@ const {
 // Import middleware (assuming you have auth middleware)
 // const { protect, admin } = require('../middlewares/authMiddleware');
 
-// @route   GET /api/sales-distribution-expenses
+// @route   GET /api/expenses/sales-distribution
 // @desc    Get all sales distribution expenses with filtering and pagination
 // @access  Private
 router.get('/', getSalesDistributionExpenses);
 
-// @route   GET /api/sales-distribution-expenses/analytics
+// @route   GET /api/expenses/sales-distribution/analytics
 // @desc    Get sales distribution expense analytics and summary
 // @access  Private
 router.get('/analytics', getSalesDistributionExpenseAnalytics);
 
-// @route   GET /api/sales-distribution-expenses/:id
+// @route   GET /api/expenses/sales-distribution/:id
 // @desc    Get single sales distribution expense by ID
 // @access  Private
 router.get('/:id', getSalesDistributionExpenseById);
 
-// @route   POST /api/sales-distribution-expenses
+// @route   POST /api/expenses/sales-distribution
 // @desc    Create new sales distribution expense
 // @access  Private
 router.post('/', createSalesDistributionExpense);
 
-// @route   PUT /api/sales-distribution-expenses/:id
+// @route   PUT /api/expenses/sales-distribution/:id
 // @desc    Update sales distribution expense
 // @access  Private
 router.put('/:id', updateSalesDistributionExpense);
 
-// @route   DELETE /api/sales-distribution-expenses/:id
+// @route   DELETE /api/expenses/sales-distribution/:id
 // @desc    Delete sales distribution expense (soft delete)
 // @access  Private
 router.delete('/:id', deleteSalesDistributionExpense);
