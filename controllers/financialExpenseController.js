@@ -14,8 +14,7 @@ const getFinancialExpenses = async (req, res) => {
 
     const expenses = await features.query
       .populate('currency', 'name code symbol')
-      .populate('linkedAccount', 'accountName accountNumber')
-      .populate('createdBy', 'name email');
+      .populate('linkedBankAccount', 'accountName accountNumber');
 
     res.status(200).json({
       status: 'success',
@@ -39,8 +38,7 @@ const getFinancialExpenseById = async (req, res) => {
   try {
     const expense = await FinancialExpense.findById(req.params.id)
       .populate('currency', 'name code symbol')
-      .populate('linkedAccount', 'accountName accountNumber')
-      .populate('createdBy', 'name email');
+      .populate('linkedBankAccount', 'accountName accountNumber');
 
     if (!expense) {
       return res.status(404).json({
@@ -69,57 +67,48 @@ const getFinancialExpenseById = async (req, res) => {
 const createFinancialExpense = async (req, res) => {
   try {
     const {
+      expenseSubType,
       bankCharges,
-      interestPayments,
-      loanFees,
-      taxPayments,
-      auditFees,
-      accountingFees,
-      legalFees,
-      insurancePayments,
+      exchangeGainLoss,
+      loanInterest,
+      financeCharges,
+      transactionFees,
       currency,
       exchangeRate,
-      linkedAccount,
+      linkedBankAccount,
       paymentMethod,
-      expenseDate,
+      transactionDate,
       notes
     } = req.body;
 
     // Calculate total cost
     const totalCost = (bankCharges || 0) + 
-                     (interestPayments || 0) + 
-                     (loanFees || 0) + 
-                     (taxPayments || 0) + 
-                     (auditFees || 0) + 
-                     (accountingFees || 0) + 
-                     (legalFees || 0) + 
-                     (insurancePayments || 0);
+                     (exchangeGainLoss || 0) + 
+                     (loanInterest || 0) + 
+                     (financeCharges || 0) + 
+                     (transactionFees || 0);
 
     const financialExpense = new FinancialExpense({
+      expenseSubType,
       bankCharges: bankCharges || 0,
-      interestPayments: interestPayments || 0,
-      loanFees: loanFees || 0,
-      taxPayments: taxPayments || 0,
-      auditFees: auditFees || 0,
-      accountingFees: accountingFees || 0,
-      legalFees: legalFees || 0,
-      insurancePayments: insurancePayments || 0,
+      exchangeGainLoss: exchangeGainLoss || 0,
+      loanInterest: loanInterest || 0,
+      financeCharges: financeCharges || 0,
+      transactionFees: transactionFees || 0,
       totalCost,
       currency,
       exchangeRate: exchangeRate || 1,
       amountInPKR: totalCost * (exchangeRate || 1),
-      linkedAccount,
+      linkedBankAccount,
       paymentMethod: paymentMethod || 'bank',
-      expenseDate: expenseDate || Date.now(),
-      notes,
-      createdBy: req.user._id
+      transactionDate: transactionDate || Date.now(),
+      notes
     });
 
     const savedExpense = await financialExpense.save();
     const populatedExpense = await FinancialExpense.findById(savedExpense._id)
       .populate('currency', 'name code symbol')
-      .populate('linkedAccount', 'accountName accountNumber')
-      .populate('createdBy', 'name email');
+      .populate('linkedBankAccount', 'accountName accountNumber');
 
     res.status(201).json({
       status: 'success',
@@ -151,10 +140,10 @@ const updateFinancialExpense = async (req, res) => {
 
     // Update fields
     const updatableFields = [
-      'bankCharges', 'interestPayments', 'loanFees', 'taxPayments',
-      'auditFees', 'accountingFees', 'legalFees', 'insurancePayments',
-      'currency', 'exchangeRate', 'linkedAccount', 'paymentMethod',
-      'expenseDate', 'notes', 'isActive'
+      'expenseSubType',
+      'bankCharges', 'exchangeGainLoss', 'loanInterest', 'financeCharges', 'transactionFees',
+      'currency', 'exchangeRate', 'linkedBankAccount', 'paymentMethod',
+      'transactionDate', 'notes', 'isActive'
     ];
 
     updatableFields.forEach(field => {
@@ -165,13 +154,10 @@ const updateFinancialExpense = async (req, res) => {
 
     // Recalculate total cost
     expense.totalCost = (expense.bankCharges || 0) + 
-                       (expense.interestPayments || 0) + 
-                       (expense.loanFees || 0) + 
-                       (expense.taxPayments || 0) + 
-                       (expense.auditFees || 0) + 
-                       (expense.accountingFees || 0) + 
-                       (expense.legalFees || 0) + 
-                       (expense.insurancePayments || 0);
+                       (expense.exchangeGainLoss || 0) + 
+                       (expense.loanInterest || 0) + 
+                       (expense.financeCharges || 0) + 
+                       (expense.transactionFees || 0);
 
     // Recalculate amount in PKR
     if (expense.currency && expense.exchangeRate) {
@@ -181,8 +167,7 @@ const updateFinancialExpense = async (req, res) => {
     const updatedExpense = await expense.save();
     const populatedExpense = await FinancialExpense.findById(updatedExpense._id)
       .populate('currency', 'name code symbol')
-      .populate('linkedAccount', 'accountName accountNumber')
-      .populate('createdBy', 'name email');
+      .populate('linkedBankAccount', 'accountName accountNumber');
 
     res.status(200).json({
       status: 'success',
