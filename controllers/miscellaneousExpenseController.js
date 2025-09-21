@@ -41,8 +41,7 @@ const createMiscellaneousExpense = asyncHandler(async (req, res) => {
     paymentMethod,
     expenseDate,
     notes,
-    isRecurring: isRecurring || false,
-    createdBy: req.user.id
+    isRecurring: isRecurring || false
   });
 
   res.status(201).json({
@@ -62,8 +61,7 @@ const getMiscellaneousExpenses = asyncHandler(async (req, res) => {
     .paginate();
 
   const miscellaneousExpenses = await features.query
-    .populate('currency', 'code symbol')
-    .populate('createdBy', 'name email');
+    .populate('currency', 'code symbol');
 
   res.status(200).json({
     success: true,
@@ -77,8 +75,7 @@ const getMiscellaneousExpenses = asyncHandler(async (req, res) => {
 // @access  Private
 const getMiscellaneousExpense = asyncHandler(async (req, res) => {
   const miscellaneousExpense = await MiscellaneousExpense.findById(req.params.id)
-    .populate('currency', 'code symbol')
-    .populate('createdBy', 'name email');
+    .populate('currency', 'code symbol');
 
   if (!miscellaneousExpense) {
     res.status(404);
@@ -119,8 +116,7 @@ const updateMiscellaneousExpense = asyncHandler(async (req, res) => {
     expenseDate: req.body.expenseDate,
     notes: req.body.notes,
     isRecurring: req.body.isRecurring,
-    isActive: req.body.isActive,
-    updatedBy: req.user.id
+    isActive: req.body.isActive
   };
 
   // Remove undefined fields
@@ -133,8 +129,7 @@ const updateMiscellaneousExpense = asyncHandler(async (req, res) => {
     { $set: fieldsToUpdate },
     { new: true, runValidators: true }
   )
-    .populate('currency', 'code symbol')
-    .populate('createdBy', 'name email');
+    .populate('currency', 'code symbol');
 
   res.status(200).json({
     success: true,

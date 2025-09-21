@@ -37,8 +37,7 @@ const createOperationalExpense = asyncHandler(async (req, res) => {
     exchangeRate,
     paymentMethod,
     expenseDate,
-    notes,
-    createdBy: req.user.id
+    notes
   });
 
   res.status(201).json({
@@ -58,8 +57,7 @@ const getOperationalExpenses = asyncHandler(async (req, res) => {
     .paginate();
 
   const operationalExpenses = await features.query
-    .populate('currency', 'code symbol')
-    .populate('createdBy', 'name email');
+    .populate('currency', 'code symbol');
 
   res.status(200).json({
     success: true,
@@ -73,8 +71,7 @@ const getOperationalExpenses = asyncHandler(async (req, res) => {
 // @access  Private
 const getOperationalExpense = asyncHandler(async (req, res) => {
   const operationalExpense = await OperationalExpense.findById(req.params.id)
-    .populate('currency', 'code symbol')
-    .populate('createdBy', 'name email');
+    .populate('currency', 'code symbol');
 
   if (!operationalExpense) {
     res.status(404);
@@ -114,7 +111,6 @@ const updateOperationalExpense = asyncHandler(async (req, res) => {
     expenseDate: req.body.expenseDate,
     notes: req.body.notes,
     isActive: req.body.isActive !== undefined ? req.body.isActive : operationalExpense.isActive,
-    updatedBy: req.user.id
   };
 
   // Remove undefined fields
@@ -127,8 +123,7 @@ const updateOperationalExpense = asyncHandler(async (req, res) => {
     { $set: fieldsToUpdate },
     { new: true, runValidators: true }
   )
-    .populate('currency', 'code symbol')
-    .populate('createdBy', 'name email');
+    .populate('currency', 'code symbol');
 
   res.status(200).json({
     success: true,
