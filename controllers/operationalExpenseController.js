@@ -142,7 +142,7 @@ const deleteOperationalExpense = asyncHandler(async (req, res) => {
     throw new Error('Operational expense not found');
   }
 
-  await operationalExpense.remove();
+  await OperationalExpense.findByIdAndDelete(req.params.id);
 
   res.status(200).json({
     success: true,
