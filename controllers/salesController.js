@@ -13,7 +13,9 @@ const createSale = async (req, res) => {
       totalAmount, 
       discount, 
       tax, 
-      grandTotal
+      grandTotal,
+      shop,
+      warehouse
     } = req.body;
 
     // Check product inventory availability for all items
@@ -27,8 +29,9 @@ const createSale = async (req, res) => {
         });
       }
 
-      // Check if the product is in the specified warehouse
-      if (item.warehouse && product.warehouse && product.warehouse.toString() !== item.warehouse.toString()) {
+      // Check if the product is in the specified warehouse (either from item or from request body)
+      const targetWarehouse = item.warehouse || warehouse;
+      if (targetWarehouse && product.warehouse && product.warehouse.toString() !== targetWarehouse.toString()) {
         return res.status(400).json({
           status: 'fail',
           message: `Product ${product.name} is not available in the selected warehouse`,
@@ -75,6 +78,8 @@ const createSale = async (req, res) => {
       paymentStatus: 'unpaid',
       dueDate: req.body.dueDate || new Date(), // Use provided dueDate or default
       user: req.user._id, // Assuming req.user is set by auth middleware
+      shop, // Add shop reference
+      warehouse // Add warehouse reference
     });
 
     // Update product quantities
