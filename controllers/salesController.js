@@ -2,6 +2,7 @@ const Sales = require('../models/salesModel');
 const Product = require('../models/productModel');
 const SalesJourney = require('../models/salesJourneyModel');
 const StockTransfer = require('../models/stockTransferModel');
+const mongoose = require('mongoose');
 
 // Helper: compute available quantity of a product at a specific warehouse
 async function getAvailableQuantityInWarehouse(productId, warehouseId) {
@@ -16,22 +17,56 @@ async function getAvailableQuantityInWarehouse(productId, warehouseId) {
 
   // Incoming transfers to this warehouse for this product
   const incoming = await StockTransfer.aggregate([
-    { $match: { destinationType: 'warehouse', destinationId: product.warehouse ? { $exists: true } : { $exists: true } } },
-    { $match: { destinationType: 'warehouse', destinationId: new (require('mongoose').Types.ObjectId)(warehouseId) } },
+    { $match: { destinationType: 'warehouse', destinationId: new mongoose.Types.ObjectId(warehouseId) } },
     { $unwind: '$items' },
-    { $match: { 'items.product': new (require('mongoose').Types.ObjectId)(productId) } },
+    { $match: { 'items.product': new mongoose.Types.ObjectId(productId) } },
     { $group: { _id: null, qty: { $sum: '$items.quantity' } } }
   ]);
   available += incoming.length > 0 ? Number(incoming[0].qty || 0) : 0;
 
   // Outgoing transfers from this warehouse for this product
   const outgoing = await StockTransfer.aggregate([
-    { $match: { sourceType: 'warehouse', sourceId: new (require('mongoose').Types.ObjectId)(warehouseId) } },
+    { $match: { sourceType: 'warehouse', sourceId: new mongoose.Types.ObjectId(warehouseId) } },
     { $unwind: '$items' },
-    { $match: { 'items.product': new (require('mongoose').Types.ObjectId)(productId) } },
+    { $match: { 'items.product': new mongoose.Types.ObjectId(productId) } },
     { $group: { _id: null, qty: { $sum: '$items.quantity' } } }
   ]);
   available -= outgoing.length > 0 ? Number(outgoing[0].qty || 0) : 0;
+
+  return available;
+}
+
+// Helper: compute available quantity of a product at a specific shop
+async function getAvailableQuantityInShop(productId, shopId) {
+  let available = 0;
+
+  // Incoming transfers to this shop for this product
+  const incoming = await StockTransfer.aggregate([
+    { $match: { destinationType: 'shop', destinationId: new mongoose.Types.ObjectId(shopId) } },
+    { $unwind: '$items' },
+    { $match: { 'items.product': new mongoose.Types.ObjectId(productId) } },
+    { $group: { _id: null, qty: { $sum: '$items.quantity' } } }
+  ]);
+  available += incoming.length > 0 ? Number(incoming[0].qty || 0) : 0;
+
+  // Outgoing transfers from this shop for this product
+  const outgoing = await StockTransfer.aggregate([
+    { $match: { sourceType: 'shop', sourceId: new mongoose.Types.ObjectId(shopId) } },
+    { $unwind: '$items' },
+    { $match: { 'items.product': new mongoose.Types.ObjectId(productId) } },
+    { $group: { _id: null, qty: { $sum: '$items.quantity' } } }
+  ]);
+  available -= outgoing.length > 0 ? Number(outgoing[0].qty || 0) : 0;
+
+  // Subtract already sold quantities at this shop
+  const Sales = require('../models/salesModel');
+  const sold = await Sales.aggregate([
+    { $match: { shop: new mongoose.Types.ObjectId(shopId) } },
+    { $unwind: '$items' },
+    { $match: { 'items.product': new mongoose.Types.ObjectId(productId) } },
+    { $group: { _id: null, qty: { $sum: '$items.quantity' } } }
+  ]);
+  available -= sold.length > 0 ? Number(sold[0].qty || 0) : 0;
 
   return available;
 }
@@ -63,27 +98,37 @@ const createSale = async (req, res) => {
         });
       }
 
-      // Determine warehouse to check
-      const targetWarehouse = item.warehouse || warehouse || product.warehouse;
-      if (!targetWarehouse) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `No warehouse specified for product ${product.name}`,
-          product: product.name
-        });
-      }
-
-      // Compute available quantity at target warehouse based on transfers and base stock
-      const availableInWarehouse = await getAvailableQuantityInWarehouse(product._id, targetWarehouse);
-
-      if (availableInWarehouse < item.quantity) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Insufficient inventory for product ${product.name} in selected warehouse. Available: ${availableInWarehouse}, Requested: ${item.quantity}`,
-          product: product.name,
-          availableQuantity: availableInWarehouse,
-          requestedQuantity: item.quantity
-        });
+      // Determine location to check (shop has priority if provided)
+      if (shop) {
+        const availableInShop = await getAvailableQuantityInShop(product._id, shop);
+        if (availableInShop < item.quantity) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Insufficient inventory for product ${product.name} in selected shop. Available: ${availableInShop}, Requested: ${item.quantity}`,
+            product: product.name,
+            availableQuantity: availableInShop,
+            requestedQuantity: item.quantity
+          });
+        }
+      } else {
+        const targetWarehouse = item.warehouse || warehouse || product.warehouse;
+        if (!targetWarehouse) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `No warehouse specified for product ${product.name}`,
+            product: product.name
+          });
+        }
+        const availableInWarehouse = await getAvailableQuantityInWarehouse(product._id, targetWarehouse);
+        if (availableInWarehouse < item.quantity) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Insufficient inventory for product ${product.name} in selected warehouse. Available: ${availableInWarehouse}, Requested: ${item.quantity}`,
+            product: product.name,
+            availableQuantity: availableInWarehouse,
+            requestedQuantity: item.quantity
+          });
+        }
       }
     }
 
@@ -119,16 +164,11 @@ const createSale = async (req, res) => {
       warehouse // Add warehouse reference
     });
 
-    // Update product quantities
+    // Do not reduce global countInStock here; stock is tracked per location via transfers and sales.
+    // Optionally, update soldOutQuantity as a global metric.
     for (const item of items) {
-      // Get the product
       const product = await Product.findById(item.product);
-      const currentSoldOutQuantity = product.soldOutQuantity || 0;
-      
-      // Update global counts
-      product.countInStock -= item.quantity;
-      product.soldOutQuantity = currentSoldOutQuantity + item.quantity;
-      
+      product.soldOutQuantity = (product.soldOutQuantity || 0) + item.quantity;
       await product.save();
     }
 
