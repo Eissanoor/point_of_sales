@@ -10,7 +10,6 @@ const salesItemSchema = new mongoose.Schema(
     },
     warehouse: {
       type: mongoose.Schema.Types.ObjectId,
-      required: true,
       ref: 'Warehouse',
     },
     quantity: {
@@ -49,6 +48,15 @@ const salesSchema = new mongoose.Schema(
       ref: 'Customer',
     },
     items: [salesItemSchema],
+    shop: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Shop',
+    },
+    warehouse: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      ref: 'Warehouse',
+    },
     totalAmount: {
       type: Number,
       required: true,
