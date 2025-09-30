@@ -677,19 +677,6 @@ const getProductsByLocation = async (req, res) => {
         });
       });
       
-      // Step 3: Subtract sales from this shop
-      const Sales = require('../models/salesModel');
-      const salesAgg = await Sales.aggregate([
-        { $match: { shop: require('mongoose').Types.ObjectId(locationId) } },
-        { $unwind: '$items' },
-        { $group: { _id: '$items.product', qty: { $sum: '$items.quantity' } } }
-      ]);
-      const soldMap = new Map(salesAgg.map(s => [s._id.toString(), s.qty]));
-      Object.values(productMap).forEach(p => {
-        const soldQty = Number(soldMap.get(p._id.toString()) || 0);
-        p.currentStock -= soldQty;
-      });
-
       // Convert map back to array and only include products with stock > 0
       products = Object.values(productMap).filter(product => product.currentStock > 0);
     } 
@@ -751,19 +738,6 @@ const getProductsByLocation = async (req, res) => {
         });
       });
       
-      // Step 4: Subtract sales from this warehouse
-      const Sales = require('../models/salesModel');
-      const salesAgg = await Sales.aggregate([
-        { $match: { warehouse: require('mongoose').Types.ObjectId(locationId) } },
-        { $unwind: '$items' },
-        { $group: { _id: '$items.product', qty: { $sum: '$items.quantity' } } }
-      ]);
-      const soldMap = new Map(salesAgg.map(s => [s._id.toString(), s.qty]));
-      Object.values(productMap).forEach(p => {
-        const soldQty = Number(soldMap.get(p._id.toString()) || 0);
-        p.currentStock -= soldQty;
-      });
-
       // Convert map back to array and only include products with stock > 0
       products = Object.values(productMap).filter(product => product.currentStock > 0);
     }
