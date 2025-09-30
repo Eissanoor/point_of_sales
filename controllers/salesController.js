@@ -36,6 +36,34 @@ async function getAvailableQuantityInWarehouse(productId, warehouseId) {
   return available;
 }
 
+// Helper: compute available quantity of a product at a specific shop
+async function getAvailableQuantityInShop(productId, shopId) {
+  const productObjectId = new (require('mongoose').Types.ObjectId)(productId);
+  const shopObjectId = new (require('mongoose').Types.ObjectId)(shopId);
+
+  let available = 0;
+
+  // Incoming transfers to this shop for this product
+  const incoming = await StockTransfer.aggregate([
+    { $match: { destinationType: 'shop', destinationId: shopObjectId } },
+    { $unwind: '$items' },
+    { $match: { 'items.product': productObjectId } },
+    { $group: { _id: null, qty: { $sum: '$items.quantity' } } }
+  ]);
+  available += incoming.length > 0 ? Number(incoming[0].qty || 0) : 0;
+
+  // Outgoing transfers from this shop for this product
+  const outgoing = await StockTransfer.aggregate([
+    { $match: { sourceType: 'shop', sourceId: shopObjectId } },
+    { $unwind: '$items' },
+    { $match: { 'items.product': productObjectId } },
+    { $group: { _id: null, qty: { $sum: '$items.quantity' } } }
+  ]);
+  available -= outgoing.length > 0 ? Number(outgoing[0].qty || 0) : 0;
+
+  return available;
+}
+
 // @desc    Create a new sale
 // @route   POST /api/sales
 // @access  Private
@@ -61,6 +89,20 @@ const createSale = async (req, res) => {
           status: 'fail',
           message: 'Product not found',
         });
+      }
+
+      // If a shop is provided, validate availability in the shop based on transfers
+      if (shop) {
+        const availableInShop = await getAvailableQuantityInShop(product._id, shop);
+        if (availableInShop < item.quantity) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Insufficient inventory for product ${product.name} in selected shop. Available: ${availableInShop}, Requested: ${item.quantity}`,
+            product: product.name,
+            availableQuantity: availableInShop,
+            requestedQuantity: item.quantity
+          });
+        }
       }
 
       // Determine warehouse to check
