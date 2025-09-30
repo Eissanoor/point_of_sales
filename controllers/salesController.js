@@ -1,6 +1,40 @@
 const Sales = require('../models/salesModel');
 const Product = require('../models/productModel');
 const SalesJourney = require('../models/salesJourneyModel');
+const StockTransfer = require('../models/stockTransferModel');
+
+// Helper: compute available quantity of a product at a specific warehouse
+async function getAvailableQuantityInWarehouse(productId, warehouseId) {
+  // Base: if the product was originally in this warehouse, start with its current countInStock
+  const product = await Product.findById(productId).lean();
+  if (!product) return 0;
+
+  let available = 0;
+  if (product.warehouse && product.warehouse.toString() === warehouseId.toString()) {
+    available += Number(product.countInStock || 0);
+  }
+
+  // Incoming transfers to this warehouse for this product
+  const incoming = await StockTransfer.aggregate([
+    { $match: { destinationType: 'warehouse', destinationId: product.warehouse ? { $exists: true } : { $exists: true } } },
+    { $match: { destinationType: 'warehouse', destinationId: new (require('mongoose').Types.ObjectId)(warehouseId) } },
+    { $unwind: '$items' },
+    { $match: { 'items.product': new (require('mongoose').Types.ObjectId)(productId) } },
+    { $group: { _id: null, qty: { $sum: '$items.quantity' } } }
+  ]);
+  available += incoming.length > 0 ? Number(incoming[0].qty || 0) : 0;
+
+  // Outgoing transfers from this warehouse for this product
+  const outgoing = await StockTransfer.aggregate([
+    { $match: { sourceType: 'warehouse', sourceId: new (require('mongoose').Types.ObjectId)(warehouseId) } },
+    { $unwind: '$items' },
+    { $match: { 'items.product': new (require('mongoose').Types.ObjectId)(productId) } },
+    { $group: { _id: null, qty: { $sum: '$items.quantity' } } }
+  ]);
+  available -= outgoing.length > 0 ? Number(outgoing[0].qty || 0) : 0;
+
+  return available;
+}
 
 // @desc    Create a new sale
 // @route   POST /api/sales
@@ -20,7 +54,7 @@ const createSale = async (req, res) => {
 
     // Check product inventory availability for all items
     for (const item of items) {
-      // Check if product exists and has enough inventory
+      // Check if product exists
       const product = await Product.findById(item.product);
       if (!product) {
         return res.status(404).json({
@@ -29,22 +63,25 @@ const createSale = async (req, res) => {
         });
       }
 
-      // Check if the product is in the specified warehouse (either from item or from request body)
-      const targetWarehouse = item.warehouse || warehouse;
-      if (targetWarehouse && product.warehouse && product.warehouse.toString() !== targetWarehouse.toString()) {
+      // Determine warehouse to check
+      const targetWarehouse = item.warehouse || warehouse || product.warehouse;
+      if (!targetWarehouse) {
         return res.status(400).json({
           status: 'fail',
-          message: `Product ${product.name} is not available in the selected warehouse`,
+          message: `No warehouse specified for product ${product.name}`,
           product: product.name
         });
       }
 
-      if (product.countInStock < item.quantity) {
+      // Compute available quantity at target warehouse based on transfers and base stock
+      const availableInWarehouse = await getAvailableQuantityInWarehouse(product._id, targetWarehouse);
+
+      if (availableInWarehouse < item.quantity) {
         return res.status(400).json({
           status: 'fail',
-          message: `Insufficient inventory for product ${product.name}. Available: ${product.countInStock}, Requested: ${item.quantity}`,
+          message: `Insufficient inventory for product ${product.name} in selected warehouse. Available: ${availableInWarehouse}, Requested: ${item.quantity}`,
           product: product.name,
-          availableQuantity: product.countInStock,
+          availableQuantity: availableInWarehouse,
           requestedQuantity: item.quantity
         });
       }
