@@ -203,13 +203,15 @@ const createProduct = async (req, res) => {
       countInStock
     } = req.body;
     
-    // Check if category exists
-    const categoryExists = await Category.findById(category);
-    if (!categoryExists) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Invalid category',
-      });
+    // Check if category exists (only if provided)
+    if (category) {
+      const categoryExists = await Category.findById(category);
+      if (!categoryExists) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid category',
+        });
+      }
     }
     
     // Upload image to cloudinary if provided
@@ -239,12 +241,12 @@ const createProduct = async (req, res) => {
       name,
       image: imageUrl,
       imagePublicId,
-      category,
+      category: category || null,
       supplier: supplier || null,
       warehouse: warehouse || null,
       currency: currency || null,
       currencyExchangeRate,
-      description,
+      description: description || '',
       purchaseRate: purchaseRate || 0,
       saleRate: saleRate || 0,
       wholesaleRate: wholesaleRate || 0,

@@ -36,6 +36,7 @@ const operationalExpenseRoutes = require('./routes/operationalExpenseRoutes');
 const miscellaneousExpenseRoutes = require('./routes/miscellaneousExpenseRoutes');
 const financialExpenseRoutes = require('./routes/financialExpenseRoutes');
 const bankAccountRoutes = require('./routes/bankAccountRoutes');
+const purchaseRoutes = require('./routes/purchaseRoutes');
 
 // Initialize express app
 const app = express();
@@ -87,6 +88,7 @@ app.use('/api/expenses', expenseRoutes);
 app.use('/api/transporters', transporterRoutes);
 app.use('/api/shipments', shipmentRoutes);
 app.use('/api/bank-accounts', bankAccountRoutes);
+app.use('/api/purchases', purchaseRoutes);
 
 // Root route
 app.get('/', (req, res) => {

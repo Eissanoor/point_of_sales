@@ -50,7 +50,6 @@ const productSchema = new mongoose.Schema(
     },
     category: {
       type: mongoose.Schema.Types.ObjectId,
-      required: [true, 'Please enter product category'],
       ref: 'Category',
     },
     supplier: {
@@ -73,7 +72,7 @@ const productSchema = new mongoose.Schema(
 
     description: {
       type: String,
-      required: [true, 'Please enter product description'],
+      default: '',
     },
     reviews: [reviewSchema],
     rating: {
@@ -89,22 +88,18 @@ const productSchema = new mongoose.Schema(
   
     purchaseRate: {
       type: Number,
-      required: [true, 'Please enter product purchase rate'],
       default: 0,
     },
     saleRate: {
       type: Number,
-      required: [true, 'Please enter product sale rate'],
       default: 0,
     },
     wholesaleRate: {
       type: Number,
-      required: [true, 'Please enter product wholesale rate'],
       default: 0,
     },
     retailRate: {
       type: Number,
-      required: [true, 'Please enter product retail rate'],
       default: 0,
     },
     size: {
