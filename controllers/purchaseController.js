@@ -77,7 +77,7 @@ const getPurchases = async (req, res) => {
     
     // Find purchases based on filters with pagination and sorting
     const purchases = await Purchase.find(filter)
-      .populate('product', 'name description')
+      .populate('items.product', 'name description')
       .populate('supplier', 'name email phoneNumber')
       .populate('warehouse', 'name code')
       .populate('currency', 'name code symbol')
@@ -107,7 +107,7 @@ const getPurchases = async (req, res) => {
 const getPurchaseById = async (req, res) => {
   try {
     const purchase = await Purchase.findById(req.params.id)
-      .populate('product', 'name description category')
+      .populate('items.product', 'name description category')
       .populate('supplier', 'name email phoneNumber address')
       .populate('warehouse', 'name code address')
       .populate('currency', 'name code symbol');
@@ -137,34 +137,47 @@ const getPurchaseById = async (req, res) => {
 const createPurchase = async (req, res) => {
   try {
     const {
-      product,
+      items,
       supplier,
       warehouse,
       currency,
-      quantity,
-      purchaseRate,
-      saleRate,
-      retailRate,
-      wholesaleRate,
       purchaseDate,
       invoiceNumber,
       notes
     } = req.body;
     
     // Validate required fields
-    if (!product || !supplier || !warehouse || !quantity || !purchaseRate || !saleRate || !retailRate || !wholesaleRate) {
+    if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Please provide all required fields: product, supplier, warehouse, quantity, purchaseRate, saleRate, retailRate, wholesaleRate',
+        message: 'Please provide at least one item in the items array',
       });
     }
     
-    // Check if product exists
-    const productExists = await Product.findById(product);
-    if (!productExists) {
+    if (!supplier || !warehouse) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Product not found',
+        message: 'Please provide supplier and warehouse',
+      });
+    }
+    
+    // Validate each item
+    for (const item of items) {
+      if (!item.product || !item.quantity || !item.purchaseRate || !item.retailRate || !item.wholesaleRate) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Each item must have: product, quantity, purchaseRate, retailRate, wholesaleRate',
+        });
+      }
+    }
+    
+    // Check if all products exist
+    const productIds = items.map(item => item.product);
+    const products = await Product.find({ _id: { $in: productIds } });
+    if (products.length !== productIds.length) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'One or more products not found',
       });
     }
     
@@ -197,35 +210,31 @@ const createPurchase = async (req, res) => {
 
     const purchase = await Purchase.create({
       user: req.user._id,
-      product,
+      items,
       supplier,
       warehouse,
       currency: currency || null,
       currencyExchangeRate,
-      quantity,
-      purchaseRate,
-      saleRate,
-      retailRate,
-      wholesaleRate,
       purchaseDate: purchaseDate || new Date(),
       invoiceNumber: invoiceNumber || '',
       notes: notes || '',
     });
     
-    // Update product stock and rates
-    await Product.findByIdAndUpdate(product, {
-      $inc: { countInStock: quantity },
-      $set: {
-        purchaseRate: purchaseRate,
-        saleRate: saleRate,
-        retailRate: retailRate,
-        wholesaleRate: wholesaleRate,
-        supplier: supplier,
-        warehouse: warehouse,
-        currency: currency || productExists.currency,
-        currencyExchangeRate: currencyExchangeRate,
-      }
-    });
+    // Update product stock and rates for each item
+    for (const item of items) {
+      await Product.findByIdAndUpdate(item.product, {
+        $inc: { countInStock: item.quantity },
+        $set: {
+          purchaseRate: item.purchaseRate,
+          retailRate: item.retailRate,
+          wholesaleRate: item.wholesaleRate,
+          supplier: supplier,
+          warehouse: warehouse,
+          currency: currency || products.find(p => p._id.toString() === item.product).currency,
+          currencyExchangeRate: currencyExchangeRate,
+        }
+      });
+    }
     
     if (purchase) {
       res.status(201).json({
@@ -254,12 +263,14 @@ const updatePurchase = async (req, res) => {
     const purchase = await Purchase.findById(req.params.id);
     
     if (purchase) {
-      const oldQuantity = purchase.quantity;
-      const oldProduct = purchase.product;
+      const oldItems = purchase.items.map(item => ({
+        product: item.product,
+        quantity: item.quantity
+      }));
       
       // Update fields if provided
       for (const [key, value] of Object.entries(req.body)) {
-        if (purchase[key] !== value) {
+        if (key !== 'items' && purchase[key] !== value) {
           purchase[key] = value;
           
           // If currency is being updated, also update the exchange rate
@@ -272,30 +283,57 @@ const updatePurchase = async (req, res) => {
         }
       }
       
-      // Recalculate total amount
-      if (purchase.quantity && purchase.purchaseRate) {
-        purchase.totalAmount = purchase.quantity * purchase.purchaseRate;
+      // Handle items update if provided
+      if (req.body.items && Array.isArray(req.body.items)) {
+        // Validate items
+        for (const item of req.body.items) {
+          if (!item.product || !item.quantity || !item.purchaseRate || !item.retailRate || !item.wholesaleRate) {
+            return res.status(400).json({
+              status: 'fail',
+              message: 'Each item must have: product, quantity, purchaseRate, retailRate, wholesaleRate',
+            });
+          }
+        }
+        
+        // Check if all products exist
+        const productIds = req.body.items.map(item => item.product);
+        const products = await Product.find({ _id: { $in: productIds } });
+        if (products.length !== productIds.length) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'One or more products not found',
+          });
+        }
+        
+        purchase.items = req.body.items;
       }
       
       const updatedPurchase = await purchase.save();
       
-      // Update product stock if quantity changed
-      if (oldQuantity !== purchase.quantity) {
-        const quantityDifference = purchase.quantity - oldQuantity;
-        await Product.findByIdAndUpdate(purchase.product, {
-          $inc: { countInStock: quantityDifference }
-        });
-      }
-      
-      // Update product rates if they changed
-      if (req.body.purchaseRate || req.body.saleRate || req.body.retailRate || req.body.wholesaleRate) {
-        const updateFields = {};
-        if (req.body.purchaseRate) updateFields.purchaseRate = req.body.purchaseRate;
-        if (req.body.saleRate) updateFields.saleRate = req.body.saleRate;
-        if (req.body.retailRate) updateFields.retailRate = req.body.retailRate;
-        if (req.body.wholesaleRate) updateFields.wholesaleRate = req.body.wholesaleRate;
+      // Update product stock and rates for each item
+      if (req.body.items) {
+        // First, revert old stock changes
+        for (const oldItem of oldItems) {
+          await Product.findByIdAndUpdate(oldItem.product, {
+            $inc: { countInStock: -oldItem.quantity }
+          });
+        }
         
-        await Product.findByIdAndUpdate(purchase.product, updateFields);
+        // Then apply new stock changes
+        for (const item of purchase.items) {
+          await Product.findByIdAndUpdate(item.product, {
+            $inc: { countInStock: item.quantity },
+            $set: {
+              purchaseRate: item.purchaseRate,
+              retailRate: item.retailRate,
+              wholesaleRate: item.wholesaleRate,
+              supplier: purchase.supplier,
+              warehouse: purchase.warehouse,
+              currency: purchase.currency,
+              currencyExchangeRate: purchase.currencyExchangeRate,
+            }
+          });
+        }
       }
       
       res.json({
@@ -324,10 +362,12 @@ const deletePurchase = async (req, res) => {
     const purchase = await Purchase.findById(req.params.id);
 
     if (purchase) {
-      // Reduce product stock by the purchase quantity
-      await Product.findByIdAndUpdate(purchase.product, {
-        $inc: { countInStock: -purchase.quantity }
-      });
+      // Reduce product stock by the purchase quantity for each item
+      for (const item of purchase.items) {
+        await Product.findByIdAndUpdate(item.product, {
+          $inc: { countInStock: -item.quantity }
+        });
+      }
       
       // Soft delete the purchase
       purchase.isActive = false;
@@ -375,10 +415,8 @@ const getPurchaseStats = async (req, res) => {
         $group: {
           _id: null,
           totalPurchases: { $sum: 1 },
-          totalQuantity: { $sum: '$quantity' },
+          totalQuantity: { $sum: '$totalQuantity' },
           totalAmount: { $sum: '$totalAmount' },
-          averagePurchaseRate: { $avg: '$purchaseRate' },
-          averageSaleRate: { $avg: '$saleRate' },
         }
       }
     ]);
@@ -387,8 +425,6 @@ const getPurchaseStats = async (req, res) => {
       totalPurchases: 0,
       totalQuantity: 0,
       totalAmount: 0,
-      averagePurchaseRate: 0,
-      averageSaleRate: 0,
     };
     
     res.json({
@@ -426,15 +462,16 @@ const getPurchasesByProduct = async (req, res) => {
     
     // Count total documents for pagination info
     const totalPurchases = await Purchase.countDocuments({ 
-      product: productId, 
+      'items.product': productId, 
       isActive: true 
     });
     
     // Get purchase records
     const purchases = await Purchase.find({ 
-      product: productId, 
+      'items.product': productId, 
       isActive: true 
     })
+      .populate('items.product', 'name description')
       .populate('supplier', 'name email')
       .populate('warehouse', 'name code')
       .populate('currency', 'name code symbol')
