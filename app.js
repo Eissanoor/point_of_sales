@@ -37,6 +37,9 @@ const miscellaneousExpenseRoutes = require('./routes/miscellaneousExpenseRoutes'
 const financialExpenseRoutes = require('./routes/financialExpenseRoutes');
 const bankAccountRoutes = require('./routes/bankAccountRoutes');
 const purchaseRoutes = require('./routes/purchaseRoutes');
+const quantityUnitRoutes = require('./routes/quantityUnitRoutes');
+const packingUnitRoutes = require('./routes/packingUnitRoutes');
+const pochuesRoutes = require('./routes/pochuesRoutes');
 
 // Initialize express app
 const app = express();
@@ -89,6 +92,9 @@ app.use('/api/transporters', transporterRoutes);
 app.use('/api/shipments', shipmentRoutes);
 app.use('/api/bank-accounts', bankAccountRoutes);
 app.use('/api/purchases', purchaseRoutes);
+app.use('/api/quantity-units', quantityUnitRoutes);
+app.use('/api/packing-units', packingUnitRoutes);
+app.use('/api/pochues', pochuesRoutes);
 
 // Root route
 app.get('/', (req, res) => {
