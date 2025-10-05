@@ -2,6 +2,9 @@ const Product = require('../models/productModel');
 const ProductJourney = require('../models/productJourneyModel');
 const Category = require('../models/categoryModel');
 const Currency = require('../models/currencyModel');
+const QuantityUnit = require('../models/quantityUnitModel');
+const PackingUnit = require('../models/packingUnitModel');
+const Pochues = require('../models/pochuesModel');
 const cloudinary = require('../config/cloudinary');
 const currencyUtils = require('../utils/currencyUtils');
 const StockTransfer = require('../models/stockTransferModel');
@@ -86,6 +89,9 @@ const getProducts = async (req, res) => {
       .populate('supplier', 'name')
       .populate('warehouse', 'name code')
       .populate('currency', 'name code symbol')
+      .populate('quantityUnit', 'name')
+      .populate('packingUnit', 'name')
+      .populate('pochues', 'name')
       .sort(sort)
       .skip(skip)
       .limit(limitNum);
@@ -116,6 +122,9 @@ const getProductById = async (req, res) => {
       .populate('supplier', 'name email phoneNumber')
       .populate('warehouse', 'name code')
       .populate('currency', 'name code symbol')
+      .populate('quantityUnit', 'name')
+      .populate('packingUnit', 'name')
+      .populate('pochues', 'name')
       .populate('reviews.user', 'name email');
 
     if (product) {
@@ -197,8 +206,9 @@ const createProduct = async (req, res) => {
       retailRate,
       size,
       color,
+      quantityUnit,
       packingUnit,
-      additionalUnit,
+      pochues,
       pouchesOrPieces,
       countInStock
     } = req.body;
@@ -210,6 +220,39 @@ const createProduct = async (req, res) => {
         return res.status(400).json({
           status: 'fail',
           message: 'Invalid category',
+        });
+      }
+    }
+
+    // Check if quantity unit exists (only if provided)
+    if (quantityUnit) {
+      const quantityUnitExists = await QuantityUnit.findById(quantityUnit);
+      if (!quantityUnitExists) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid quantity unit',
+        });
+      }
+    }
+
+    // Check if packing unit exists (only if provided)
+    if (packingUnit) {
+      const packingUnitExists = await PackingUnit.findById(packingUnit);
+      if (!packingUnitExists) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid packing unit',
+        });
+      }
+    }
+
+    // Check if pochues exists (only if provided)
+    if (pochues) {
+      const pochuesExists = await Pochues.findById(pochues);
+      if (!pochuesExists) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid pochues',
         });
       }
     }
@@ -253,8 +296,9 @@ const createProduct = async (req, res) => {
       retailRate: retailRate || 0,
       size: size || '',
       color: color || '',
-      packingUnit: packingUnit || '',
-      additionalUnit: additionalUnit || '',
+      quantityUnit: quantityUnit || null,
+      packingUnit: packingUnit || null,
+      pochues: pochues || null,
       pouchesOrPieces: pouchesOrPieces || 0,
       countInStock: countInStock || 0,
     });
@@ -318,6 +362,37 @@ const updateProduct = async (req, res) => {
                 newValue: currencyDoc.exchangeRate,
               });
               product.currencyExchangeRate = currencyDoc.exchangeRate;
+            }
+          }
+
+          // Validate unit relationships if being updated
+          if (key === 'quantityUnit' && value) {
+            const quantityUnitExists = await QuantityUnit.findById(value);
+            if (!quantityUnitExists) {
+              return res.status(400).json({
+                status: 'fail',
+                message: 'Invalid quantity unit',
+              });
+            }
+          }
+
+          if (key === 'packingUnit' && value) {
+            const packingUnitExists = await PackingUnit.findById(value);
+            if (!packingUnitExists) {
+              return res.status(400).json({
+                status: 'fail',
+                message: 'Invalid packing unit',
+              });
+            }
+          }
+
+          if (key === 'pochues' && value) {
+            const pochuesExists = await Pochues.findById(value);
+            if (!pochuesExists) {
+              return res.status(400).json({
+                status: 'fail',
+                message: 'Invalid pochues',
+              });
             }
           }
         }
@@ -768,6 +843,47 @@ const getProductsByLocation = async (req, res) => {
   }
 };
 
+// @desc    Get hierarchical unit data for product forms
+// @route   GET /api/products/units/hierarchy
+// @access  Public
+const getUnitsHierarchy = async (req, res) => {
+  try {
+    // Get all quantity units
+    const quantityUnits = await QuantityUnit.find({ isActive: true }).sort({ name: 1 });
+
+    // Get all packing units with their quantity units
+    const packingUnits = await PackingUnit.find({ isActive: true })
+      .populate('quantityUnit', 'name')
+      .sort({ name: 1 });
+
+    // Get all pochues with their packing units and quantity units
+    const pochues = await Pochues.find({ isActive: true })
+      .populate({
+        path: 'packingUnit',
+        select: 'name',
+        populate: {
+          path: 'quantityUnit',
+          select: 'name'
+        }
+      })
+      .sort({ name: 1 });
+
+    res.json({
+      status: 'success',
+      data: {
+        quantityUnits,
+        packingUnits,
+        pochues,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   getProducts,
   getProductById,
@@ -778,4 +894,5 @@ module.exports = {
   getProductJourneyByProductId,
   convertProductPrice,
   getProductsByLocation,
+  getUnitsHierarchy,
 }; 

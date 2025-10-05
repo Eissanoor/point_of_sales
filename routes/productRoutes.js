@@ -10,6 +10,7 @@ const {
   getProductJourneyByProductId,
   convertProductPrice,
   getProductsByLocation,
+  getUnitsHierarchy,
 } = require('../controllers/productController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 const upload = require('../middlewares/uploadMiddleware');
@@ -35,5 +36,8 @@ router.route('/:id/convert-price')
 
 router.route('/location/:locationType/:locationId')
   .get(protect, getProductsByLocation);
+
+router.route('/units/hierarchy')
+  .get(getUnitsHierarchy);
 
 module.exports = router; 

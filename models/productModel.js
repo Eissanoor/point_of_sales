@@ -115,13 +115,17 @@ const productSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
-    packingUnit: {
-      type: String,
-      default: '',
+    quantityUnit: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'QuantityUnit',
     },
-    additionalUnit: {
-      type: String,
-      default: '',
+    packingUnit: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PackingUnit',
+    },
+    pochues: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Pochues',
     },
     pouchesOrPieces: {
       type: Number,
