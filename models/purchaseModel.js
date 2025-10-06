@@ -84,6 +84,11 @@ const purchaseSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    paymentMethod: {
+      type: String,
+      enum: ['cash', 'bank', 'credit', 'check', 'online'],
+      default: 'cash',
+    },
     status: {
       type: String,
       enum: ['pending', 'completed', 'cancelled'],

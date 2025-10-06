@@ -20,7 +20,8 @@ const getPurchases = async (req, res) => {
       sortOrder = 'desc',
       startDate,
       endDate,
-      status
+      status,
+      paymentMethod
     } = req.query;
 
     const pageNum = parseInt(page);
@@ -63,6 +64,11 @@ const getPurchases = async (req, res) => {
     // Filter by status
     if (status) {
       filter.status = status;
+    }
+    
+    // Filter by payment method
+    if (paymentMethod) {
+      filter.paymentMethod = paymentMethod;
     }
     
     // Only show active purchases
@@ -143,7 +149,8 @@ const createPurchase = async (req, res) => {
       currency,
       purchaseDate,
       invoiceNumber,
-      notes
+      notes,
+      paymentMethod
     } = req.body;
     
     // Validate required fields
@@ -218,6 +225,7 @@ const createPurchase = async (req, res) => {
       purchaseDate: purchaseDate || new Date(),
       invoiceNumber: invoiceNumber || '',
       notes: notes || '',
+      paymentMethod: paymentMethod || 'cash',
     });
     
     // Update product stock and rates for each item
