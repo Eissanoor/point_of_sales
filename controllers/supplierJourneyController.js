@@ -25,17 +25,10 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
     .populate('product', 'name price purchaseRate')
     .populate('supplier', 'name');
 
-  // Get all products for this supplier with detailed information
-  const products = await Product.find({ supplier: supplierId })
-    .populate('category', 'name')
-    .select('name purchaseRate availableQuantity soldOutQuantity category packingUnit');
-  
-  // Compute purchased quantities per product from purchases (keep response shape unchanged)
-  const productIds = products.map(p => p._id);
-  const purchaseQuantities = await Purchase.aggregate([
+  // Derive purchased products for this supplier directly from purchases (robust to missing Product.supplier)
+  const purchasedAgg = await Purchase.aggregate([
     { $match: { supplier: new mongoose.Types.ObjectId(supplierId), isActive: true } },
     { $unwind: '$items' },
-    { $match: { 'items.product': { $in: productIds } } },
     {
       $group: {
         _id: '$items.product',
@@ -44,25 +37,35 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
       }
     }
   ]);
-  const productIdToPurchased = new Map();
-  for (const row of purchaseQuantities) {
-    productIdToPurchased.set(String(row._id), {
-      qty: row.totalPurchasedQty || 0,
-      amount: row.totalPurchasedAmount || 0
-    });
-  }
+
+  const purchasedProductIds = purchasedAgg.map(row => row._id);
+  const productIdToPurchased = new Map(
+    purchasedAgg.map(row => [
+      String(row._id),
+      {
+        qty: row.totalPurchasedQty || 0,
+        amount: row.totalPurchasedAmount || 0
+      }
+    ])
+  );
+
+  // Fetch product details for purchased products
+  const products = await Product.find({ _id: { $in: purchasedProductIds } })
+    .populate('category', 'name')
+    .select('name purchaseRate soldOutQuantity category packingUnit');
   
   // Calculate summary statistics
   const productCount = products.length;
   const totalQuantity = products.reduce((sum, product) => {
     const purchased = productIdToPurchased.get(String(product._id));
-    const availableQty = purchased ? purchased.qty : 0;
-    return sum + availableQty;
+    const qty = purchased ? purchased.qty : 0;
+    return sum + qty;
   }, 0);
+  // Use aggregated purchase amounts to avoid depending on Product.purchaseRate accuracy
   const totalAmount = products.reduce((sum, product) => {
     const purchased = productIdToPurchased.get(String(product._id));
-    const availableQty = purchased ? purchased.qty : 0;
-    return sum + ((product.purchaseRate || 0) * availableQty);
+    const amount = purchased ? purchased.amount : 0;
+    return sum + amount;
   }, 0);
   const soldQuantity = products.reduce((sum, product) => sum + (product.soldOutQuantity || 0), 0);
   const soldAmount = products.reduce((sum, product) => sum + ((product.purchaseRate || 0) * (product.soldOutQuantity || 0)), 0);
@@ -70,15 +73,16 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
   // Format product details for response
   const productDetails = products.map(product => {
     const purchased = productIdToPurchased.get(String(product._id));
-    const availableQty = purchased ? purchased.qty : 0;
+    const qty = purchased ? purchased.qty : 0;
+    const amount = purchased ? purchased.amount : 0;
     return {
       id: product._id,
       name: product.name,
       category: product.category ? product.category.name : 'Uncategorized',
-      availableQuantity: availableQty,
+      availableQuantity: qty,
       soldQuantity: product.soldOutQuantity || 0,
       purchaseRate: product.purchaseRate || 0,
-      totalValue: ((product.purchaseRate || 0) * availableQty) || 0,
+      totalValue: amount,
       soldValue: ((product.purchaseRate || 0) * (product.soldOutQuantity || 0)) || 0,
       packingUnit: product.packingUnit || '',
     };
@@ -100,15 +104,15 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
     }
     
     const purchased = productIdToPurchased.get(String(product._id));
-    const availableQty = purchased ? purchased.qty : 0;
-    const value = ((product.purchaseRate || 0) * availableQty) || 0;
+    const qty = purchased ? purchased.qty : 0;
+    const value = purchased ? purchased.amount : 0;
     acc[categoryId].count += 1;
-    acc[categoryId].quantity += availableQty;
+    acc[categoryId].quantity += qty;
     acc[categoryId].amount += value;
     acc[categoryId].products.push({
       id: product._id,
       name: product.name,
-      quantity: availableQty,
+      quantity: qty,
       value: value
     });
     
