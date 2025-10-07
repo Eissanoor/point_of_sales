@@ -1,8 +1,10 @@
 const asyncHandler = require('express-async-handler');
+const mongoose = require('mongoose');
 const SupplierPayment = require('../models/supplierPaymentModel');
 const SupplierJourney = require('../models/supplierJourneyModel');
 const Supplier = require('../models/supplierModel');
 const Product = require('../models/productModel');
+const Purchase = require('../models/purchaseModel');
 
 // @desc    Create a new supplier payment
 // @route   POST /api/supplier-payments
@@ -117,8 +119,29 @@ const getPaymentsBySupplier = asyncHandler(async (req, res) => {
     return sum + payment.amount;
   }, 0);
 
+  // Calculate total purchases for this supplier (active purchases only)
+  const purchasesAgg = await Purchase.aggregate([
+    { $match: { supplier: new mongoose.Types.ObjectId(supplierId), isActive: true } },
+    {
+      $group: {
+        _id: null,
+        totalPurchasesAmount: { $sum: '$totalAmount' }
+      }
+    }
+  ]);
+  const totalPurchasesAmount = purchasesAgg.length > 0 ? (purchasesAgg[0].totalPurchasesAmount || 0) : 0;
+  const balance = totalPurchasesAmount - totalPayments;
+
   res.status(200).json({
+    supplier: {
+      id: supplier._id,
+      name: supplier.name,
+      email: supplier.email,
+      phoneNumber: supplier.phoneNumber
+    },
     totalPayments,
+    totalPurchasesAmount,
+    balance,
     count: payments.length,
     payments
   });
