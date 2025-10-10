@@ -53,11 +53,8 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
   const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
   const remainingBefore = totalPurchasesAmount - paidSoFar;
 
-  // Prevent over-payment
-  if (amount > remainingBefore) {
-    res.status(400);
-    throw new Error(`Payment exceeds remaining balance. Remaining balance: ${remainingBefore}`);
-  }
+  // Allow over-payment (advanced payment)
+  // No validation needed - negative remaining balance indicates advance payment
 
   // Create payment
   const payment = await SupplierPayment.create({
@@ -76,6 +73,11 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
     products: []
   });
 
+  // Calculate new balances
+  const newPaidAmount = paidSoFar + amount;
+  const newRemainingBalance = remainingBefore - amount;
+  const isAdvancedPayment = newRemainingBalance < 0;
+  
   // Create supplier journey entry for this payment
   await SupplierJourney.create({
     supplier,
@@ -88,9 +90,9 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
       status: status || 'completed',
       transactionId
     },
-    paidAmount: paidSoFar + amount,
-    remainingBalance: remainingBefore - amount,
-    notes: `Payment of ${amount} made to supplier via ${paymentMethod}. Transaction ID: ${transactionId}. Remaining balance: ${remainingBefore - amount}. ${notes || ''}`
+    paidAmount: newPaidAmount,
+    remainingBalance: newRemainingBalance,
+    notes: `Payment of ${amount} made to supplier via ${paymentMethod}. Transaction ID: ${transactionId}. ${isAdvancedPayment ? `Advanced payment: ${Math.abs(newRemainingBalance)}` : `Remaining balance: ${newRemainingBalance}`}. ${notes || ''}`
   });
 
   // Return payment with balance information
@@ -98,8 +100,10 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
     ...payment.toObject(),
     balanceInfo: {
       totalPurchasesAmount,
-      paidAmount: paidSoFar + amount,
-      remainingBalance: remainingBefore - amount
+      paidAmount: newPaidAmount,
+      remainingBalance: newRemainingBalance,
+      isAdvancedPayment: isAdvancedPayment,
+      advanceAmount: isAdvancedPayment ? Math.abs(newRemainingBalance) : 0
     }
   });
 });
