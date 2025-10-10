@@ -4,6 +4,7 @@ const SupplierJourney = require('../models/supplierJourneyModel');
 const Product = require('../models/productModel');
 const Supplier = require('../models/supplierModel');
 const Purchase = require('../models/purchaseModel');
+const SupplierPayment = require('../models/supplierPaymentModel');
 
 // @desc    Get supplier journey by supplier ID
 // @route   GET /api/supplier-journey/:supplierId
@@ -70,6 +71,18 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
   const soldQuantity = products.reduce((sum, product) => sum + (product.soldOutQuantity || 0), 0);
   const soldAmount = products.reduce((sum, product) => sum + ((product.purchaseRate || 0) * (product.soldOutQuantity || 0)), 0);
 
+  // Calculate total payments made to this supplier (exclude failed/refunded)
+  const paymentsAgg = await SupplierPayment.aggregate([
+    { 
+      $match: { 
+        supplier: new mongoose.Types.ObjectId(supplierId), 
+        status: { $nin: ['failed', 'refunded'] }
+      } 
+    },
+    { $group: { _id: null, totalPaid: { $sum: '$amount' } } }
+  ]);
+  const totalPayments = paymentsAgg.length > 0 ? (paymentsAgg[0].totalPaid || 0) : 0;
+
   // Format product details for response
   const productDetails = products.map(product => {
     const purchased = productIdToPurchased.get(String(product._id));
@@ -132,7 +145,8 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
       totalAmount,
       soldQuantity,
       soldAmount,
-      balance: totalAmount - soldAmount
+      paidAmount: totalPayments,
+      remainingBalance: totalAmount - totalPayments
     },
     products: productDetails,
     productsByCategory
@@ -293,17 +307,19 @@ const getSupplierJourneySummary = asyncHandler(async (req, res) => {
     return sum + (product.purchaseRate * product.soldOutQuantity);
   }, 0);
 
-  // Get payment information
-  const paymentEntries = await SupplierJourney.find({ 
-    supplier: supplierId,
-    action: { $in: ['payment_made', 'payment_updated'] }
-  });
+  // Get total payments from SupplierPayment (exclude failed/refunded)
+  const summaryPaymentsAgg = await SupplierPayment.aggregate([
+    { 
+      $match: { 
+        supplier: new mongoose.Types.ObjectId(supplierId), 
+        status: { $nin: ['failed', 'refunded'] }
+      } 
+    },
+    { $group: { _id: null, totalPaid: { $sum: '$amount' } } }
+  ]);
+  const totalPayments = summaryPaymentsAgg.length > 0 ? (summaryPaymentsAgg[0].totalPaid || 0) : 0;
 
-  const totalPayments = paymentEntries.reduce((sum, entry) => {
-    return sum + (entry.payment?.amount || 0);
-  }, 0);
-
-  // Calculate balance (total product value - total payments)
+  // Calculate balance (purchased value - total payments)
   const balance = totalProductValue - totalPayments;
 
   // Get recent activity
