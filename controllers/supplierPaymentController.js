@@ -17,8 +17,7 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
     status, 
     notes, 
     attachments,
-    currency,
-    products
+    currency
   } = req.body;
 
   // Validate supplier exists
@@ -40,6 +39,26 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
   // Set payment date to current date and time
   const paymentDate = new Date();
 
+  // Compute current totals for validation and journey running balances
+  const purchasesAgg = await Purchase.aggregate([
+    { $match: { supplier: new mongoose.Types.ObjectId(supplier), isActive: true } },
+    { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+  ]);
+  const totalPurchasesAmount = purchasesAgg.length > 0 ? (purchasesAgg[0].total || 0) : 0;
+  
+  const paymentsAgg = await SupplierPayment.aggregate([
+    { $match: { supplier: new mongoose.Types.ObjectId(supplier), status: { $nin: ['failed', 'refunded'] } } },
+    { $group: { _id: null, total: { $sum: '$amount' } } }
+  ]);
+  const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
+  const remainingBefore = totalPurchasesAmount - paidSoFar;
+
+  // Prevent over-payment
+  if (amount > remainingBefore) {
+    res.status(400);
+    throw new Error(`Payment exceeds remaining balance. Remaining balance: ${remainingBefore}`);
+  }
+
   // Create payment
   const payment = await SupplierPayment.create({
     paymentNumber,
@@ -54,7 +73,7 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
     user: req.user._id,
     isPartial: status === 'partial',
     currency,
-    products: products || []
+    products: []
   });
 
   // Create supplier journey entry for this payment
@@ -69,10 +88,20 @@ const createSupplierPayment = asyncHandler(async (req, res) => {
       status: status || 'completed',
       transactionId
     },
-    notes: `Payment of ${amount} made to supplier via ${paymentMethod}. Transaction ID: ${transactionId}. ${notes || ''}`
+    paidAmount: paidSoFar + amount,
+    remainingBalance: remainingBefore - amount,
+    notes: `Payment of ${amount} made to supplier via ${paymentMethod}. Transaction ID: ${transactionId}. Remaining balance: ${remainingBefore - amount}. ${notes || ''}`
   });
 
-  res.status(201).json(payment);
+  // Return payment with balance information
+  res.status(201).json({
+    ...payment.toObject(),
+    balanceInfo: {
+      totalPurchasesAmount,
+      paidAmount: paidSoFar + amount,
+      remainingBalance: remainingBefore - amount
+    }
+  });
 });
 
 // @desc    Get all supplier payments
@@ -244,6 +273,20 @@ const updateSupplierPayment = asyncHandler(async (req, res) => {
 
   // Create supplier journey entry for this payment update
   if (changes.length > 0) {
+    // Recompute running totals after update for journey entry
+    const purchasesAgg = await Purchase.aggregate([
+      { $match: { supplier: new mongoose.Types.ObjectId(payment.supplier), isActive: true } },
+      { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+    ]);
+    const totalPurchasesAmount = purchasesAgg.length > 0 ? (purchasesAgg[0].total || 0) : 0;
+    
+    const paymentsAgg = await SupplierPayment.aggregate([
+      { $match: { supplier: new mongoose.Types.ObjectId(payment.supplier), status: { $nin: ['failed', 'refunded'] } } },
+      { $group: { _id: null, total: { $sum: '$amount' } } }
+    ]);
+    const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
+    const remaining = totalPurchasesAmount - paidSoFar;
+    
     await SupplierJourney.create({
       supplier: payment.supplier,
       user: req.user._id,
@@ -255,6 +298,8 @@ const updateSupplierPayment = asyncHandler(async (req, res) => {
         status: status || payment.status,
         transactionId: transactionId || payment.transactionId
       },
+      paidAmount: paidSoFar,
+      remainingBalance: remaining,
       changes,
       notes: `Payment updated. ${notes || ''}`
     });
@@ -277,6 +322,20 @@ const deleteSupplierPayment = asyncHandler(async (req, res) => {
   await payment.remove();
 
   // Create supplier journey entry for payment deletion
+  // Recompute running totals after deletion
+  const purchasesAgg = await Purchase.aggregate([
+    { $match: { supplier: new mongoose.Types.ObjectId(payment.supplier), isActive: true } },
+    { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+  ]);
+  const totalPurchasesAmount = purchasesAgg.length > 0 ? (purchasesAgg[0].total || 0) : 0;
+  
+  const paymentsAgg = await SupplierPayment.aggregate([
+    { $match: { supplier: new mongoose.Types.ObjectId(payment.supplier), status: { $nin: ['failed', 'refunded'] } } },
+    { $group: { _id: null, total: { $sum: '$amount' } } }
+  ]);
+  const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
+  const remaining = totalPurchasesAmount - paidSoFar;
+
   await SupplierJourney.create({
     supplier: payment.supplier,
     user: req.user._id,
@@ -288,6 +347,8 @@ const deleteSupplierPayment = asyncHandler(async (req, res) => {
       status: 'deleted',
       transactionId: payment.transactionId
     },
+    paidAmount: paidSoFar,
+    remainingBalance: remaining,
     notes: `Payment deleted.`
   });
 

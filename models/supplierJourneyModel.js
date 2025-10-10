@@ -57,6 +57,15 @@ const supplierJourneySchema = new mongoose.Schema(
     notes: {
       type: String,
     },
+    // Running totals captured at the moment of this journey entry
+    paidAmount: {
+      type: Number,
+      default: 0
+    },
+    remainingBalance: {
+      type: Number,
+      default: 0
+    }
   },
   {
     timestamps: true,
