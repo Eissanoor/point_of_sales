@@ -208,7 +208,7 @@ const getSupplierPayments = asyncHandler(async (req, res) => {
     action: { $in: ['payment_made', 'payment_updated'] }
   })
   .sort({ 'payment.date': -1 })
-  .select('payment notes createdAt user')
+  .select('payment notes createdAt user paidAmount remainingBalance')
   .populate('user', 'name');
 
   // Calculate total payments
