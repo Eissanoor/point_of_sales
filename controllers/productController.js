@@ -9,6 +9,34 @@ const cloudinary = require('../config/cloudinary');
 const currencyUtils = require('../utils/currencyUtils');
 const StockTransfer = require('../models/stockTransferModel');
 const Shop = require('../models/shopModel');
+const Purchase = require('../models/purchaseModel');
+
+// Helper function to clean up orphaned product references
+const cleanupOrphanedReferences = async () => {
+  try {
+    // Clean up purchases with null product references
+    const purchasesWithNullProducts = await Purchase.find({
+      'items.product': { $exists: false }
+    });
+    
+    if (purchasesWithNullProducts.length > 0) {
+      console.log(`Found ${purchasesWithNullProducts.length} purchases with null product references`);
+      // You can implement cleanup logic here if needed
+    }
+    
+    // Clean up stock transfers with null product references
+    const transfersWithNullProducts = await StockTransfer.find({
+      'items.product': { $exists: false }
+    });
+    
+    if (transfersWithNullProducts.length > 0) {
+      console.log(`Found ${transfersWithNullProducts.length} stock transfers with null product references`);
+      // You can implement cleanup logic here if needed
+    }
+  } catch (error) {
+    console.error('Error cleaning up orphaned references:', error);
+  }
+};
 
 // @desc    Get all products
 // @route   GET /api/products
@@ -692,6 +720,9 @@ const getProductsByLocation = async (req, res) => {
   try {
     const { locationType, locationId } = req.params;
     
+    // Optional: Run cleanup for orphaned references (can be commented out in production)
+    // await cleanupOrphanedReferences();
+    
     if (!['warehouse', 'shop'].includes(locationType)) {
       return res.status(400).json({
         status: 'fail',
@@ -716,10 +747,20 @@ const getProductsByLocation = async (req, res) => {
       const incomingTransfers = await StockTransfer.find({
         destinationType: 'shop',
         destinationId: locationId,
-      }).populate('items.product');
+        'items.product': { $exists: true, $ne: null }
+      }).populate({
+        path: 'items.product',
+        match: { _id: { $exists: true } }
+      });
       
       incomingTransfers.forEach(transfer => {
         transfer.items.forEach(item => {
+          // Check if product exists and is not null
+          if (!item.product || !item.product._id) {
+            console.warn(`Stock transfer ${transfer._id} has null product reference in item`);
+            return; // Skip this item
+          }
+          
           const productId = item.product._id.toString();
           
           if (productMap[productId]) {
@@ -741,6 +782,7 @@ const getProductsByLocation = async (req, res) => {
       const outgoingTransfers = await StockTransfer.find({
         sourceType: 'shop',
         sourceId: locationId,
+        
       });
       
       outgoingTransfers.forEach(transfer => {
@@ -772,14 +814,59 @@ const getProductsByLocation = async (req, res) => {
         };
       });
       
-      // Step 2: Handle incoming transfers (adding stock to this warehouse)
+      // Step 2: Add purchases for this warehouse
+      const purchases = await Purchase.find({
+        warehouse: locationId,
+        'items.product': { $exists: true, $ne: null },
+        isActive: true
+      }).populate({
+        path: 'items.product',
+        match: { _id: { $exists: true } }
+      });
+      
+      purchases.forEach(purchase => {
+        purchase.items.forEach(item => {
+          // Check if product exists and is not null
+          if (!item.product || !item.product._id) {
+            console.warn(`Purchase ${purchase._id} has null product reference in item`);
+            return; // Skip this item
+          }
+          
+          const productId = item.product._id.toString();
+          
+          if (productMap[productId]) {
+            // Product already exists in this warehouse, add purchase quantity
+            productMap[productId].currentStock += item.quantity;
+          } else {
+            // Product is new to this warehouse via purchase
+            const productData = item.product.toObject();
+            productMap[productId] = {
+              ...productData,
+              initialStock: 0, // Not originally in this warehouse
+              currentStock: item.quantity,
+            };
+          }
+        });
+      });
+      
+      // Step 3: Handle incoming transfers (adding stock to this warehouse)
       const incomingTransfers = await StockTransfer.find({
         destinationType: 'warehouse',
         destinationId: locationId,
-      }).populate('items.product');
+        'items.product': { $exists: true, $ne: null }
+      }).populate({
+        path: 'items.product',
+        match: { _id: { $exists: true } }
+      });
       
       incomingTransfers.forEach(transfer => {
         transfer.items.forEach(item => {
+          // Check if product exists and is not null
+          if (!item.product || !item.product._id) {
+            console.warn(`Stock transfer ${transfer._id} has null product reference in item`);
+            return; // Skip this item
+          }
+          
           const productId = item.product._id.toString();
           
           if (productMap[productId]) {
@@ -797,11 +884,11 @@ const getProductsByLocation = async (req, res) => {
         });
       });
       
-      // Step 3: Handle outgoing transfers (removing stock from this warehouse)
+      // Step 4: Handle outgoing transfers (removing stock from this warehouse)
       const outgoingTransfers = await StockTransfer.find({
         sourceType: 'warehouse',
-        sourceId: locationId,
-       
+        sourceId: locationId
+        
       });
       
       outgoingTransfers.forEach(transfer => {

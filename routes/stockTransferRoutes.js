@@ -5,7 +5,8 @@ const {
   getStockTransfers,
   getStockTransferById,
   updateStockTransferStatus,
-  deleteStockTransfer
+  deleteStockTransfer,
+  getProductStockInLocation
 } = require('../controllers/stockTransferController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 
@@ -21,5 +22,9 @@ router.route('/:id')
 // Update stock transfer status
 router.route('/:id/status')
   .put(protect, updateStockTransferStatus);
+
+// Get product stock in location
+router.route('/stock/:productId/:locationType/:locationId')
+  .get(protect, getProductStockInLocation);
 
 module.exports = router;
