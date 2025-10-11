@@ -107,6 +107,66 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
   return availableStock;
 };
 
+// Helper function to find all locations where a product has stock
+const findProductStockLocations = async (productId) => {
+  const locationsWithStock = [];
+  
+  try {
+    // Check original warehouse
+    const product = await Product.findById(productId);
+    if (product && product.warehouse) {
+      const warehouse = await Warehouse.findById(product.warehouse);
+      if (warehouse) {
+        const stock = await calculateAvailableStock(productId, 'warehouse', product.warehouse);
+        if (stock > 0) {
+          locationsWithStock.push({
+            type: 'warehouse',
+            id: product.warehouse,
+            name: warehouse.name,
+            stock: stock
+          });
+        }
+      }
+    }
+    
+    // Check all warehouses for transferred stock
+    const allWarehouses = await Warehouse.find({});
+    for (const warehouse of allWarehouses) {
+      if (product && product.warehouse && warehouse._id.toString() === product.warehouse.toString()) {
+        continue; // Skip original warehouse as we already checked it
+      }
+      
+      const stock = await calculateAvailableStock(productId, 'warehouse', warehouse._id);
+      if (stock > 0) {
+        locationsWithStock.push({
+          type: 'warehouse',
+          id: warehouse._id,
+          name: warehouse.name,
+          stock: stock
+        });
+      }
+    }
+    
+    // Check all shops for transferred stock
+    const allShops = await Shop.find({});
+    for (const shop of allShops) {
+      const stock = await calculateAvailableStock(productId, 'shop', shop._id);
+      if (stock > 0) {
+        locationsWithStock.push({
+          type: 'shop',
+          id: shop._id,
+          name: shop.name,
+          stock: stock
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Error finding product stock locations:', error);
+  }
+  
+  return locationsWithStock;
+};
+
 // @desc    Create a new stock transfer
 // @route   POST /api/stock-transfers
 // @access  Private
@@ -193,9 +253,16 @@ const createStockTransfer = async (req, res) => {
       
       // Check if there's enough stock
       if (availableStock < item.quantity) {
+        // Find where the product actually has stock
+        const productLocations = await findProductStockLocations(item.product);
+        
         return res.status(400).json({
           status: 'fail',
-          message: `Insufficient stock for product ${product.name} in ${sourceType}. Available: ${availableStock}, Requested: ${item.quantity}`
+          message: `Insufficient stock for product ${product.name} in ${sourceType}. Available: ${availableStock}, Requested: ${item.quantity}`,
+          suggestions: {
+            message: "Product is available in the following locations:",
+            locations: productLocations
+          }
         });
       }
     }
@@ -656,6 +723,43 @@ const getProductStockInLocation = async (req, res) => {
   }
 };
 
+// @desc    Get all locations where a product has stock
+// @route   GET /api/stock-transfers/product-locations/:productId
+// @access  Private
+const getProductStockLocations = async (req, res) => {
+  try {
+    const { productId } = req.params;
+    
+    // Check if product exists
+    const product = await Product.findById(productId);
+    if (!product) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Product not found'
+      });
+    }
+    
+    const locationsWithStock = await findProductStockLocations(productId);
+    
+    res.json({
+      status: 'success',
+      data: {
+        product: {
+          _id: product._id,
+          name: product.name,
+          originalWarehouse: product.warehouse
+        },
+        locationsWithStock
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   createStockTransfer,
   getStockTransfers,
@@ -663,5 +767,6 @@ module.exports = {
   updateStockTransferStatus,
   deleteStockTransfer,
   getProductStockInLocation,
+  getProductStockLocations,
   calculateAvailableStock
 };
