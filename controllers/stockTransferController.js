@@ -11,17 +11,21 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
   if (locationType === 'warehouse') {
     // Step 1: Start with original stock if product was originally assigned to this warehouse
     const product = await Product.findById(productId);
+    console.log(`Debug calculateAvailableStock - Product: ${product?.name}, Original Warehouse: ${product?.warehouse}, Target Warehouse: ${locationId}`);
+    
     if (product && product.warehouse && product.warehouse.toString() === locationId) {
       availableStock = product.countInStock;
+      console.log(`Debug - Original stock: ${availableStock}`);
     }
     
     // Step 2: Add purchases for this product in this warehouse
     const purchases = await Purchase.find({
       warehouse: locationId,
       'items.product': productId,
-      status: 'completed',
+      
       isActive: true
     });
+    console.log(`Debug - Found ${purchases.length} purchases for warehouse ${locationId}`);
     
     for (const purchase of purchases) {
       const purchaseItem = purchase.items.find(
@@ -30,15 +34,16 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
       
       if (purchaseItem) {
         availableStock += purchaseItem.quantity;
+        console.log(`Debug - Added purchase stock: ${purchaseItem.quantity}, Total: ${availableStock}`);
       }
     }
     
     // Step 3: Add incoming transfers TO this warehouse
     const incomingTransfers = await StockTransfer.find({
       destinationType: 'warehouse',
-      destinationId: locationId,
-      status: 'completed'
+      destinationId: locationId
     });
+    console.log(`Debug - Found ${incomingTransfers.length} incoming transfers for warehouse ${locationId}`);
     
     for (const transfer of incomingTransfers) {
       const transferredItem = transfer.items.find(
@@ -47,15 +52,16 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
       
       if (transferredItem) {
         availableStock += transferredItem.quantity;
+        console.log(`Debug - Added incoming transfer stock: ${transferredItem.quantity}, Total: ${availableStock}`);
       }
     }
     
     // Step 4: Subtract outgoing transfers FROM this warehouse
     const outgoingTransfers = await StockTransfer.find({
       sourceType: 'warehouse',
-      sourceId: locationId,
-      status: 'completed'
+      sourceId: locationId
     });
+    console.log(`Debug - Found ${outgoingTransfers.length} outgoing transfers for warehouse ${locationId}`);
     
     for (const transfer of outgoingTransfers) {
       const transferredItem = transfer.items.find(
@@ -64,6 +70,7 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
       
       if (transferredItem) {
         availableStock -= transferredItem.quantity;
+        console.log(`Debug - Subtracted outgoing transfer stock: ${transferredItem.quantity}, Total: ${availableStock}`);
       }
     }
   } else if (locationType === 'shop') {
@@ -72,8 +79,7 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
     // Step 1: Get all incoming transfers to this shop
     const incomingTransfers = await StockTransfer.find({
       destinationType: 'shop',
-      destinationId: locationId,
-      status: 'completed'
+      destinationId: locationId
     });
     
     for (const transfer of incomingTransfers) {
@@ -89,8 +95,7 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
     // Step 2: Subtract outgoing transfers from this shop
     const outgoingTransfers = await StockTransfer.find({
       sourceType: 'shop',
-      sourceId: locationId,
-      status: 'completed'
+      sourceId: locationId
     });
     
     for (const transfer of outgoingTransfers) {
@@ -104,6 +109,7 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
     }
   }
   
+  console.log(`Debug - Final calculated stock for ${locationType} ${locationId}: ${availableStock}`);
   return availableStock;
 };
 
@@ -256,9 +262,23 @@ const createStockTransfer = async (req, res) => {
         // Find where the product actually has stock
         const productLocations = await findProductStockLocations(item.product);
         
+        // Debug information
+        console.log(`Debug - Product: ${product.name}`);
+        console.log(`Debug - Source: ${sourceType} ${sourceId}`);
+        console.log(`Debug - Available Stock: ${availableStock}`);
+        console.log(`Debug - Requested: ${item.quantity}`);
+        console.log(`Debug - Product Original Warehouse: ${product.warehouse}`);
+        
         return res.status(400).json({
           status: 'fail',
           message: `Insufficient stock for product ${product.name} in ${sourceType}. Available: ${availableStock}, Requested: ${item.quantity}`,
+          debug: {
+            sourceType,
+            sourceId,
+            productOriginalWarehouse: product.warehouse,
+            availableStock,
+            requestedQuantity: item.quantity
+          },
           suggestions: {
             message: "Product is available in the following locations:",
             locations: productLocations
@@ -619,7 +639,7 @@ const getProductStockInLocation = async (req, res) => {
       const purchases = await Purchase.find({
         warehouse: locationId,
         'items.product': productId,
-        status: 'completed',
+        
         isActive: true
       });
       
@@ -636,7 +656,7 @@ const getProductStockInLocation = async (req, res) => {
       const incomingTransfers = await StockTransfer.find({
         destinationType: 'warehouse',
         destinationId: locationId,
-        status: 'completed'
+        
       });
       
       for (const transfer of incomingTransfers) {
@@ -652,7 +672,7 @@ const getProductStockInLocation = async (req, res) => {
       const outgoingTransfers = await StockTransfer.find({
         sourceType: 'warehouse',
         sourceId: locationId,
-        status: 'completed'
+        
       });
       
       for (const transfer of outgoingTransfers) {
@@ -668,7 +688,7 @@ const getProductStockInLocation = async (req, res) => {
       const incomingTransfers = await StockTransfer.find({
         destinationType: 'shop',
         destinationId: locationId,
-        status: 'completed'
+        
       });
       
       for (const transfer of incomingTransfers) {
@@ -683,7 +703,7 @@ const getProductStockInLocation = async (req, res) => {
       const outgoingTransfers = await StockTransfer.find({
         sourceType: 'shop',
         sourceId: locationId,
-        status: 'completed'
+        
       });
       
       for (const transfer of outgoingTransfers) {
@@ -723,6 +743,34 @@ const getProductStockInLocation = async (req, res) => {
   }
 };
 
+// @desc    Test stock calculation for debugging
+// @route   GET /api/stock-transfers/test-stock/:productId/:locationType/:locationId
+// @access  Private
+const testStockCalculation = async (req, res) => {
+  try {
+    const { productId, locationType, locationId } = req.params;
+    
+    console.log(`Testing stock calculation for product ${productId} in ${locationType} ${locationId}`);
+    
+    const stock = await calculateAvailableStock(productId, locationType, locationId);
+    
+    res.json({
+      status: 'success',
+      data: {
+        productId,
+        locationType,
+        locationId,
+        calculatedStock: stock
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+};
+
 // @desc    Get all locations where a product has stock
 // @route   GET /api/stock-transfers/product-locations/:productId
 // @access  Private
@@ -740,6 +788,7 @@ const getProductStockLocations = async (req, res) => {
     }
     
     const locationsWithStock = await findProductStockLocations(productId);
+    console.log(`Debug - Found ${locationsWithStock.length} locations with stock for product ${productId}`);
     
     res.json({
       status: 'success',
@@ -768,5 +817,6 @@ module.exports = {
   deleteStockTransfer,
   getProductStockInLocation,
   getProductStockLocations,
+  testStockCalculation,
   calculateAvailableStock
 };
