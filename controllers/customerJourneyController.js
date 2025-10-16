@@ -152,14 +152,48 @@ const getCustomerPayments = asyncHandler(async (req, res) => {
   }
 
   // Fetch payments for this customer
-  const paymentEntries = await Payment.find({ customer: customerId })
+  const rawPayments = await Payment.find({ customer: customerId })
     .sort({ paymentDate: -1 })
-    .select('paymentNumber amount status notes paymentDate paymentMethod user')
-    .populate('user', 'name');
+    .select('paymentNumber amount status notes paymentDate paymentMethod user sale isAdvancePayment transactionId')
+    .populate('user', 'name')
+    .populate('sale', 'invoiceNumber grandTotal');
 
-  const totalPayments = paymentEntries.reduce((sum, p) => sum + (p.amount || 0), 0);
+  // Build supplier-like paymentEntries
+  const paymentEntries = [];
+  for (const p of rawPayments) {
+    let remainingBalance = 0;
+    if (p.isAdvancePayment || !p.sale) {
+      // Show advance as negative remaining like supplier
+      remainingBalance = -(p.amount || 0);
+    } else if (p.sale) {
+      // Compute remaining on this sale up to this payment date
+      const priorPayments = await Payment.aggregate([
+        { $match: { sale: new mongoose.Types.ObjectId(p.sale._id), paymentDate: { $lte: p.paymentDate } } },
+        { $group: { _id: null, paid: { $sum: '$amount' } } }
+      ]);
+      const paidSoFar = priorPayments.length > 0 ? (priorPayments[0].paid || 0) : 0;
+      remainingBalance = Math.max(0, (p.sale.grandTotal || 0) - paidSoFar);
+    }
 
-  const paymentsByStatus = paymentEntries.reduce((acc, p) => {
+    paymentEntries.push({
+      payment: {
+        amount: p.amount,
+        method: p.paymentMethod,
+        date: p.paymentDate,
+        status: p.status,
+        transactionId: p.transactionId
+      },
+      _id: p._id,
+      user: p.user ? { _id: p.user._id, name: p.user.name } : undefined,
+      notes: p.notes || '',
+      paidAmount: p.amount,
+      remainingBalance,
+      createdAt: p.paymentDate
+    });
+  }
+
+  const totalPayments = rawPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+  const paymentsByStatus = rawPayments.reduce((acc, p) => {
     const status = p.status || 'unknown';
     if (!acc[status]) acc[status] = 0;
     acc[status] += p.amount || 0;

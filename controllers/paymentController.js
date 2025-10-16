@@ -1115,6 +1115,22 @@ const createCustomerPayment = async (req, res) => {
       return res.status(201).json({
         status: 'success',
         data: {
+          // Supplier-like fields at top level
+          payment: {
+            amount: amount,
+            method: paymentMethod,
+            date: paymentDate,
+            status: status,
+            transactionId: transactionId
+          },
+          _id: payment._id,
+          user: req.user ? { _id: req.user._id, name: req.user.name } : undefined,
+          notes: notes ? notes : `Payment of ${amount} received via ${paymentMethod}. Transaction ID: ${transactionId}. Advanced payment: ${amount}.`,
+          paidAmount: amount,
+          remainingBalance: -amount,
+          createdAt: paymentDate,
+
+          // Backwards compatible fields
           customer: {
             id: customer._id,
             name: customer.name
@@ -1286,6 +1302,29 @@ const createCustomerPayment = async (req, res) => {
     res.status(201).json({
       status: 'success',
       data: {
+        // Supplier-like fields at top level
+        payment: {
+          amount: amount,
+          method: paymentMethod,
+          date: paymentDate,
+          status: status,
+          transactionId: transactionId
+        },
+        _id: payments.length > 0 ? payments[0]._id : undefined,
+        user: req.user ? { _id: req.user._id, name: req.user.name } : undefined,
+        notes: (() => {
+          const base = notes || `Payment of ${amount} received via ${paymentMethod}. Transaction ID: ${transactionId}.`;
+          return excessAmount > 0 ? `${base} Advanced payment: ${excessAmount}.` : base;
+        })(),
+        paidAmount: amount,
+        remainingBalance: (() => {
+          const applied = amount - (excessAmount || 0);
+          const newRemaining = Math.max(0, (totalUnpaidAmount || 0) - applied);
+          return excessAmount > 0 ? -excessAmount : newRemaining;
+        })(),
+        createdAt: paymentDate,
+
+        // Backwards compatible fields
         customer: {
           id: customer._id,
           name: customer.name
