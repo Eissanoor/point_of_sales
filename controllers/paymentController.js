@@ -2148,6 +2148,397 @@ const applyAdvancePaymentToSale = async (req, res) => {
   }
 };
 
+// @desc    Get payment summary with comprehensive analytics
+// @route   GET /api/payments/summary
+// @access  Private
+const getPaymentSummary = async (req, res) => {
+  try {
+    const { startDate, endDate, customer, paymentMethod, status } = req.query;
+    
+    const filter = {};
+    
+    if (startDate || endDate) {
+      filter.paymentDate = {};
+      if (startDate) filter.paymentDate.$gte = new Date(startDate);
+      if (endDate) filter.paymentDate.$lte = new Date(endDate);
+    }
+    
+    if (customer) filter.customer = customer;
+    if (paymentMethod) filter.paymentMethod = paymentMethod;
+    if (status) filter.status = status;
+    
+    const summary = await Payment.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: null,
+          totalPayments: { $sum: 1 },
+          totalAmount: { $sum: '$amount' },
+          totalRefunds: { $sum: '$refundAmount' },
+          averageAmount: { $avg: '$amount' },
+          paymentMethods: {
+            $push: {
+              method: '$paymentMethod',
+              amount: '$amount'
+            }
+          },
+          paymentTypes: {
+            $push: {
+              type: '$paymentType',
+              amount: '$amount'
+            }
+          }
+        }
+      }
+    ]);
+    
+    // Get payment method breakdown
+    const methodBreakdown = await Payment.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: '$paymentMethod',
+          count: { $sum: 1 },
+          totalAmount: { $sum: '$amount' }
+        }
+      },
+      { $sort: { totalAmount: -1 } }
+    ]);
+    
+    // Get payment type breakdown
+    const typeBreakdown = await Payment.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: '$paymentType',
+          count: { $sum: 1 },
+          totalAmount: { $sum: '$amount' }
+        }
+      },
+      { $sort: { totalAmount: -1 } }
+    ]);
+    
+    // Get status breakdown
+    const statusBreakdown = await Payment.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 },
+          totalAmount: { $sum: '$amount' }
+        }
+      }
+    ]);
+    
+    const result = summary.length > 0 ? summary[0] : {
+      totalPayments: 0,
+      totalAmount: 0,
+      totalRefunds: 0,
+      averageAmount: 0
+    };
+    
+    res.json({
+      status: 'success',
+      data: {
+        summary: result,
+        breakdown: {
+          paymentMethods: methodBreakdown,
+          paymentTypes: typeBreakdown,
+          statuses: statusBreakdown
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+};
+
+// @desc    Get payments by customer ID
+// @route   GET /api/payments/customer/:customerId
+// @access  Private
+const getPaymentsByCustomer = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { 
+      page = 1, 
+      limit = 10, 
+      startDate, 
+      endDate, 
+      paymentMethod, 
+      status,
+      paymentType 
+    } = req.query;
+    
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    // Check if customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Customer not found'
+      });
+    }
+    
+    // Build filter
+    const filter = { customer: customerId };
+    
+    if (startDate || endDate) {
+      filter.paymentDate = {};
+      if (startDate) filter.paymentDate.$gte = new Date(startDate);
+      if (endDate) filter.paymentDate.$lte = new Date(endDate);
+    }
+    
+    if (paymentMethod) filter.paymentMethod = paymentMethod;
+    if (status) filter.status = status;
+    if (paymentType) filter.paymentType = paymentType;
+    
+    // Count total payments
+    const totalPayments = await Payment.countDocuments(filter);
+    
+    // Get payments
+    const payments = await Payment.find(filter)
+      .populate('sale', 'invoiceNumber grandTotal')
+      .populate('customer', 'name email phoneNumber')
+      .populate('user', 'name email')
+      .populate('currency', 'name code symbol')
+      .sort({ paymentDate: -1 })
+      .skip(skip)
+      .limit(limitNum);
+    
+    // Calculate customer totals
+    const customerTotals = await Payment.aggregate([
+      { $match: { customer: customerId } },
+      {
+        $group: {
+          _id: null,
+          totalPaid: { $sum: '$amount' },
+          totalRefunded: { $sum: '$refundAmount' },
+          totalAdvancePayments: {
+            $sum: {
+              $cond: [{ $eq: ['$isAdvancePayment', true] }, '$amount', 0]
+            }
+          },
+          paymentCount: { $sum: 1 }
+        }
+      }
+    ]);
+    
+    const totals = customerTotals.length > 0 ? customerTotals[0] : {
+      totalPaid: 0,
+      totalRefunded: 0,
+      totalAdvancePayments: 0,
+      paymentCount: 0
+    };
+    
+    res.json({
+      status: 'success',
+      results: payments.length,
+      totalPages: Math.ceil(totalPayments / limitNum),
+      currentPage: pageNum,
+      totalPayments,
+      customerTotals: totals,
+      data: payments
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+};
+
+// @desc    Create a refund for a payment
+// @route   POST /api/payments/:id/refund
+// @access  Private
+const createRefund = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { amount, reason, notes, refundMethod } = req.body;
+    
+    const originalPayment = await Payment.findById(id);
+    if (!originalPayment) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Payment not found'
+      });
+    }
+    
+    if (originalPayment.status === 'refunded') {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Payment has already been fully refunded'
+      });
+    }
+    
+    const refundAmount = amount || originalPayment.amount;
+    
+    if (refundAmount > originalPayment.amount) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Refund amount cannot exceed original payment amount'
+      });
+    }
+    
+    // Create refund payment record
+    const refund = await Payment.create({
+      paymentNumber: `${originalPayment.paymentNumber}-REF`,
+      paymentType: 'refund',
+      customer: originalPayment.customer,
+      sale: originalPayment.sale,
+      amount: refundAmount,
+      paymentMethod: refundMethod || originalPayment.paymentMethod,
+      paymentDate: new Date(),
+      status: 'completed',
+      notes: notes || `Refund for payment ${originalPayment.paymentNumber}: ${reason}`,
+      user: req.user._id,
+      isAdvancePayment: false,
+      currency: originalPayment.currency,
+      refundAmount: refundAmount,
+      refundDate: new Date(),
+      refundReason: reason,
+      referenceNumber: originalPayment.paymentNumber
+    });
+    
+    // Update original payment
+    const newRefundAmount = (originalPayment.refundAmount || 0) + refundAmount;
+    const newStatus = newRefundAmount >= originalPayment.amount ? 'refunded' : 'partially_refunded';
+    
+    await Payment.findByIdAndUpdate(id, {
+      refundAmount: newRefundAmount,
+      refundDate: newRefundAmount >= originalPayment.amount ? new Date() : originalPayment.refundDate,
+      refundReason: reason,
+      status: newStatus
+    });
+    
+    // Create payment journey record
+    await PaymentJourney.create({
+      payment: refund._id,
+      user: req.user._id,
+      action: 'refund_created',
+      changes: [{
+        field: 'refund',
+        oldValue: null,
+        newValue: {
+          amount: refundAmount,
+          reason: reason
+        }
+      }],
+      notes: `Refund created for payment ${originalPayment.paymentNumber}`
+    });
+    
+    res.status(201).json({
+      status: 'success',
+      data: refund
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+};
+
+// @desc    Get payment analytics dashboard
+// @route   GET /api/payments/analytics
+// @access  Private
+const getPaymentAnalytics = async (req, res) => {
+  try {
+    const { period = '30', startDate, endDate } = req.query;
+    
+    let dateFilter = {};
+    if (startDate && endDate) {
+      dateFilter.paymentDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate)
+      };
+    } else {
+      const days = parseInt(period);
+      const start = new Date();
+      start.setDate(start.getDate() - days);
+      dateFilter.paymentDate = { $gte: start };
+    }
+    
+    // Daily payment trends
+    const dailyTrends = await Payment.aggregate([
+      { $match: { ...dateFilter, status: 'completed' } },
+      {
+        $group: {
+          _id: {
+            year: { $year: '$paymentDate' },
+            month: { $month: '$paymentDate' },
+            day: { $dayOfMonth: '$paymentDate' }
+          },
+          totalAmount: { $sum: '$amount' },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
+    ]);
+    
+    // Payment method performance
+    const methodPerformance = await Payment.aggregate([
+      { $match: { ...dateFilter, status: 'completed' } },
+      {
+        $group: {
+          _id: '$paymentMethod',
+          totalAmount: { $sum: '$amount' },
+          count: { $sum: 1 },
+          averageAmount: { $avg: '$amount' }
+        }
+      },
+      { $sort: { totalAmount: -1 } }
+    ]);
+    
+    // Customer payment behavior
+    const customerBehavior = await Payment.aggregate([
+      { $match: { ...dateFilter, status: 'completed' } },
+      {
+        $group: {
+          _id: '$customer',
+          totalPaid: { $sum: '$amount' },
+          paymentCount: { $sum: 1 },
+          averagePayment: { $avg: '$amount' }
+        }
+      },
+      { $sort: { totalPaid: -1 } },
+      { $limit: 10 }
+    ]);
+    
+    // Populate customer names
+    const customerIds = customerBehavior.map(cb => cb._id);
+    const customers = await Customer.find({ _id: { $in: customerIds } }, 'name email');
+    const customerMap = {};
+    customers.forEach(customer => {
+      customerMap[customer._id.toString()] = customer;
+    });
+    
+    const customerBehaviorWithNames = customerBehavior.map(cb => ({
+      ...cb,
+      customer: customerMap[cb._id.toString()]
+    }));
+    
+    res.json({
+      status: 'success',
+      data: {
+        dailyTrends,
+        methodPerformance,
+        topCustomers: customerBehaviorWithNames
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   createPayment,
   getPayments,
@@ -2163,5 +2554,9 @@ module.exports = {
   getCustomerAdvancePayments,
   getPaymentJourneyByCustomerId,
   getCustomerTransactionHistory,
-  applyAdvancePaymentToSale
+  applyAdvancePaymentToSale,
+  getPaymentSummary,
+  getPaymentsByCustomer,
+  createRefund,
+  getPaymentAnalytics
 }; 

@@ -15,7 +15,11 @@ const {
   getCustomerAdvancePayments,
   getPaymentJourneyByCustomerId,
   getCustomerTransactionHistory,
-  applyAdvancePaymentToSale
+  applyAdvancePaymentToSale,
+  getPaymentSummary,
+  getPaymentsByCustomer,
+  createRefund,
+  getPaymentAnalytics
 } = require('../controllers/paymentController');
 const { protect } = require('../middlewares/authMiddleware');
 
@@ -26,6 +30,12 @@ router.route('/')
 
 router.route('/stats')
   .get(protect, getPaymentStats);
+
+router.route('/summary')
+  .get(protect, getPaymentSummary);
+
+router.route('/analytics')
+  .get(protect, getPaymentAnalytics);
 
 router.route('/check-overdue')
   .get(protect, checkOverduePayments);
@@ -48,6 +58,9 @@ router.route('/:id/journey')
 router.route('/sale/:saleId')
   .get(protect, getPaymentsBySaleId);
 
+router.route('/customer/:customerId')
+  .get(protect, getPaymentsByCustomer);
+
 router.route('/customer/:customerId/analytics')
   .get(protect, getCustomerPaymentAnalytics);
 
@@ -61,5 +74,9 @@ router.route('/customer/:customerId/journey')
 // Route for simplified customer transaction history
 router.route('/customer/:customerId/transactions')
   .get(protect, getCustomerTransactionHistory);
+
+// Refund routes
+router.route('/:id/refund')
+  .post(protect, createRefund);
 
 module.exports = router; 

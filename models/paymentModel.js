@@ -8,6 +8,12 @@ const paymentSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
+    paymentType: {
+      type: String,
+      required: true,
+      enum: ['sale_payment', 'advance_payment', 'refund', 'adjustment', 'other'],
+      default: 'sale_payment',
+    },
     sale: {
       type: mongoose.Schema.Types.ObjectId,
       required: false, // Changed from true to false to make it optional
@@ -68,6 +74,50 @@ const paymentSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Currency',
     },
+    currencyExchangeRate: {
+      type: Number,
+      default: 1,
+    },
+    // Running balance for tracking
+    runningBalance: {
+      type: Number,
+      default: 0,
+    },
+    // Reference to original transaction
+    referenceNumber: {
+      type: String,
+      trim: true,
+    },
+    // Bank details if applicable
+    bankDetails: {
+      bankName: String,
+      accountNumber: String,
+      routingNumber: String,
+      checkNumber: String,
+    },
+    // For tracking payment allocation
+    allocatedAmount: {
+      type: Number,
+      default: 0,
+    },
+    // For tracking refunds
+    refundAmount: {
+      type: Number,
+      default: 0,
+    },
+    refundDate: {
+      type: Date,
+    },
+    refundReason: {
+      type: String,
+    },
+    // Additional metadata
+    metadata: {
+      source: String, // Where the payment came from (pos, online, etc.)
+      deviceInfo: String,
+      ipAddress: String,
+      userAgent: String,
+    }
   },
   {
     timestamps: true,
@@ -82,10 +132,51 @@ paymentSchema.virtual('remainingBalance').get(function() {
   // This will be populated when needed by the controller
   return 0;
 });
-//
+
+// Virtual for payment type display
+paymentSchema.virtual('paymentTypeDisplay').get(function() {
+  const types = {
+    'sale_payment': 'Sale Payment',
+    'advance_payment': 'Advance Payment',
+    'refund': 'Refund',
+    'adjustment': 'Adjustment',
+    'other': 'Other'
+  };
+  return types[this.paymentType] || 'Unknown';
+});
+
+// Pre-save middleware to generate payment number if not provided
+paymentSchema.pre('save', async function(next) {
+  if (this.isNew && !this.paymentNumber) {
+    const count = await this.constructor.countDocuments();
+    const date = new Date();
+    const year = date.getFullYear().toString().slice(-2);
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const day = date.getDate().toString().padStart(2, '0');
+    
+    // Get count of payments for today
+    const paymentsCount = await this.constructor.countDocuments({
+      createdAt: {
+        $gte: new Date(date.setHours(0, 0, 0, 0)),
+        $lt: new Date(date.setHours(23, 59, 59, 999)),
+      },
+    });
+    
+    this.paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
+  }
+  next();
+});
+
 // Create compound indices for faster queries
 paymentSchema.index({ sale: 1, paymentDate: -1 });
-paymentSchema.index({ customer: 1, paymentDate: -1 }); // Add index for customer queries
+paymentSchema.index({ customer: 1, paymentDate: -1 });
+paymentSchema.index({ paymentType: 1, paymentDate: -1 });
+paymentSchema.index({ status: 1, paymentDate: -1 });
+paymentSchema.index({ paymentMethod: 1, paymentDate: -1 });
+paymentSchema.index({ user: 1, paymentDate: -1 });
+paymentSchema.index({ paymentNumber: 1 }, { unique: true });
+paymentSchema.index({ transactionId: 1 });
+paymentSchema.index({ 'bankDetails.checkNumber': 1 });
 
 const Payment = mongoose.model('Payment', paymentSchema);
 
