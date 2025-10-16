@@ -161,19 +161,21 @@ const getCustomerPayments = asyncHandler(async (req, res) => {
   // Build supplier-like paymentEntries
   const paymentEntries = [];
   for (const p of rawPayments) {
-    let remainingBalance = 0;
-    if (p.isAdvancePayment || !p.sale) {
-      // Show advance as negative remaining like supplier
-      remainingBalance = -(p.amount || 0);
-    } else if (p.sale) {
-      // Compute remaining on this sale up to this payment date
-      const priorPayments = await Payment.aggregate([
-        { $match: { sale: new mongoose.Types.ObjectId(p.sale._id), paymentDate: { $lte: p.paymentDate } } },
-        { $group: { _id: null, paid: { $sum: '$amount' } } }
-      ]);
-      const paidSoFar = priorPayments.length > 0 ? (priorPayments[0].paid || 0) : 0;
-      remainingBalance = Math.max(0, (p.sale.grandTotal || 0) - paidSoFar);
-    }
+    // Compute overall remaining balance up to this payment timestamp:
+    // remaining = total invoiced (sales) up to date - total paid up to date
+    const invoicedAgg = await Sales.aggregate([
+      { $match: { customer: new mongoose.Types.ObjectId(customerId), isActive: true, createdAt: { $lte: p.paymentDate } } },
+      { $group: { _id: null, total: { $sum: '$grandTotal' } } }
+    ]);
+    const totalInvoicedUpToDate = invoicedAgg.length > 0 ? (invoicedAgg[0].total || 0) : 0;
+
+    const paidAgg = await Payment.aggregate([
+      { $match: { customer: new mongoose.Types.ObjectId(customerId), paymentDate: { $lte: p.paymentDate }, status: { $nin: ['failed', 'refunded'] } } },
+      { $group: { _id: null, total: { $sum: '$amount' } } }
+    ]);
+    const totalPaidUpToDate = paidAgg.length > 0 ? (paidAgg[0].total || 0) : 0;
+
+    const remainingBalance = totalInvoicedUpToDate - totalPaidUpToDate; // can be negative to represent advance
 
     paymentEntries.push({
       payment: {
