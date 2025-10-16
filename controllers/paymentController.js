@@ -1719,6 +1719,7 @@ const getCustomerTransactionHistory = async (req, res) => {
           date: group.date,
           reference: firstPayment.paymentNumber,
           amount: group.totalAmount,
+          transactedAmount: group.totalAmount,
           notes: `Advance payment: ${availableAdvance} available`,
           paymentMethod: group.paymentMethod,
           remainingBalance: -availableAdvance, // Show cumulative advance as negative
@@ -1759,7 +1760,8 @@ const getCustomerTransactionHistory = async (req, res) => {
             type: 'payment',
             date: group.date,
             reference: firstPayment.paymentNumber,
-            amount: group.totalAmount,
+          amount: group.totalAmount,
+          transactedAmount: group.totalAmount,
             notes: `Payment: ${saleBalances[group.saleId]} remaining on invoice, ${availableAdvance} advance remaining`,
             paymentMethod: group.paymentMethod,
             invoiceReference: group.invoiceReference,
@@ -1791,6 +1793,7 @@ const getCustomerTransactionHistory = async (req, res) => {
           date: group.date,
           reference: firstPayment.paymentNumber,
           amount: Math.abs(group.totalAmount), // Display the absolute value for better readability
+          transactedAmount: Math.abs(group.totalAmount),
           notes: firstPayment.notes || `Advance payment used: ${availableAdvance} remaining`,
           paymentMethod: group.paymentMethod,
           remainingBalance: -availableAdvance, // This should reflect the actual remaining advance
@@ -1811,7 +1814,7 @@ const getCustomerTransactionHistory = async (req, res) => {
         continue;
       }
       
-      // Case 4: Regular payment for a sale
+      // Case 4: Regular payment for a sale (merge any companion excess->advance created at the same time)
       if (group.saleId) {
         const relatedSale = salesMap[group.saleId];
         
@@ -1822,8 +1825,53 @@ const getCustomerTransactionHistory = async (req, res) => {
           // Calculate how much to apply to the sale
           const appliedAmount = Math.min(group.totalAmount, currentBalance);
           
-          // Calculate excess amount if any
-          const excessAmount = Math.max(0, group.totalAmount - currentBalance);
+          // Calculate excess amount if any (from this payment record)
+          let excessAmount = Math.max(0, group.totalAmount - currentBalance);
+
+          // Helper to normalize a payment number to its base reference
+          const normalizeRef = (ref) => {
+            if (!ref) return '';
+            // remove trailing -excess/-adv/-advance (case-insensitive)
+            let out = ref.replace(/[-_](excess|adv|advance).*$/i, '');
+            // remove trailing -<digits>
+            out = out.replace(/[-_][0-9]+$/i, '');
+            return out;
+          };
+
+          // Try to find a companion advance-only group generated for the same base payment
+          const baseRef = normalizeRef(firstPayment.paymentNumber || '');
+          let companionAdvanceAmount = 0;
+          let companionAdvanceGroupKey = null;
+          let companionAdvanceRef = null;
+
+          for (const otherKey in paymentGroups) {
+            const other = paymentGroups[otherKey];
+            if (other.saleId) continue; // advance-only groups have no saleId
+            const otherFirst = other.payments[0];
+            const otherRef = normalizeRef(otherFirst.paymentNumber || '');
+            const sameMoment = Math.abs(new Date(other.date).getTime() - new Date(group.date).getTime()) < 2000; // within 2s
+            if (sameMoment && otherRef && baseRef && otherRef === baseRef) {
+              companionAdvanceAmount += other.totalAmount;
+              companionAdvanceGroupKey = otherKey;
+              companionAdvanceRef = otherFirst.paymentNumber;
+              break;
+            }
+          }
+          
+          // If a companion was found, treat it as excess and mark it processed so it isn't added separately
+          if (companionAdvanceAmount > 0) {
+            excessAmount = Math.max(excessAmount, companionAdvanceAmount);
+            if (companionAdvanceGroupKey && paymentGroups[companionAdvanceGroupKey]) {
+              advancePaymentsProcessed.push(paymentGroups[companionAdvanceGroupKey]);
+            }
+            // Also remove the previously pushed advance-only transaction for the companion (if exists)
+            if (companionAdvanceRef) {
+              const idx = transactions.findIndex(t => t.reference === companionAdvanceRef);
+              if (idx !== -1) {
+                transactions.splice(idx, 1);
+              }
+            }
+          }
           
           // Update the sale balance
           saleBalances[group.saleId] = Math.max(0, currentBalance - appliedAmount);
@@ -1838,7 +1886,9 @@ const getCustomerTransactionHistory = async (req, res) => {
             type: 'payment',
             date: group.date,
             reference: firstPayment.paymentNumber,
-            amount: group.totalAmount,
+            // Show the total cash movement including the companion excess part, if any
+            amount: group.totalAmount + (companionAdvanceAmount > 0 ? companionAdvanceAmount : 0),
+          transactedAmount: group.totalAmount + (companionAdvanceAmount > 0 ? companionAdvanceAmount : 0),
             notes: excessAmount > 0 
               ? `Payment: ${appliedAmount} applied to invoice, ${excessAmount} added to advance (${availableAdvance} available)`
               : `Payment: ${saleBalances[group.saleId]} remaining on invoice`,
@@ -1852,6 +1902,63 @@ const getCustomerTransactionHistory = async (req, res) => {
       }
     }
     
+    // Consolidate any split transactions (invoice + companion advance) into one
+    const normalizeRefBase = (ref) => {
+      if (!ref) return '';
+      let out = ref.replace(/[-_](excess|adv|advance).*$/i, '');
+      out = out.replace(/[-_][0-9]+$/i, '');
+      return out;
+    };
+    const consolidated = [];
+    const used = new Set();
+    for (let i = 0; i < transactions.length; i++) {
+      if (used.has(i)) continue;
+      const a = transactions[i];
+      const baseA = normalizeRefBase(a.reference);
+      let merged = false;
+      if (a.type === 'payment') {
+        for (let j = i + 1; j < transactions.length; j++) {
+          if (used.has(j)) continue;
+          const b = transactions[j];
+          if (b.type !== 'payment') continue;
+          const baseB = normalizeRefBase(b.reference);
+          const sameBase = baseA && baseB && baseA === baseB;
+          const sameMethod = a.paymentMethod === b.paymentMethod;
+          const dtA = new Date(a.date).getTime();
+          const dtB = new Date(b.date).getTime();
+          const closeInTime = Math.abs(dtA - dtB) < 5000; // 5 seconds window
+          // One has invoiceReference and the other doesn't (advance-only)
+          const invoiceVsAdvance = (!!a.invoiceReference) !== (!!b.invoiceReference);
+          if (sameBase && sameMethod && closeInTime && invoiceVsAdvance) {
+            const invoiceTx = a.invoiceReference ? a : b;
+            const advanceTx = a.invoiceReference ? b : a;
+            const addAmount = (advanceTx.transactedAmount ?? advanceTx.amount ?? 0);
+            // Increase transactedAmount on the invoice transaction
+            const mergedTx = {
+              ...invoiceTx,
+              transactedAmount: (invoiceTx.transactedAmount ?? invoiceTx.amount ?? 0) + addAmount,
+            };
+            // Keep advanceBalance from invoiceTx if present, else from advanceTx
+            if (advanceTx.advanceBalance !== undefined) {
+              mergedTx.advanceBalance = advanceTx.advanceBalance;
+            }
+            consolidated.push(mergedTx);
+            used.add(i);
+            used.add(j);
+            merged = true;
+            break;
+          }
+        }
+      }
+      if (!merged) {
+        consolidated.push(a);
+        used.add(i);
+      }
+    }
+    // Replace transactions with consolidated list
+    transactions.length = 0;
+    transactions.push(...consolidated);
+
     // First sort transactions by date
     transactions.sort((a, b) => new Date(a.date) - new Date(b.date));
     
