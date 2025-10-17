@@ -132,6 +132,10 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
     return acc;
   }, {});
 
+  const rawRemaining = totalAmount - totalPayments;
+  const advancePayment = rawRemaining < 0 ? Math.abs(rawRemaining) : 0;
+  const normalizedRemaining = rawRemaining < 0 ? 0 : rawRemaining;
+
   res.status(200).json({
     supplier: {
       id: supplier._id,
@@ -146,7 +150,8 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
       soldQuantity,
       soldAmount,
       paidAmount: totalPayments,
-      remainingBalance: totalAmount - totalPayments
+      remainingBalance: normalizedRemaining,
+      advancePayment
     },
     products: productDetails,
     productsByCategory
@@ -226,10 +231,21 @@ const getSupplierPayments = asyncHandler(async (req, res) => {
     return acc;
   }, {});
 
+  const enhancedEntries = paymentEntries.map(entry => {
+    const obj = entry.toObject();
+    const adv = (obj.remainingBalance || 0) < 0 ? Math.abs(obj.remainingBalance) : 0;
+    const normalizedRemaining = (obj.remainingBalance || 0) < 0 ? 0 : (obj.remainingBalance || 0);
+    return {
+      ...obj,
+      remainingBalance: normalizedRemaining,
+      advancePayment: adv
+    };
+  });
+
   res.status(200).json({
     totalPayments,
     paymentsByStatus,
-    paymentEntries
+    paymentEntries: enhancedEntries
   });
 });
 
@@ -320,7 +336,9 @@ const getSupplierJourneySummary = asyncHandler(async (req, res) => {
   const totalPayments = summaryPaymentsAgg.length > 0 ? (summaryPaymentsAgg[0].totalPaid || 0) : 0;
 
   // Calculate balance (purchased value - total payments)
-  const balance = totalProductValue - totalPayments;
+  const rawBalance = totalProductValue - totalPayments;
+  const balanceAdvance = rawBalance < 0 ? Math.abs(rawBalance) : 0;
+  const normalizedBalance = rawBalance < 0 ? 0 : rawBalance;
 
   // Get recent activity
   const recentActivity = await SupplierJourney.find({ supplier: supplierId })
@@ -341,7 +359,8 @@ const getSupplierJourneySummary = asyncHandler(async (req, res) => {
       totalProductValue,
       totalSoldValue,
       totalPayments,
-      balance
+      balance: normalizedBalance,
+      advancePayment: balanceAdvance
     },
     recentActivity
   });
