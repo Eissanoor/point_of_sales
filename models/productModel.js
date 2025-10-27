@@ -135,6 +135,14 @@ const productSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    damagedQuantity: {
+      type: Number,
+      default: 0,
+    },
+    returnedQuantity: {
+      type: Number,
+      default: 0,
+    },
     isActive: {
       type: Boolean,
       default: true,

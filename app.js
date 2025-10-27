@@ -41,6 +41,8 @@ const purchaseRoutes = require('./routes/purchaseRoutes');
 const quantityUnitRoutes = require('./routes/quantityUnitRoutes');
 const packingUnitRoutes = require('./routes/packingUnitRoutes');
 const pochuesRoutes = require('./routes/pochuesRoutes');
+const productDamageRoutes = require('./routes/productDamageRoutes');
+const productReturnRoutes = require('./routes/productReturnRoutes');
 
 // Initialize express app
 const app = express();
@@ -97,6 +99,8 @@ app.use('/api/purchases', purchaseRoutes);
 app.use('/api/quantity-units', quantityUnitRoutes);
 app.use('/api/packing-units', packingUnitRoutes);
 app.use('/api/pochues', pochuesRoutes);
+app.use('/api/product-damages', productDamageRoutes);
+app.use('/api/product-returns', productReturnRoutes);
 
 // Root route
 app.get('/', (req, res) => {

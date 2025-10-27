@@ -24,4 +24,10 @@ const upload = multer({
   fileFilter,
 });
 
-module.exports = upload; 
+// Multiple file upload middleware
+const uploadMultiple = upload.array('images', 10); // Allow up to 10 images
+
+module.exports = {
+  upload,
+  uploadMultiple,
+}; 

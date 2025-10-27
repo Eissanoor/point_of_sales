@@ -14,8 +14,8 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
     console.log(`Debug calculateAvailableStock - Product: ${product?.name}, Original Warehouse: ${product?.warehouse}, Target Warehouse: ${locationId}`);
     
     if (product && product.warehouse && product.warehouse.toString() === locationId) {
-      availableStock = product.countInStock;
-      console.log(`Debug - Original stock: ${availableStock}`);
+      availableStock = product.countInStock - (product.damagedQuantity || 0) - (product.returnedQuantity || 0);
+      console.log(`Debug - Original stock: ${availableStock} (${product.countInStock} - ${product.damagedQuantity || 0} - ${product.returnedQuantity || 0})`);
     }
     
     // Step 2: Add purchases for this product in this warehouse

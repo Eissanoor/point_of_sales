@@ -16,7 +16,20 @@ const productJourneySchema = new mongoose.Schema(
     action: {
       type: String,
       required: true,
-      enum: ['created', 'updated', 'deleted'],
+      enum: [
+        'created', 
+        'updated', 
+        'deleted',
+        'damage_reported',
+        'damage_processed',
+        'damage_approved',
+        'damage_deleted',
+        'return_requested',
+        'return_processed',
+        'return_approved',
+        'return_deleted',
+        'review_added'
+      ],
     },
     changes: [{
       field: {

@@ -13,7 +13,7 @@ const {
   getUnitsHierarchy,
 } = require('../controllers/productController');
 const { protect, admin } = require('../middlewares/authMiddleware');
-const upload = require('../middlewares/uploadMiddleware');
+const { upload } = require('../middlewares/uploadMiddleware');
 
 // Public routes
 router.route('/')

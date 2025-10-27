@@ -94,11 +94,27 @@ const getProducts = async (req, res) => {
       if (maxPrice) filter.saleRate.$lte = parseFloat(maxPrice);
     }
     
-    // Filter by stock availability
+    // Filter by stock availability (considering damaged and returned quantities)
     if (inStock === 'true') {
-      filter.countInStock = { $gt: 0 };
+      filter.$expr = {
+        $gt: [
+          { $subtract: [
+            { $subtract: ['$countInStock', { $ifNull: ['$damagedQuantity', 0] }] },
+            { $ifNull: ['$returnedQuantity', 0] }
+          ]},
+          0
+        ]
+      };
     } else if (inStock === 'false') {
-      filter.countInStock = { $eq: 0 };
+      filter.$expr = {
+        $lte: [
+          { $subtract: [
+            { $subtract: ['$countInStock', { $ifNull: ['$damagedQuantity', 0] }] },
+            { $ifNull: ['$returnedQuantity', 0] }
+          ]},
+          0
+        ]
+      };
     }
     
     // Only show active products
@@ -796,8 +812,11 @@ const getProductsByLocation = async (req, res) => {
         });
       });
       
-      // Convert map back to array and only include products with stock > 0
-      products = Object.values(productMap).filter(product => product.currentStock > 0);
+      // Convert map back to array and only include products with available stock > 0
+      products = Object.values(productMap).filter(product => {
+        const availableStock = product.currentStock - (product.damagedQuantity || 0) - (product.returnedQuantity || 0);
+        return availableStock > 0;
+      });
     } 
     // Case 2: Get products from warehouse 
     else {
@@ -902,8 +921,11 @@ const getProductsByLocation = async (req, res) => {
         });
       });
       
-      // Convert map back to array and only include products with stock > 0
-      products = Object.values(productMap).filter(product => product.currentStock > 0);
+      // Convert map back to array and only include products with available stock > 0
+      products = Object.values(productMap).filter(product => {
+        const availableStock = product.currentStock - (product.damagedQuantity || 0) - (product.returnedQuantity || 0);
+        return availableStock > 0;
+      });
     }
     
     res.status(200).json({
@@ -912,9 +934,12 @@ const getProductsByLocation = async (req, res) => {
       data: products.map(product => {
         // For warehouse products, standardize the quantity field
         if (product.currentStock !== undefined) {
+          const availableStock = product.currentStock - (product.damagedQuantity || 0) - (product.returnedQuantity || 0);
           return {
             ...product,
-            quantity: product.currentStock,
+            quantity: availableStock,
+            currentStock: product.currentStock,
+            availableStock: availableStock,
             initialStock: product.initialStock || 0
           };
         }

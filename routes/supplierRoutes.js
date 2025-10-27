@@ -9,7 +9,7 @@ const {
   permanentDeleteSupplier 
 } = require('../controllers/supplierController');
 const { protect, admin } = require('../middlewares/authMiddleware');
-const upload = require('../middlewares/uploadMiddleware');
+const { upload } = require('../middlewares/uploadMiddleware');
 
 router.route('/')
   .post(protect, upload.single('image'), createSupplier)
