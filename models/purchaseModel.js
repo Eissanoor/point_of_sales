@@ -104,19 +104,48 @@ const purchaseSchema = new mongoose.Schema(
   }
 );
 
-// Calculate totals before saving
-purchaseSchema.pre('save', function(next) {
-  if (this.items && this.items.length > 0) {
-    // Calculate item totals
-    this.items.forEach(item => {
-      item.itemTotal = item.quantity * item.purchaseRate;
-    });
+// Calculate totals and generate invoice number before saving
+purchaseSchema.pre('save', async function(next) {
+  try {
+    // Generate invoice number if not provided
+    if (!this.invoiceNumber || this.invoiceNumber === '') {
+      const currentDate = new Date();
+      const year = currentDate.getFullYear();
+      const month = String(currentDate.getMonth() + 1).padStart(2, '0');
+      
+      // Get the count of purchases for this month
+      const startOfMonth = new Date(year, currentDate.getMonth(), 1);
+      const endOfMonth = new Date(year, currentDate.getMonth() + 1, 0);
+      
+      const monthlyCount = await this.constructor.countDocuments({
+        purchaseDate: {
+          $gte: startOfMonth,
+          $lte: endOfMonth
+        },
+        isActive: true
+      });
+      
+      // Generate invoice number: PUR-YYYY-MM-XXXX
+      const invoiceNumber = `PUR-${year}-${month}-${String(monthlyCount + 1).padStart(4, '0')}`;
+      this.invoiceNumber = invoiceNumber;
+    }
     
-    // Calculate total amount and total quantity
-    this.totalAmount = this.items.reduce((sum, item) => sum + item.itemTotal, 0);
-    this.totalQuantity = this.items.reduce((sum, item) => sum + item.quantity, 0);
+    // Calculate totals if items exist
+    if (this.items && this.items.length > 0) {
+      // Calculate item totals
+      this.items.forEach(item => {
+        item.itemTotal = item.quantity * item.purchaseRate;
+      });
+      
+      // Calculate total amount and total quantity
+      this.totalAmount = this.items.reduce((sum, item) => sum + item.itemTotal, 0);
+      this.totalQuantity = this.items.reduce((sum, item) => sum + item.quantity, 0);
+    }
+    
+    next();
+  } catch (error) {
+    next(error);
   }
-  next();
 });
 
 // Apply the auto-increment plugin

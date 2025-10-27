@@ -223,7 +223,7 @@ const createPurchase = async (req, res) => {
       currency: currency || null,
       currencyExchangeRate,
       purchaseDate: purchaseDate || new Date(),
-      invoiceNumber: invoiceNumber || '',
+      invoiceNumber: invoiceNumber || '', // Will be auto-generated if empty
       notes: notes || '',
       paymentMethod: paymentMethod || 'cash',
     });
