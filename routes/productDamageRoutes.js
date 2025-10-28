@@ -7,6 +7,7 @@ const {
   updateProductDamage,
   deleteProductDamage,
   getDamageStatistics,
+  getProductDamagesByLocation,
 } = require('../controllers/productDamageController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 const { uploadMultiple } = require('../middlewares/uploadMiddleware');
@@ -15,6 +16,11 @@ const { uploadMultiple } = require('../middlewares/uploadMiddleware');
 // @desc    Get damage statistics
 // @access  Private/Admin
 router.get('/statistics', protect, admin, getDamageStatistics);
+
+// @route   GET /api/product-damages/by-location/:locationType/:locationId
+// @desc    Get product damages by warehouse or shop ID
+// @access  Private/Admin
+router.get('/by-location/:locationType/:locationId', protect, admin, getProductDamagesByLocation);
 
 // @route   GET /api/product-damages
 // @desc    Get all product damages

@@ -582,6 +582,112 @@ const calculateAvailableStock = async (productId, warehouseId, shopId) => {
   return Math.max(0, currentStock);
 };
 
+// @desc    Get product damages by warehouse or shop ID
+// @route   GET /api/product-damages/by-location/:locationType/:locationId
+// @access  Private/Admin
+const getProductDamagesByLocation = async (req, res) => {
+  try {
+    const { locationType, locationId } = req.params;
+    const { 
+      page = 1, 
+      limit = 10,
+      status,
+      damageType,
+      product,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.query;
+
+    // Validate location type
+    if (!['warehouse', 'shop'].includes(locationType)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Location type must be either "warehouse" or "shop"',
+      });
+    }
+
+    // Validate location ID format
+    if (!locationId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid location ID format',
+      });
+    }
+
+    // Check if location exists
+    let locationExists;
+    if (locationType === 'warehouse') {
+      locationExists = await Warehouse.findById(locationId);
+    } else {
+      locationExists = await Shop.findById(locationId);
+    }
+
+    if (!locationExists) {
+      return res.status(404).json({
+        status: 'fail',
+        message: `${locationType} not found`,
+      });
+    }
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    // Build filter object
+    const filter = { isActive: true };
+    
+    // Add location filter
+    if (locationType === 'warehouse') {
+      filter.warehouse = locationId;
+    } else {
+      filter.shop = locationId;
+    }
+    
+    if (status) filter.status = status;
+    if (damageType) filter.damageType = damageType;
+    if (product) filter.product = product;
+    
+    // Determine sort options
+    const sort = {};
+    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    
+    // Count total documents for pagination info
+    const totalDamages = await ProductDamage.countDocuments(filter);
+    
+    // Find damages with pagination and sorting
+    const damages = await ProductDamage.find(filter)
+      .populate('product', 'name countInStock')
+      .populate('warehouse', 'name code')
+      .populate('shop', 'name code')
+      .populate('reportedBy', 'name email')
+      .populate('approvedBy', 'name email')
+      .populate('currency', 'name code symbol')
+      .sort(sort)
+      .skip(skip)
+      .limit(limitNum);
+
+    res.json({
+      status: 'success',
+      results: damages.length,
+      totalPages: Math.ceil(totalDamages / limitNum),
+      currentPage: pageNum,
+      totalDamages,
+      location: {
+        type: locationType,
+        id: locationId,
+        name: locationExists.name,
+        code: locationExists.code
+      },
+      data: damages,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   getProductDamages,
   getProductDamageById,
@@ -589,4 +695,5 @@ module.exports = {
   updateProductDamage,
   deleteProductDamage,
   getDamageStatistics,
+  getProductDamagesByLocation,
 };

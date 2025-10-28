@@ -7,6 +7,7 @@ const {
   updateProductReturn,
   deleteProductReturn,
   getReturnStatistics,
+  getProductReturnsByLocation,
 } = require('../controllers/productReturnController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 const { uploadMultiple } = require('../middlewares/uploadMiddleware');
@@ -15,6 +16,11 @@ const { uploadMultiple } = require('../middlewares/uploadMiddleware');
 // @desc    Get return statistics
 // @access  Private/Admin
 router.get('/statistics', protect, admin, getReturnStatistics);
+
+// @route   GET /api/product-returns/by-location/:locationType/:locationId
+// @desc    Get product returns by warehouse or shop ID
+// @access  Private/Admin
+router.get('/by-location/:locationType/:locationId', protect, admin, getProductReturnsByLocation);
 
 // @route   GET /api/product-returns
 // @desc    Get all product returns

@@ -809,6 +809,172 @@ const getProductStockLocations = async (req, res) => {
   }
 };
 
+// @desc    Get stock transfers by warehouse or shop ID (as source or destination)
+// @route   GET /api/stock-transfers/by-location/:locationType/:locationId
+// @access  Private
+const getStockTransfersByLocation = async (req, res) => {
+  try {
+    const { locationType, locationId } = req.params;
+    const {
+      page = 1,
+      limit = 10,
+      status,
+      transferType = 'all', // 'incoming', 'outgoing', 'all'
+      startDate,
+      endDate,
+      search,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.query;
+
+    // Validate location type
+    if (!['warehouse', 'shop'].includes(locationType)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Location type must be either "warehouse" or "shop"'
+      });
+    }
+
+    // Validate location ID format
+    if (!locationId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid location ID format'
+      });
+    }
+
+    // Check if location exists
+    let locationExists;
+    if (locationType === 'warehouse') {
+      locationExists = await Warehouse.findById(locationId);
+    } else {
+      locationExists = await Shop.findById(locationId);
+    }
+
+    if (!locationExists) {
+      return res.status(404).json({
+        status: 'fail',
+        message: `${locationType} not found`
+      });
+    }
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Build query object based on transfer type
+    let query = {};
+
+    if (transferType === 'incoming') {
+      // Only transfers TO this location
+      query.destinationType = locationType;
+      query.destinationId = locationId;
+    } else if (transferType === 'outgoing') {
+      // Only transfers FROM this location
+      query.sourceType = locationType;
+      query.sourceId = locationId;
+    } else {
+      // All transfers involving this location (both incoming and outgoing)
+      query.$or = [
+        {
+          sourceType: locationType,
+          sourceId: locationId
+        },
+        {
+          destinationType: locationType,
+          destinationId: locationId
+        }
+      ];
+    }
+
+    // Filter by status
+    if (status) {
+      query.status = status;
+    }
+
+    // Filter by date range
+    if (startDate || endDate) {
+      query.transferDate = {};
+      if (startDate) {
+        query.transferDate.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        query.transferDate.$lte = new Date(endDate);
+      }
+    }
+
+    // Search by transfer number
+    if (search) {
+      query.transferNumber = { $regex: search, $options: 'i' };
+    }
+
+    // Determine sort options
+    const sort = {};
+    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+
+    // Count total documents for pagination info
+    const totalTransfers = await StockTransfer.countDocuments(query);
+
+    // Find stock transfers based on query with pagination
+    const stockTransfers = await StockTransfer.find(query)
+      .populate({
+        path: 'sourceId',
+        select: 'name code',
+        model: doc => doc.sourceType === 'warehouse' ? 'Warehouse' : 'Shop'
+      })
+      .populate({
+        path: 'destinationId',
+        select: 'name code',
+        model: doc => doc.destinationType === 'warehouse' ? 'Warehouse' : 'Shop'
+      })
+      .populate('user', 'name email')
+      .populate({
+        path: 'items.product',
+        select: 'name image'
+      })
+      .sort(sort)
+      .skip(skip)
+      .limit(limitNum);
+
+    // Calculate summary statistics
+    const incomingCount = await StockTransfer.countDocuments({
+      destinationType: locationType,
+      destinationId: locationId
+    });
+
+    const outgoingCount = await StockTransfer.countDocuments({
+      sourceType: locationType,
+      sourceId: locationId
+    });
+
+    res.json({
+      status: 'success',
+      results: stockTransfers.length,
+      totalPages: Math.ceil(totalTransfers / limitNum),
+      currentPage: pageNum,
+      totalTransfers,
+      transferType,
+      location: {
+        type: locationType,
+        id: locationId,
+        name: locationExists.name,
+        code: locationExists.code
+      },
+      summary: {
+        incomingTransfers: incomingCount,
+        outgoingTransfers: outgoingCount,
+        totalTransfers: incomingCount + outgoingCount
+      },
+      data: stockTransfers
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   createStockTransfer,
   getStockTransfers,
@@ -818,5 +984,6 @@ module.exports = {
   getProductStockInLocation,
   getProductStockLocations,
   testStockCalculation,
-  calculateAvailableStock
+  calculateAvailableStock,
+  getStockTransfersByLocation,
 };

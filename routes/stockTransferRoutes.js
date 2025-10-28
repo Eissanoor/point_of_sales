@@ -8,7 +8,8 @@ const {
   deleteStockTransfer,
   getProductStockInLocation,
   getProductStockLocations,
-  testStockCalculation
+  testStockCalculation,
+  getStockTransfersByLocation
 } = require('../controllers/stockTransferController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 
@@ -16,6 +17,10 @@ const { protect, admin } = require('../middlewares/authMiddleware');
 router.route('/')
   .post(protect, createStockTransfer)
   .get(protect, getStockTransfers);
+
+// Get stock transfers by location
+router.route('/by-location/:locationType/:locationId')
+  .get(protect, getStockTransfersByLocation);
 
 router.route('/:id')
   .get(protect, getStockTransferById)

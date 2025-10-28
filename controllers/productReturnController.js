@@ -630,6 +630,119 @@ const getReturnStatistics = async (req, res) => {
   }
 };
 
+// @desc    Get product returns by warehouse or shop ID
+// @route   GET /api/product-returns/by-location/:locationType/:locationId
+// @access  Private/Admin
+const getProductReturnsByLocation = async (req, res) => {
+  try {
+    const { locationType, locationId } = req.params;
+    const { 
+      page = 1, 
+      limit = 10,
+      status,
+      customer,
+      returnReason,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.query;
+
+    // Validate location type
+    if (!['warehouse', 'shop'].includes(locationType)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Location type must be either "warehouse" or "shop"',
+      });
+    }
+
+    // Validate location ID format
+    if (!locationId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid location ID format',
+      });
+    }
+
+    // Check if location exists
+    let locationExists;
+    if (locationType === 'warehouse') {
+      locationExists = await Warehouse.findById(locationId);
+    } else {
+      locationExists = await Shop.findById(locationId);
+    }
+
+    if (!locationExists) {
+      return res.status(404).json({
+        status: 'fail',
+        message: `${locationType} not found`,
+      });
+    }
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    // Build filter object
+    const filter = { isActive: true };
+    
+    // Add location filter
+    if (locationType === 'warehouse') {
+      filter.warehouse = locationId;
+    } else {
+      filter.shop = locationId;
+    }
+    
+    if (status) filter.status = status;
+    if (customer) filter.customer = customer;
+    
+    // Filter by return reason in products array
+    if (returnReason) {
+      filter['products.returnReason'] = returnReason;
+    }
+    
+    // Determine sort options
+    const sort = {};
+    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    
+    // Count total documents for pagination info
+    const totalReturns = await ProductReturn.countDocuments(filter);
+    
+    // Find returns with pagination and sorting
+    const returns = await ProductReturn.find(filter)
+      .populate('customer', 'name email phoneNumber')
+      .populate('originalSale', 'invoiceNumber')
+      .populate('products.product', 'name countInStock')
+      .populate('warehouse', 'name code')
+      .populate('shop', 'name code')
+      .populate('requestedBy', 'name email')
+      .populate('reviewedBy', 'name email')
+      .populate('processedBy', 'name email')
+      .populate('currency', 'name code symbol')
+      .sort(sort)
+      .skip(skip)
+      .limit(limitNum);
+
+    res.json({
+      status: 'success',
+      results: returns.length,
+      totalPages: Math.ceil(totalReturns / limitNum),
+      currentPage: pageNum,
+      totalReturns,
+      location: {
+        type: locationType,
+        id: locationId,
+        name: locationExists.name,
+        code: locationExists.code
+      },
+      data: returns,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   getProductReturns,
   getProductReturnById,
@@ -637,4 +750,5 @@ module.exports = {
   updateProductReturn,
   deleteProductReturn,
   getReturnStatistics,
+  getProductReturnsByLocation,
 };
