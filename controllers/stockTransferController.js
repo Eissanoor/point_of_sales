@@ -874,20 +874,53 @@ const getStockTransfersByLocation = async (req, res) => {
 
     // Find stock transfers based on query with pagination
     const stockTransfers = await StockTransfer.find(query)
-      .populate([
-        { path: 'sourceId', select: 'name code branch contactPerson phoneNumber email', model: 'Warehouse' },
-        { path: 'sourceId', select: 'name code location contactPerson phoneNumber email', model: 'Shop' },
-        { path: 'destinationId', select: 'name code branch contactPerson phoneNumber email', model: 'Warehouse' },
-        { path: 'destinationId', select: 'name code location contactPerson phoneNumber email', model: 'Shop' }
-      ])
       .populate('user', 'name email')
       .populate({
         path: 'items.product',
-        select: 'name image'
+        select: 'name image description sku code saleRate purchaseRate wholesaleRate retailRate size color quantityUnit packingUnit countInStock damagedQuantity returnedQuantity',
+        populate: [
+          { path: 'packingUnit', select: 'name' },
+          { path: 'quantityUnit', select: 'name' }
+        ]
       })
       .sort(sort)
       .skip(skip)
-      .limit(limitNum);
+      .limit(limitNum)
+      .lean();
+
+    // Manually populate source and destination based on type
+    const dataWithNames = await Promise.all(stockTransfers.map(async (doc) => {
+      let sourceData = null;
+      let destinationData = null;
+
+      // Populate source
+      if (doc.sourceId) {
+        if (doc.sourceType === 'warehouse') {
+          sourceData = await Warehouse.findById(doc.sourceId).select('name code branch contactPerson phoneNumber email').lean();
+        } else if (doc.sourceType === 'shop') {
+          sourceData = await Shop.findById(doc.sourceId).select('name code location contactPerson phoneNumber email').lean();
+        }
+      }
+
+      // Populate destination
+      if (doc.destinationId) {
+        if (doc.destinationType === 'warehouse') {
+          destinationData = await Warehouse.findById(doc.destinationId).select('name code branch contactPerson phoneNumber email').lean();
+        } else if (doc.destinationType === 'shop') {
+          destinationData = await Shop.findById(doc.destinationId).select('name code location contactPerson phoneNumber email').lean();
+        }
+      }
+
+      return {
+        ...doc,
+        sourceId: sourceData,
+        destinationId: destinationData,
+        sourceName: sourceData ? sourceData.name : null,
+        destinationName: destinationData ? destinationData.name : null,
+        source: sourceData,
+        destination: destinationData
+      };
+    }));
 
     // Calculate summary statistics
     const incomingCount = await StockTransfer.countDocuments({
@@ -902,7 +935,7 @@ const getStockTransfersByLocation = async (req, res) => {
 
     res.json({
       status: 'success',
-      results: stockTransfers.length,
+      results: dataWithNames.length,
       totalPages: Math.ceil(totalTransfers / limitNum),
       currentPage: pageNum,
       totalTransfers,
@@ -918,7 +951,7 @@ const getStockTransfersByLocation = async (req, res) => {
         outgoingTransfers: outgoingCount,
         totalTransfers: incomingCount + outgoingCount
       },
-      data: stockTransfers
+      data: dataWithNames
     });
   } catch (error) {
     res.status(500).json({
