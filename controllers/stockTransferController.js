@@ -875,10 +875,10 @@ const getStockTransfersByLocation = async (req, res) => {
     // Find stock transfers based on query with pagination
     const stockTransfers = await StockTransfer.find(query)
       .populate([
-        { path: 'sourceId', select: 'name code', model: 'Warehouse' },
-        { path: 'sourceId', select: 'name code', model: 'Shop' },
-        { path: 'destinationId', select: 'name code', model: 'Warehouse' },
-        { path: 'destinationId', select: 'name code', model: 'Shop' }
+        { path: 'sourceId', select: 'name code branch contactPerson phoneNumber email', model: 'Warehouse' },
+        { path: 'sourceId', select: 'name code location contactPerson phoneNumber email', model: 'Shop' },
+        { path: 'destinationId', select: 'name code branch contactPerson phoneNumber email', model: 'Warehouse' },
+        { path: 'destinationId', select: 'name code location contactPerson phoneNumber email', model: 'Shop' }
       ])
       .populate('user', 'name email')
       .populate({
