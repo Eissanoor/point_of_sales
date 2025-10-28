@@ -402,16 +402,12 @@ const getStockTransfers = async (req, res) => {
 
     // Find stock transfers based on query with pagination
     const stockTransfers = await StockTransfer.find(query)
-      .populate({
-        path: 'sourceId',
-        select: 'name code',
-        model: doc => doc.sourceType === 'warehouse' ? 'Warehouse' : 'Shop'
-      })
-      .populate({
-        path: 'destinationId',
-        select: 'name code',
-        model: doc => doc.destinationType === 'warehouse' ? 'Warehouse' : 'Shop'
-      })
+      .populate([
+        { path: 'sourceId', select: 'name code', model: 'Warehouse' },
+        { path: 'sourceId', select: 'name code', model: 'Shop' },
+        { path: 'destinationId', select: 'name code', model: 'Warehouse' },
+        { path: 'destinationId', select: 'name code', model: 'Shop' }
+      ])
       .populate('user', 'name')
       .populate({
         path: 'items.product',
@@ -452,26 +448,34 @@ const getStockTransferById = async (req, res) => {
     }
     
     // Populate source based on type
-    let populatedTransfer;
-    if (stockTransfer.sourceType === 'warehouse') {
-      populatedTransfer = await StockTransfer.findById(req.params.id)
-        .populate('sourceId', 'name code branch contactPerson phoneNumber email')
-        .populate('destinationId', 'name code branch contactPerson phoneNumber email')
-        .populate('user', 'name email')
-        .populate({
-          path: 'items.product',
-          select: 'name image description packingUnit additionalUnit'
-        });
-    } else {
-      populatedTransfer = await StockTransfer.findById(req.params.id)
-        .populate('sourceId', 'name code location contactPerson phoneNumber email')
-        .populate('destinationId', 'name code location contactPerson phoneNumber email')
-        .populate('user', 'name email')
-        .populate({
-          path: 'items.product',
-          select: 'name image description packingUnit additionalUnit'
-        });
-    }
+    const populatedTransfer = await StockTransfer.findById(req.params.id)
+      .populate([
+        {
+          path: 'sourceId',
+          select: 'name code branch contactPerson phoneNumber email',
+          model: 'Warehouse'
+        },
+        {
+          path: 'sourceId',
+          select: 'name code location contactPerson phoneNumber email',
+          model: 'Shop'
+        },
+        {
+          path: 'destinationId',
+          select: 'name code branch contactPerson phoneNumber email',
+          model: 'Warehouse'
+        },
+        {
+          path: 'destinationId',
+          select: 'name code location contactPerson phoneNumber email',
+          model: 'Shop'
+        }
+      ])
+      .populate('user', 'name email')
+      .populate({
+        path: 'items.product',
+        select: 'name image description packingUnit additionalUnit'
+      });
 
     res.json({
       status: 'success',
@@ -917,16 +921,12 @@ const getStockTransfersByLocation = async (req, res) => {
 
     // Find stock transfers based on query with pagination
     const stockTransfers = await StockTransfer.find(query)
-      .populate({
-        path: 'sourceId',
-        select: 'name code',
-        model: doc => doc.sourceType === 'warehouse' ? 'Warehouse' : 'Shop'
-      })
-      .populate({
-        path: 'destinationId',
-        select: 'name code',
-        model: doc => doc.destinationType === 'warehouse' ? 'Warehouse' : 'Shop'
-      })
+      .populate([
+        { path: 'sourceId', select: 'name code', model: 'Warehouse' },
+        { path: 'sourceId', select: 'name code', model: 'Shop' },
+        { path: 'destinationId', select: 'name code', model: 'Warehouse' },
+        { path: 'destinationId', select: 'name code', model: 'Shop' }
+      ])
       .populate('user', 'name email')
       .populate({
         path: 'items.product',
