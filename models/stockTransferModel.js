@@ -57,7 +57,7 @@ const stockTransferSchema = new mongoose.Schema(
       type: String,
       required: true,
       enum: ['pending', 'in-transit', 'completed', 'cancelled'],
-      default: 'pending',
+      default: 'completed',
     },
     notes: {
       type: String,

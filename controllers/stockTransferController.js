@@ -185,7 +185,7 @@ const createStockTransfer = async (req, res) => {
       destinationId,
       transferDate,
       items,
-      status,
+      // status is intentionally ignored; transfers are auto-completed
       notes
     } = req.body;
 
@@ -311,7 +311,8 @@ const createStockTransfer = async (req, res) => {
       destinationId,
       transferDate: transferDate || Date.now(),
       items,
-      status: status || 'pending',
+      // Force completed so transfers are auto-approved/processed
+      status: 'completed',
       notes,
       user: req.user._id
     });
@@ -489,62 +490,14 @@ const getStockTransferById = async (req, res) => {
   }
 };
 
-// @desc    Update stock transfer status
+// @desc    Update stock transfer status (disabled - transfers auto-complete)
 // @route   PUT /api/stock-transfers/:id/status
 // @access  Private
 const updateStockTransferStatus = async (req, res) => {
-  try {
-    const { status } = req.body;
-    
-    // Validate status
-    const validStatuses = ['pending', 'in-transit', 'completed', 'cancelled'];
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({
-        status: 'fail',
-        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
-      });
-    }
-    
-    const stockTransfer = await StockTransfer.findById(req.params.id);
-    
-    if (!stockTransfer) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Stock transfer not found'
-      });
-    }
-    
-    // If transfer is already completed or cancelled, don't allow status change
-    if (stockTransfer.status === 'completed' || stockTransfer.status === 'cancelled') {
-      return res.status(400).json({
-        status: 'fail',
-        message: `Cannot change status of a ${stockTransfer.status} transfer`
-      });
-    }
-    
-    // Handle status change to 'completed'
-    if (status === 'completed' && stockTransfer.status !== 'completed') {
-      // For completed transfers, we don't need to update the physical stock
-      // since we're now calculating the available stock dynamically based on transfers
-      
-      // Just mark the transfer as completed, and our stock calculation logic
-      // in createStockTransfer and getProductsByLocation will handle the rest
-    }
-    
-    // Update transfer status
-    stockTransfer.status = status;
-    const updatedTransfer = await stockTransfer.save();
-    
-    res.json({
-      status: 'success',
-      data: updatedTransfer
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message
-    });
-  }
+  return res.status(400).json({
+    status: 'fail',
+    message: 'Status updates are disabled. Transfers are auto-completed on creation.'
+  });
 };
 
 // @desc    Delete stock transfer
