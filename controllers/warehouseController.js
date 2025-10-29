@@ -1,5 +1,6 @@
 const Warehouse = require('../models/warehouseModel');
 const Product = require('../models/productModel');
+const { calculateAvailableStock } = require('./stockTransferController');
 
 // @desc    Create a new warehouse
 // @route   POST /api/warehouses
@@ -284,13 +285,23 @@ const getProductsByWarehouseId = async (req, res) => {
       .skip(skip)
       .limit(limitNum);
     
+    // Augment each product with dynamically calculated available stock for this warehouse
+    const productsWithAvailable = await Promise.all(
+      products.map(async (p) => {
+        const availableStockAtWarehouse = await calculateAvailableStock(p._id, 'warehouse', id);
+        const doc = p.toObject();
+        doc.availableStockAtWarehouse = availableStockAtWarehouse;
+        return doc;
+      })
+    );
+    
     res.json({
       status: 'success',
       results: products.length,
       totalPages: Math.ceil(totalProducts / limitNum),
       currentPage: pageNum,
       totalProducts,
-      data: products,
+      data: productsWithAvailable,
     });
   } catch (error) {
     res.status(500).json({

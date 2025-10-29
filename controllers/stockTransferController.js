@@ -18,27 +18,7 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
       console.log(`Debug - Original stock: ${availableStock} (${product.countInStock} - ${product.damagedQuantity || 0} - ${product.returnedQuantity || 0})`);
     }
     
-    // Step 2: Add purchases for this product in this warehouse
-    const purchases = await Purchase.find({
-      warehouse: locationId,
-      'items.product': productId,
-      
-      isActive: true
-    });
-    console.log(`Debug - Found ${purchases.length} purchases for warehouse ${locationId}`);
-    
-    for (const purchase of purchases) {
-      const purchaseItem = purchase.items.find(
-        i => i.product && i.product.toString() === productId.toString()
-      );
-      
-      if (purchaseItem) {
-        availableStock += purchaseItem.quantity;
-        console.log(`Debug - Added purchase stock: ${purchaseItem.quantity}, Total: ${availableStock}`);
-      }
-    }
-    
-    // Step 3: Add incoming transfers TO this warehouse
+    // Step 2: Add incoming transfers TO this warehouse
     const incomingTransfers = await StockTransfer.find({
       destinationType: 'warehouse',
       destinationId: locationId
@@ -56,7 +36,7 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
       }
     }
     
-    // Step 4: Subtract outgoing transfers FROM this warehouse
+    // Step 3: Subtract outgoing transfers FROM this warehouse
     const outgoingTransfers = await StockTransfer.find({
       sourceType: 'warehouse',
       sourceId: locationId
@@ -580,7 +560,6 @@ const getProductStockInLocation = async (req, res) => {
     // Get detailed breakdown for debugging
     let breakdown = {
       originalStock: 0,
-      purchases: 0,
       incomingTransfers: 0,
       outgoingTransfers: 0,
       total: availableStock
@@ -590,23 +569,6 @@ const getProductStockInLocation = async (req, res) => {
       // Original stock
       if (product.warehouse && product.warehouse.toString() === locationId) {
         breakdown.originalStock = product.countInStock;
-      }
-      
-      // Purchases
-      const purchases = await Purchase.find({
-        warehouse: locationId,
-        'items.product': productId,
-        
-        isActive: true
-      });
-      
-      for (const purchase of purchases) {
-        const purchaseItem = purchase.items.find(
-          i => i.product.toString() === productId.toString()
-        );
-        if (purchaseItem) {
-          breakdown.purchases += purchaseItem.quantity;
-        }
       }
       
       // Incoming transfers
