@@ -884,6 +884,44 @@ const getStockTransfersByLocation = async (req, res) => {
       };
     }));
 
+    // Compute available stock at the requested location for all products seen in these transfers
+    const includeStock = (req.query.includeStock || 'true') === 'true';
+    let availableStockByProduct = [];
+    if (includeStock) {
+      const uniqueProductIds = new Set();
+      for (const transfer of dataWithNames) {
+        if (Array.isArray(transfer.items)) {
+          for (const item of transfer.items) {
+            if (item && item.product) {
+              uniqueProductIds.add(item.product._id ? item.product._id.toString() : item.product.toString());
+            }
+          }
+        }
+      }
+
+      const productIdToAvailable = new Map();
+      for (const pid of uniqueProductIds) {
+        const available = await calculateAvailableStock(pid, locationType, locationId);
+        productIdToAvailable.set(pid, available);
+      }
+
+      // Attach per-item availableAtLocation and build summary array
+      for (const transfer of dataWithNames) {
+        if (Array.isArray(transfer.items)) {
+          transfer.items = transfer.items.map((it) => {
+            const pid = it && it.product ? (it.product._id ? it.product._id.toString() : it.product.toString()) : null;
+            const availableAtLocation = pid ? (productIdToAvailable.get(pid) || 0) : 0;
+            return { ...it, availableAtLocation };
+          });
+        }
+      }
+
+      availableStockByProduct = Array.from(productIdToAvailable.entries()).map(([pid, available]) => ({
+        product: pid,
+        availableAtLocation: available
+      }));
+    }
+
     // Calculate summary statistics
     const incomingCount = await StockTransfer.countDocuments({
       destinationType: locationType,
@@ -913,7 +951,8 @@ const getStockTransfersByLocation = async (req, res) => {
         outgoingTransfers: outgoingCount,
         totalTransfers: incomingCount + outgoingCount
       },
-      data: dataWithNames
+      data: dataWithNames,
+      availableStockByProduct
     });
   } catch (error) {
     res.status(500).json({
