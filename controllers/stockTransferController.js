@@ -839,10 +839,13 @@ const getStockTransfersByLocation = async (req, res) => {
       .populate('user', 'name email')
       .populate({
         path: 'items.product',
-        select: 'name image description sku code saleRate purchaseRate wholesaleRate retailRate size color quantityUnit packingUnit countInStock damagedQuantity returnedQuantity',
+        select: 'name image description sku code saleRate purchaseRate wholesaleRate retailRate size color quantityUnit packingUnit category supplier currency countInStock damagedQuantity returnedQuantity',
         populate: [
           { path: 'packingUnit', select: 'name' },
-          { path: 'quantityUnit', select: 'name' }
+          { path: 'quantityUnit', select: 'name' },
+          { path: 'category', select: 'name' },
+          { path: 'supplier', select: 'name email phoneNumber' },
+          { path: 'currency', select: 'name code symbol' }
         ]
       })
       .sort(sort)
