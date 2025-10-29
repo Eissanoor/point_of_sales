@@ -854,7 +854,7 @@ const getStockTransfersByLocation = async (req, res) => {
       .lean();
 
     // Manually populate source and destination based on type
-    const dataWithNames = await Promise.all(stockTransfers.map(async (doc) => {
+    let dataWithNames = await Promise.all(stockTransfers.map(async (doc) => {
       let sourceData = null;
       let destinationData = null;
 
@@ -919,10 +919,18 @@ const getStockTransfersByLocation = async (req, res) => {
         }
       }
 
+      // Filter out items with zero or negative available stock and drop empty transfers
+      dataWithNames = dataWithNames
+        .map(t => ({
+          ...t,
+          items: Array.isArray(t.items) ? t.items.filter(it => Number(it.availableAtLocation || 0) > 0) : []
+        }))
+        .filter(t => t.items.length > 0);
+
       availableStockByProduct = Array.from(productIdToAvailable.entries()).map(([pid, available]) => ({
         product: pid,
         availableAtLocation: available
-      }));
+      })).filter(e => Number(e.availableAtLocation || 0) > 0);
     }
 
     // Calculate summary statistics
