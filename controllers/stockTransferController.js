@@ -3,19 +3,24 @@ const Product = require('../models/productModel');
 const Warehouse = require('../models/warehouseModel');
 const Shop = require('../models/shopModel');
 const Purchase = require('../models/purchaseModel');
+const ProductDamage = require('../models/productDamageModel');
 
 // Helper function to calculate available stock for a product in a location
 const calculateAvailableStock = async (productId, locationType, locationId) => {
   let availableStock = 0;
   
   if (locationType === 'warehouse') {
-    // Step 1: Start with original stock if product was originally assigned to this warehouse
     const product = await Product.findById(productId);
     console.log(`Debug calculateAvailableStock - Product: ${product?.name}, Original Warehouse: ${product?.warehouse}, Target Warehouse: ${locationId}`);
     
-    if (product && product.warehouse && product.warehouse.toString() === locationId) {
-      availableStock = product.countInStock - (product.damagedQuantity || 0) - (product.returnedQuantity || 0);
-      console.log(`Debug - Original stock: ${availableStock} (${product.countInStock} - ${product.damagedQuantity || 0} - ${product.returnedQuantity || 0})`);
+    const isOriginalWarehouse = product && product.warehouse && product.warehouse.toString() === locationId;
+    
+    // Step 1: Start with original stock if product was originally assigned to this warehouse
+    // Note: countInStock already reflects ALL damages globally (they reduce it when created)
+    // For original warehouse, countInStock already accounts for damages there
+    if (isOriginalWarehouse) {
+      availableStock = product.countInStock - (product.returnedQuantity || 0);
+      console.log(`Debug - Original stock: ${availableStock} (${product.countInStock} - ${product.returnedQuantity || 0})`);
     }
     
     // Step 2: Add incoming transfers TO this warehouse
@@ -53,6 +58,48 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
         console.log(`Debug - Subtracted outgoing transfer stock: ${transferredItem.quantity}, Total: ${availableStock}`);
       }
     }
+    
+    // Step 4: Subtract location-specific damages at this warehouse
+    // For original warehouse: countInStock already reflects damages, but we need to be careful
+    // For other warehouses: damages of transferred stock should be subtracted
+    // The issue is that countInStock is global, so damages elsewhere affect it too
+    // We only subtract damages that are specifically at this location if this is NOT the original warehouse
+    // OR if we need to account for damages of transferred stock
+    if (!isOriginalWarehouse) {
+      // For non-original warehouses, subtract location-specific damages from transferred stock
+      const locationDamages = await ProductDamage.find({
+        product: productId,
+        warehouse: locationId,
+        status: 'approved',
+        isActive: { $ne: false }
+      });
+      
+      let totalLocationDamages = 0;
+      for (const damage of locationDamages) {
+        totalLocationDamages += damage.quantity || 0;
+      }
+      availableStock -= totalLocationDamages;
+      console.log(`Debug - Subtracted location damages (non-original): ${totalLocationDamages}, Total: ${availableStock}`);
+    } else {
+      // For original warehouse, countInStock already reflects all damages globally
+      // But we need to check: did any damages happen at OTHER locations that reduced countInStock?
+      // If damages happened elsewhere, they incorrectly reduced the original warehouse's base stock
+      // So we need to add back damages from OTHER locations
+      const otherLocationDamages = await ProductDamage.find({
+        product: productId,
+        warehouse: { $ne: locationId },
+        status: 'approved',
+        isActive: { $ne: false }
+      });
+      
+      let totalOtherDamages = 0;
+      for (const damage of otherLocationDamages) {
+        totalOtherDamages += damage.quantity || 0;
+      }
+      // Add back damages from other locations since they incorrectly reduced countInStock
+      availableStock += totalOtherDamages;
+      console.log(`Debug - Added back damages from other locations: ${totalOtherDamages}, Total: ${availableStock}`);
+    }
   } else if (locationType === 'shop') {
     // Shop - calculate stock from transfers only (shops don't have direct purchases)
     
@@ -87,6 +134,21 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
         availableStock -= transferredItem.quantity;
       }
     }
+    
+    // Step 3: Subtract location-specific damages at this shop
+    const locationDamages = await ProductDamage.find({
+      product: productId,
+      shop: locationId,
+      status: 'approved',
+      isActive: { $ne: false }
+    });
+    
+    let totalLocationDamages = 0;
+    for (const damage of locationDamages) {
+      totalLocationDamages += damage.quantity || 0;
+    }
+    availableStock -= totalLocationDamages;
+    console.log(`Debug - Subtracted location damages at shop: ${totalLocationDamages}, Total: ${availableStock}`);
   }
   
   console.log(`Debug - Final calculated stock for ${locationType} ${locationId}: ${availableStock}`);
