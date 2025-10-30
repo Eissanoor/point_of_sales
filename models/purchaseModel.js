@@ -52,6 +52,11 @@ const purchaseSchema = new mongoose.Schema(
       required: [true, 'Please select a warehouse'],
       ref: 'Warehouse',
     },
+    bankAccount: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'BankAccount',
+      default: null,
+    },
     currency: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Currency',
@@ -83,6 +88,11 @@ const purchaseSchema = new mongoose.Schema(
     notes: {
       type: String,
       default: '',
+    },
+    transactionRecipt: {
+      url: { type: String, default: '' },
+      publicId: { type: String, default: '' },
+      fileName: { type: String, default: '' },
     },
     paymentMethod: {
       type: String,

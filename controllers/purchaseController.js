@@ -3,6 +3,8 @@ const Product = require('../models/productModel');
 const Supplier = require('../models/supplierModel');
 const Warehouse = require('../models/warehouseModel');
 const Currency = require('../models/currencyModel');
+const BankAccount = require('../models/bankAccountModel');
+const cloudinary = require('cloudinary').v2;
 
 // @desc    Get all purchases
 // @route   GET /api/purchases
@@ -116,7 +118,8 @@ const getPurchaseById = async (req, res) => {
       .populate('items.product', 'name description category')
       .populate('supplier', 'name email phoneNumber address')
       .populate('warehouse', 'name code address')
-      .populate('currency', 'name code symbol');
+      .populate('currency', 'name code symbol')
+      .populate('bankAccount', 'accountName accountNumber bankName');
 
     if (purchase) {
       res.json({
@@ -150,11 +153,21 @@ const createPurchase = async (req, res) => {
       purchaseDate,
       invoiceNumber,
       notes,
-      paymentMethod
+      paymentMethod,
+      bankAccount
     } = req.body;
+    // Normalize items: when coming from multipart/form-data it's a JSON string
+    let normalizedItems = items;
+    if (typeof normalizedItems === 'string') {
+      try {
+        normalizedItems = JSON.parse(normalizedItems);
+      } catch (e) {
+        return res.status(400).json({ status: 'fail', message: 'Invalid items format. Must be a JSON array.' });
+      }
+    }
     
     // Validate required fields
-    if (!items || !Array.isArray(items) || items.length === 0) {
+    if (!normalizedItems || !Array.isArray(normalizedItems) || normalizedItems.length === 0) {
       return res.status(400).json({
         status: 'fail',
         message: 'Please provide at least one item in the items array',
@@ -169,7 +182,7 @@ const createPurchase = async (req, res) => {
     }
     
     // Validate each item
-    for (const item of items) {
+    for (const item of normalizedItems) {
       if (!item.product || !item.quantity || !item.purchaseRate || !item.retailRate || !item.wholesaleRate) {
         return res.status(400).json({
           status: 'fail',
@@ -179,7 +192,7 @@ const createPurchase = async (req, res) => {
     }
     
     // Check if all products exist
-    const productIds = items.map(item => item.product);
+    const productIds = normalizedItems.map(item => item.product);
     const products = await Product.find({ _id: { $in: productIds } });
     if (products.length !== productIds.length) {
       return res.status(400).json({
@@ -215,9 +228,44 @@ const createPurchase = async (req, res) => {
       }
     }
 
+    // Optional bank account validation when provided
+    let bankAccountId = null;
+    if (bankAccount) {
+      const bank = await BankAccount.findById(bankAccount);
+      if (!bank) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Bank account not found',
+        });
+      }
+      bankAccountId = bank._id;
+    }
+
+    // Optional transaction receipt upload
+    let transactionRecipt = { url: '', publicId: '', fileName: '' };
+    if (req.file) {
+      const fileBuffer = req.file.buffer;
+      const fileName = req.file.originalname || '';
+      const uploadResult = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { folder: 'purchase-receipts' },
+          (error, result) => {
+            if (error) return reject(error);
+            resolve(result);
+          }
+        );
+        stream.end(fileBuffer);
+      });
+      transactionRecipt = {
+        url: uploadResult.secure_url || '',
+        publicId: uploadResult.public_id || '',
+        fileName,
+      };
+    }
+
     const purchase = await Purchase.create({
       user: req.user._id,
-      items,
+      items: normalizedItems,
       supplier,
       warehouse,
       currency: currency || null,
@@ -226,10 +274,12 @@ const createPurchase = async (req, res) => {
       invoiceNumber: invoiceNumber || '', // Will be auto-generated if empty
       notes: notes || '',
       paymentMethod: paymentMethod || 'cash',
+      bankAccount: bankAccountId,
+      transactionRecipt,
     });
     
     // Update product stock and rates for each item
-    for (const item of items) {
+    for (const item of normalizedItems) {
       await Product.findByIdAndUpdate(item.product, {
         $inc: { countInStock: item.quantity },
         $set: {
@@ -278,7 +328,7 @@ const updatePurchase = async (req, res) => {
       
       // Update fields if provided
       for (const [key, value] of Object.entries(req.body)) {
-        if (key !== 'items' && purchase[key] !== value) {
+        if (!['items', 'bankAccount'].includes(key) && purchase[key] !== value) {
           purchase[key] = value;
           
           // If currency is being updated, also update the exchange rate
@@ -290,11 +340,60 @@ const updatePurchase = async (req, res) => {
           }
         }
       }
+
+      // Optional bank account update
+      if (typeof req.body.bankAccount !== 'undefined') {
+        if (req.body.bankAccount) {
+          const bank = await BankAccount.findById(req.body.bankAccount);
+          if (!bank) {
+            return res.status(400).json({ status: 'fail', message: 'Bank account not found' });
+          }
+          purchase.bankAccount = bank._id;
+        } else {
+          purchase.bankAccount = null;
+        }
+      }
+
+      // Optional transaction receipt replacement
+      if (req.file) {
+        // delete old if exists
+        if (purchase.transactionRecipt && purchase.transactionRecipt.publicId) {
+          try { await cloudinary.uploader.destroy(purchase.transactionRecipt.publicId); } catch (_) {}
+        }
+        const fileBuffer = req.file.buffer;
+        const fileName = req.file.originalname || '';
+        const uploadResult = await new Promise((resolve, reject) => {
+          const stream = cloudinary.uploader.upload_stream(
+            { folder: 'purchase-receipts' },
+            (error, result) => {
+              if (error) return reject(error);
+              resolve(result);
+            }
+          );
+          stream.end(fileBuffer);
+        });
+        purchase.transactionRecipt = {
+          url: uploadResult.secure_url || '',
+          publicId: uploadResult.public_id || '',
+          fileName,
+        };
+      }
       
-      // Handle items update if provided
-      if (req.body.items && Array.isArray(req.body.items)) {
+      // Handle items update if provided (supports JSON string via multipart)
+      if (typeof req.body.items !== 'undefined') {
+        let updateItems = req.body.items;
+        if (typeof updateItems === 'string') {
+          try {
+            updateItems = JSON.parse(updateItems);
+          } catch (e) {
+            return res.status(400).json({ status: 'fail', message: 'Invalid items format. Must be a JSON array.' });
+          }
+        }
+        if (!Array.isArray(updateItems)) {
+          return res.status(400).json({ status: 'fail', message: 'Items must be an array.' });
+        }
         // Validate items
-        for (const item of req.body.items) {
+        for (const item of updateItems) {
           if (!item.product || !item.quantity || !item.purchaseRate || !item.retailRate || !item.wholesaleRate) {
             return res.status(400).json({
               status: 'fail',
@@ -304,7 +403,7 @@ const updatePurchase = async (req, res) => {
         }
         
         // Check if all products exist
-        const productIds = req.body.items.map(item => item.product);
+        const productIds = updateItems.map(item => item.product);
         const products = await Product.find({ _id: { $in: productIds } });
         if (products.length !== productIds.length) {
           return res.status(400).json({
@@ -313,13 +412,13 @@ const updatePurchase = async (req, res) => {
           });
         }
         
-        purchase.items = req.body.items;
+        purchase.items = updateItems;
       }
       
       const updatedPurchase = await purchase.save();
       
       // Update product stock and rates for each item
-      if (req.body.items) {
+      if (typeof req.body.items !== 'undefined') {
         // First, revert old stock changes
         for (const oldItem of oldItems) {
           await Product.findByIdAndUpdate(oldItem.product, {

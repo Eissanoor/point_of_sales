@@ -10,6 +10,7 @@ const {
   getPurchasesByProduct,
 } = require('../controllers/purchaseController');
 const { protect, admin } = require('../middlewares/authMiddleware');
+const { upload } = require('../middlewares/uploadMiddleware');
 
 // @route   GET /api/purchases
 // @desc    Get all purchases
@@ -19,7 +20,7 @@ router.route('/').get(protect, getPurchases);
 // @route   POST /api/purchases
 // @desc    Create new purchase
 // @access  Private
-router.route('/').post(protect, createPurchase);
+router.route('/').post(protect, upload.single('transactionRecipt'), createPurchase);
 
 // @route   GET /api/purchases/stats
 // @desc    Get purchase statistics
@@ -39,7 +40,7 @@ router.route('/:id').get(protect, getPurchaseById);
 // @route   PUT /api/purchases/:id
 // @desc    Update purchase
 // @access  Private
-router.route('/:id').put(protect, updatePurchase);
+router.route('/:id').put(protect, upload.single('transactionRecipt'), updatePurchase);
 
 // @route   DELETE /api/purchases/:id
 // @desc    Delete purchase
