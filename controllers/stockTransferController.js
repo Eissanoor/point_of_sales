@@ -951,6 +951,7 @@ const getStockTransfersByLocation = async (req, res) => {
 
     // Compute available stock at the requested location for all products seen in these transfers
     const includeStock = (req.query.includeStock || 'true') === 'true';
+    const includePurchases = (req.query.includePurchases || 'true') === 'true';
     let availableStockByProduct = [];
     if (includeStock) {
       const uniqueProductIds = new Set();
@@ -1006,6 +1007,52 @@ const getStockTransfersByLocation = async (req, res) => {
       sourceId: locationId
     });
 
+    // Include purchases for warehouses (shops do not have direct purchases)
+    let purchasesData = [];
+    let purchasesCount = 0;
+    if (includePurchases && locationType === 'warehouse') {
+      const purchaseFilter = { isActive: true, warehouse: locationId };
+      if (startDate || endDate) {
+        purchaseFilter.purchaseDate = {};
+        if (startDate) purchaseFilter.purchaseDate.$gte = new Date(startDate);
+        if (endDate) purchaseFilter.purchaseDate.$lte = new Date(endDate);
+      }
+
+      purchasesCount = await Purchase.countDocuments(purchaseFilter);
+
+      const purchases = await Purchase.find(purchaseFilter)
+        .populate('items.product', 'name image description sku code saleRate purchaseRate wholesaleRate retailRate size color quantityUnit packingUnit category supplier currency countInStock damagedQuantity returnedQuantity')
+        .populate('supplier', 'name email phoneNumber')
+        .populate('currency', 'name code symbol')
+        .sort(sort)
+        .skip(skip)
+        .limit(limitNum)
+        .lean();
+
+      // Normalize to a shape similar to transfers but clearly mark recordType
+      purchasesData = purchases.map(p => ({
+        recordType: 'purchase',
+        _id: p._id,
+        invoiceNumber: p.invoiceNumber,
+        purchaseDate: p.purchaseDate,
+        status: p.status || 'incoming',
+        user: p.user,
+        sourceType: null,
+        sourceId: null,
+        destinationType: 'warehouse',
+        destinationId: locationExists ? { _id: locationExists._id, name: locationExists.name, code: locationExists.code } : null,
+        supplier: p.supplier,
+        currency: p.currency,
+        items: Array.isArray(p.items) ? p.items.map(it => ({
+          product: it.product,
+          quantity: it.quantity,
+          purchaseRate: it.purchaseRate,
+          retailRate: it.retailRate,
+          wholesaleRate: it.wholesaleRate
+        })) : []
+      }));
+    }
+
     res.json({
       status: 'success',
       results: dataWithNames.length,
@@ -1022,10 +1069,12 @@ const getStockTransfersByLocation = async (req, res) => {
       summary: {
         incomingTransfers: incomingCount,
         outgoingTransfers: outgoingCount,
-        totalTransfers: incomingCount + outgoingCount
+        totalTransfers: incomingCount + outgoingCount,
+        purchases: purchasesCount
       },
       data: dataWithNames,
-      availableStockByProduct
+      availableStockByProduct,
+      purchases: purchasesData
     });
   } catch (error) {
     res.status(500).json({
