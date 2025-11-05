@@ -4,6 +4,7 @@ const Warehouse = require('../models/warehouseModel');
 const Shop = require('../models/shopModel');
 const Purchase = require('../models/purchaseModel');
 const ProductDamage = require('../models/productDamageModel');
+const mongoose = require('mongoose');
 
 // Helper function to calculate available stock for a product in a location
 const calculateAvailableStock = async (productId, locationType, locationId) => {
@@ -59,32 +60,17 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
       }
     }
     
-    // Step 4: Subtract location-specific damages at this warehouse
-    // For original warehouse: countInStock already reflects damages, but we need to be careful
-    // For other warehouses: damages of transferred stock should be subtracted
-    // The issue is that countInStock is global, so damages elsewhere affect it too
-    // We only subtract damages that are specifically at this location if this is NOT the original warehouse
-    // OR if we need to account for damages of transferred stock
-    if (!isOriginalWarehouse) {
-      // For non-original warehouses, subtract location-specific damages from transferred stock
-      const locationDamages = await ProductDamage.find({
-        product: productId,
-        warehouse: locationId,
-        status: 'approved',
-        isActive: { $ne: false }
-      });
-      
-      let totalLocationDamages = 0;
-      for (const damage of locationDamages) {
-        totalLocationDamages += damage.quantity || 0;
-      }
-      availableStock -= totalLocationDamages;
-      console.log(`Debug - Subtracted location damages (non-original): ${totalLocationDamages}, Total: ${availableStock}`);
-    } else {
-      // For original warehouse, countInStock already reflects all damages globally
-      // But we need to check: did any damages happen at OTHER locations that reduced countInStock?
-      // If damages happened elsewhere, they incorrectly reduced the original warehouse's base stock
-      // So we need to add back damages from OTHER locations
+    // Step 4: Subtract location-specific damages at this warehouse ONLY
+    // IMPORTANT: Damages must be location-specific. If a product is damaged at Warehouse A,
+    // it should ONLY affect Warehouse A's stock, NOT other warehouses or shops.
+    // 
+    // Since countInStock is reduced globally when damages occur, we need to:
+    // 1. For original warehouse: Start with countInStock (includes all global damages), 
+    //    then ADD BACK damages from OTHER locations, and SUBTRACT damages at THIS location
+    // 2. For other warehouses: Subtract ONLY damages at THIS warehouse (they don't have base stock)
+    if (isOriginalWarehouse) {
+      // For original warehouse: countInStock was reduced by ALL damages globally
+      // We need to add back damages from OTHER locations (they shouldn't affect this warehouse)
       const otherLocationDamages = await ProductDamage.find({
         product: productId,
         warehouse: { $ne: locationId },
@@ -99,6 +85,36 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
       // Add back damages from other locations since they incorrectly reduced countInStock
       availableStock += totalOtherDamages;
       console.log(`Debug - Added back damages from other locations: ${totalOtherDamages}, Total: ${availableStock}`);
+      
+      // Now subtract damages at THIS specific warehouse
+      const thisLocationDamages = await ProductDamage.find({
+        product: productId,
+        warehouse: locationId,
+        status: 'approved',
+        isActive: { $ne: false }
+      });
+      
+      let totalThisLocationDamages = 0;
+      for (const damage of thisLocationDamages) {
+        totalThisLocationDamages += damage.quantity || 0;
+      }
+      availableStock -= totalThisLocationDamages;
+      console.log(`Debug - Subtracted damages at this warehouse (${locationId}): ${totalThisLocationDamages}, Total: ${availableStock}`);
+    } else {
+      // For non-original warehouses, subtract ONLY location-specific damages from transferred stock
+      const locationDamages = await ProductDamage.find({
+        product: productId,
+        warehouse: locationId,
+        status: 'approved',
+        isActive: { $ne: false }
+      });
+      
+      let totalLocationDamages = 0;
+      for (const damage of locationDamages) {
+        totalLocationDamages += damage.quantity || 0;
+      }
+      availableStock -= totalLocationDamages;
+      console.log(`Debug - Subtracted location damages at warehouse ${locationId}: ${totalLocationDamages}, Total: ${availableStock}`);
     }
   } else if (locationType === 'shop') {
     // Shop - calculate stock from transfers only (shops don't have direct purchases)
@@ -953,8 +969,8 @@ const getStockTransfersByLocation = async (req, res) => {
     const includeStock = (req.query.includeStock || 'true') === 'true';
     const includePurchases = (req.query.includePurchases || 'true') === 'true';
     let availableStockByProduct = [];
+    const uniqueProductIds = new Set();
     if (includeStock) {
-      const uniqueProductIds = new Set();
       for (const transfer of dataWithNames) {
         if (Array.isArray(transfer.items)) {
           for (const item of transfer.items) {
@@ -964,36 +980,6 @@ const getStockTransfersByLocation = async (req, res) => {
           }
         }
       }
-
-      const productIdToAvailable = new Map();
-      for (const pid of uniqueProductIds) {
-        const available = await calculateAvailableStock(pid, locationType, locationId);
-        productIdToAvailable.set(pid, available);
-      }
-
-      // Attach per-item availableAtLocation and build summary array
-      for (const transfer of dataWithNames) {
-        if (Array.isArray(transfer.items)) {
-          transfer.items = transfer.items.map((it) => {
-            const pid = it && it.product ? (it.product._id ? it.product._id.toString() : it.product.toString()) : null;
-            const availableAtLocation = pid ? (productIdToAvailable.get(pid) || 0) : 0;
-            return { ...it, availableAtLocation };
-          });
-        }
-      }
-
-      // Filter out items with zero or negative available stock and drop empty transfers
-      dataWithNames = dataWithNames
-        .map(t => ({
-          ...t,
-          items: Array.isArray(t.items) ? t.items.filter(it => Number(it.availableAtLocation || 0) > 0) : []
-        }))
-        .filter(t => t.items.length > 0);
-
-      availableStockByProduct = Array.from(productIdToAvailable.entries()).map(([pid, available]) => ({
-        product: pid,
-        availableAtLocation: available
-      })).filter(e => Number(e.availableAtLocation || 0) > 0);
     }
 
     // Calculate summary statistics
@@ -1051,6 +1037,89 @@ const getStockTransfersByLocation = async (req, res) => {
           wholesaleRate: it.wholesaleRate
         })) : []
       }));
+      // Collect product ids from purchases as well (for stock/damage computations)
+      if (includeStock) {
+        for (const p of purchasesData) {
+          if (Array.isArray(p.items)) {
+            for (const it of p.items) {
+              if (it && it.product) {
+                const pid = it.product._id ? it.product._id.toString() : it.product.toString();
+                uniqueProductIds.add(pid);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // If including stock, compute availability and location-specific damages and attach to items
+    if (includeStock) {
+      const productIdToAvailable = new Map();
+      for (const pid of uniqueProductIds) {
+        const available = await calculateAvailableStock(pid, locationType, locationId);
+        productIdToAvailable.set(pid, available);
+      }
+
+      // Aggregate location-specific damages for these products
+      const productObjectIds = Array.from(uniqueProductIds).map(id => new mongoose.Types.ObjectId(id));
+      const damageMatch = {
+        product: { $in: productObjectIds },
+        status: 'approved',
+        isActive: { $ne: false }
+      };
+      if (locationType === 'warehouse') {
+        damageMatch.warehouse = new mongoose.Types.ObjectId(locationId);
+      } else {
+        damageMatch.shop = new mongoose.Types.ObjectId(locationId);
+      }
+      const damagesAgg = productObjectIds.length > 0
+        ? await ProductDamage.aggregate([
+            { $match: damageMatch },
+            { $group: { _id: '$product', qty: { $sum: '$quantity' } } }
+          ])
+        : [];
+      const productIdToDamageAtLocation = new Map();
+      for (const d of damagesAgg) {
+        productIdToDamageAtLocation.set(d._id.toString(), Number(d.qty || 0));
+      }
+
+      // Attach availableAtLocation and damagedAtLocation on transfer items
+      for (const transfer of dataWithNames) {
+        if (Array.isArray(transfer.items)) {
+          transfer.items = transfer.items.map((it) => {
+            const pid = it && it.product ? (it.product._id ? it.product._id.toString() : it.product.toString()) : null;
+            const availableAtLocation = pid ? (productIdToAvailable.get(pid) || 0) : 0;
+            const damagedAtLocation = pid ? (productIdToDamageAtLocation.get(pid) || 0) : 0;
+            return { ...it, availableAtLocation, damagedAtLocation };
+          });
+        }
+      }
+
+      // Filter out items with zero or negative available stock and drop empty transfers
+      dataWithNames = dataWithNames
+        .map(t => ({
+          ...t,
+          items: Array.isArray(t.items) ? t.items.filter(it => Number(it.availableAtLocation || 0) > 0) : []
+        }))
+        .filter(t => t.items.length > 0);
+
+      // Attach damagedAtLocation on purchase items too
+      if (purchasesData && purchasesData.length > 0) {
+        for (const p of purchasesData) {
+          if (Array.isArray(p.items)) {
+            p.items = p.items.map(it => {
+              const pid = it && it.product ? (it.product._id ? it.product._id.toString() : it.product.toString()) : null;
+              const damagedAtLocation = pid ? (productIdToDamageAtLocation.get(pid) || 0) : 0;
+              return { ...it, damagedAtLocation };
+            });
+          }
+        }
+      }
+
+      availableStockByProduct = Array.from(productIdToAvailable.entries()).map(([pid, available]) => ({
+        product: pid,
+        availableAtLocation: available
+      })).filter(e => Number(e.availableAtLocation || 0) > 0);
     }
 
     res.json({
