@@ -3,6 +3,7 @@ const Product = require('../models/productModel');
 const Warehouse = require('../models/warehouseModel');
 const Shop = require('../models/shopModel');
 const Purchase = require('../models/purchaseModel');
+const Sales = require('../models/salesModel');
 const ProductDamage = require('../models/productDamageModel');
 const mongoose = require('mongoose');
 
@@ -1083,6 +1084,26 @@ const getStockTransfersByLocation = async (req, res) => {
         productIdToDamageAtLocation.set(d._id.toString(), Number(d.qty || 0));
       }
 
+      // Aggregate location-specific sold quantities for these products (sales)
+      let salesMatch = { isActive: true };
+      if (locationType === 'warehouse') {
+        salesMatch.warehouse = new mongoose.Types.ObjectId(locationId);
+      } else {
+        salesMatch.shop = new mongoose.Types.ObjectId(locationId);
+      }
+      const salesAgg = productObjectIds.length > 0
+        ? await Sales.aggregate([
+            { $match: salesMatch },
+            { $unwind: '$items' },
+            { $match: { 'items.product': { $in: productObjectIds } } },
+            { $group: { _id: '$items.product', qty: { $sum: '$items.quantity' } } }
+          ])
+        : [];
+      const productIdToSoldAtLocation = new Map();
+      for (const s of salesAgg) {
+        productIdToSoldAtLocation.set(s._id.toString(), Number(s.qty || 0));
+      }
+
       // Attach availableAtLocation and damagedAtLocation on transfer items
       for (const transfer of dataWithNames) {
         if (Array.isArray(transfer.items)) {
@@ -1090,7 +1111,8 @@ const getStockTransfersByLocation = async (req, res) => {
             const pid = it && it.product ? (it.product._id ? it.product._id.toString() : it.product.toString()) : null;
             const availableAtLocation = pid ? (productIdToAvailable.get(pid) || 0) : 0;
             const damagedAtLocation = pid ? (productIdToDamageAtLocation.get(pid) || 0) : 0;
-            return { ...it, availableAtLocation, damagedAtLocation };
+            const soldAtLocation = pid ? (productIdToSoldAtLocation.get(pid) || 0) : 0;
+            return { ...it, availableAtLocation, damagedAtLocation, soldAtLocation };
           });
         }
       }
@@ -1110,7 +1132,8 @@ const getStockTransfersByLocation = async (req, res) => {
             p.items = p.items.map(it => {
               const pid = it && it.product ? (it.product._id ? it.product._id.toString() : it.product.toString()) : null;
               const damagedAtLocation = pid ? (productIdToDamageAtLocation.get(pid) || 0) : 0;
-              return { ...it, damagedAtLocation };
+              const soldAtLocation = pid ? (productIdToSoldAtLocation.get(pid) || 0) : 0;
+              return { ...it, damagedAtLocation, soldAtLocation };
             });
           }
         }
