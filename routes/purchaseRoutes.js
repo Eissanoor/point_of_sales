@@ -20,7 +20,7 @@ router.route('/').get(protect, getPurchases);
 // @route   POST /api/purchases
 // @desc    Create new purchase
 // @access  Private
-router.route('/').post(protect, upload.single('transactionRecipt'), createPurchase);
+router.route('/').post(protect, upload.single('transactionReceipt'), createPurchase);
 
 // @route   GET /api/purchases/stats
 // @desc    Get purchase statistics
@@ -40,7 +40,7 @@ router.route('/:id').get(protect, getPurchaseById);
 // @route   PUT /api/purchases/:id
 // @desc    Update purchase
 // @access  Private
-router.route('/:id').put(protect, upload.single('transactionRecipt'), updatePurchase);
+router.route('/:id').put(protect, upload.single('transactionReceipt'), updatePurchase);
 
 // @route   DELETE /api/purchases/:id
 // @desc    Delete purchase
