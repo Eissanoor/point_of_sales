@@ -331,8 +331,12 @@ const updateSale = async (req, res) => {
       });
     }
 
+    // Capture original items BEFORE any modifications (deep copy to preserve state)
     const originalItems = Array.isArray(sale.items)
-      ? sale.items.map(it => ({ product: it.product, quantity: it.quantity }))
+      ? sale.items.map(it => ({
+          product: it.product ? (it.product._id ? it.product._id.toString() : it.product.toString()) : null,
+          quantity: Number(it.quantity || 0)
+        }))
       : [];
 
     // Collect changes for journey
@@ -383,13 +387,19 @@ const updateSale = async (req, res) => {
         return res.status(400).json({ status: 'fail', message: 'One or more products not found' });
       }
 
-      // Revert stock/sold counts for original items
+      // Revert stock/sold counts for original items (restore what was sold)
       for (const old of originalItems) {
+        if (!old.product) continue;
         const product = await Product.findById(old.product);
         if (!product) continue;
-        const currentSold = product.soldOutQuantity || 0;
-        product.countInStock += Number(old.quantity || 0);
-        product.soldOutQuantity = Math.max(0, currentSold - Number(old.quantity || 0));
+        
+        const currentSold = Number(product.soldOutQuantity || 0);
+        const oldQty = Number(old.quantity || 0);
+        
+        // Restore stock and reduce sold quantity
+        product.countInStock = Number(product.countInStock || 0) + oldQty;
+        product.soldOutQuantity = Math.max(0, currentSold - oldQty);
+        
         await product.save();
       }
 
@@ -404,9 +414,14 @@ const updateSale = async (req, res) => {
       for (const item of replacedItems) {
         const product = await Product.findById(item.product);
         if (!product) continue;
-        const currentSold = product.soldOutQuantity || 0;
-        product.countInStock -= Number(item.quantity || 0);
-        product.soldOutQuantity = currentSold + Number(item.quantity || 0);
+        
+        const currentSold = Number(product.soldOutQuantity || 0);
+        const newQty = Number(item.quantity || 0);
+        
+        // Reduce stock and increase sold quantity
+        product.countInStock = Math.max(0, Number(product.countInStock || 0) - newQty);
+        product.soldOutQuantity = currentSold + newQty;
+        
         await product.save();
       }
 
@@ -473,7 +488,8 @@ const updateSale = async (req, res) => {
         // Fetch product for inventory updates
         const product = await Product.findById(pid);
         if (!product) continue;
-        const currentSold = product.soldOutQuantity || 0;
+        
+        const currentSold = Number(product.soldOutQuantity || 0);
 
         if (qty > 0) {
           // Add quantity to sale
@@ -491,8 +507,8 @@ const updateSale = async (req, res) => {
             currentItems.push({ product: pid, quantity: qty, price: adj.price, total: Number(adj.price || 0) * qty });
             productIdToIndex.set(pid, currentItems.length - 1);
           }
-          // Update inventory
-          product.countInStock -= qty;
+          // Update inventory - reduce stock, increase sold
+          product.countInStock = Math.max(0, Number(product.countInStock || 0) - qty);
           product.soldOutQuantity = currentSold + qty;
           await product.save();
         } else if (qty < 0) {
@@ -515,8 +531,8 @@ const updateSale = async (req, res) => {
               productIdToIndex.set(toIdString(currentItems[i].product), i);
             }
           }
-          // Restore inventory
-          product.countInStock += removeQty;
+          // Restore inventory - increase stock, decrease sold
+          product.countInStock = Number(product.countInStock || 0) + removeQty;
           product.soldOutQuantity = Math.max(0, currentSold - removeQty);
           await product.save();
         } else {
