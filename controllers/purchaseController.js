@@ -441,6 +441,22 @@ const updatePurchase = async (req, res) => {
             }
           });
         }
+      } else {
+        // Items were not changed but header fields may have changed (supplier, warehouse, currency)
+        // Ensure product master fields reflect latest purchase header
+        if (req.body.supplier || req.body.warehouse || req.body.currency) {
+          for (const item of purchase.items) {
+            await Product.findByIdAndUpdate(item.product, {
+              $set: {
+                // Do not touch stock when items unchanged
+                supplier: purchase.supplier,
+                warehouse: purchase.warehouse,
+                currency: purchase.currency,
+                currencyExchangeRate: purchase.currencyExchangeRate,
+              }
+            });
+          }
+        }
       }
       
       res.json({

@@ -324,28 +324,240 @@ const updateSale = async (req, res) => {
   try {
     const sale = await Sales.findById(req.params.id);
 
-    if (sale) {
-      // Create sales journey record
-      await SalesJourney.create({
-        sale: sale._id,
-        user: req.user._id,
-        action: 'updated',
-        changes: [],
-        notes: 'Sale updated',
-      });
-
-      const updatedSale = await sale.save();
-
-      res.json({
-        status: 'success',
-        data: updatedSale,
-      });
-    } else {
-      res.status(404).json({
+    if (!sale) {
+      return res.status(404).json({
         status: 'fail',
         message: 'Sale not found',
       });
     }
+
+    const originalItems = Array.isArray(sale.items)
+      ? sale.items.map(it => ({ product: it.product, quantity: it.quantity }))
+      : [];
+
+    // Collect changes for journey
+    const changes = [];
+
+    // Fields that may be updated directly on the sale
+    const updatableFields = [
+      'customer', 'totalAmount', 'discount', 'tax', 'grandTotal',
+      'paymentStatus', 'dueDate', 'shop', 'warehouse', 'invoiceNumber', 'notes'
+    ];
+    for (const key of updatableFields) {
+      if (Object.prototype.hasOwnProperty.call(req.body, key)) {
+        if (String(sale[key] ?? '') !== String(req.body[key] ?? '')) {
+          changes.push({ field: key, oldValue: sale[key], newValue: req.body[key] });
+          sale[key] = req.body[key];
+        }
+      }
+    }
+
+    // Handle complete replacement of items (supports JSON string via multipart)
+    if (typeof req.body.items !== 'undefined') {
+      let nextItems = req.body.items;
+      if (typeof nextItems === 'string') {
+        try {
+          nextItems = JSON.parse(nextItems);
+        } catch (e) {
+          return res.status(400).json({ status: 'fail', message: 'Invalid items format. Must be a JSON array.' });
+        }
+      }
+      if (!Array.isArray(nextItems)) {
+        return res.status(400).json({ status: 'fail', message: 'Items must be an array.' });
+      }
+
+      // Validate items
+      for (const item of nextItems) {
+        if (!item.product || !item.quantity || !item.price) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'Each item must have: product, quantity, price',
+          });
+        }
+      }
+
+      // Check products exist
+      const productIds = nextItems.map(i => i.product);
+      const products = await Product.find({ _id: { $in: productIds } });
+      if (products.length !== productIds.length) {
+        return res.status(400).json({ status: 'fail', message: 'One or more products not found' });
+      }
+
+      // Revert stock/sold counts for original items
+      for (const old of originalItems) {
+        const product = await Product.findById(old.product);
+        if (!product) continue;
+        const currentSold = product.soldOutQuantity || 0;
+        product.countInStock += Number(old.quantity || 0);
+        product.soldOutQuantity = Math.max(0, currentSold - Number(old.quantity || 0));
+        await product.save();
+      }
+
+      // Apply new items to sale with computed line totals
+      const replacedItems = nextItems.map(it => ({
+        ...it,
+        total: Number(it.price || 0) * Number(it.quantity || 0)
+      }));
+      sale.items = replacedItems;
+
+      // Apply stock/sold updates for new items
+      for (const item of replacedItems) {
+        const product = await Product.findById(item.product);
+        if (!product) continue;
+        const currentSold = product.soldOutQuantity || 0;
+        product.countInStock -= Number(item.quantity || 0);
+        product.soldOutQuantity = currentSold + Number(item.quantity || 0);
+        await product.save();
+      }
+
+      // If header totals not explicitly provided, recompute from items
+      if (!Object.prototype.hasOwnProperty.call(req.body, 'totalAmount')) {
+        const sum = sale.items.reduce((s, it) => s + Number(it.total || 0), 0);
+        sale.totalAmount = sum;
+      }
+      if (!Object.prototype.hasOwnProperty.call(req.body, 'grandTotal')) {
+        const sum = Number(sale.totalAmount || 0) - Number(sale.discount || 0) + Number(sale.tax || 0);
+        sale.grandTotal = sum;
+      }
+    }
+
+    // Handle delta adjustments (add or subtract products/quantities)
+    // itemsAdjust: [{ product, quantity, price }], where quantity > 0 adds to sale, quantity < 0 subtracts from sale
+    if (typeof req.body.itemsAdjust !== 'undefined') {
+      let adjustments = req.body.itemsAdjust;
+      if (typeof adjustments === 'string') {
+        try {
+          adjustments = JSON.parse(adjustments);
+        } catch (e) {
+          return res.status(400).json({ status: 'fail', message: 'Invalid itemsAdjust format. Must be a JSON array.' });
+        }
+      }
+      if (!Array.isArray(adjustments)) {
+        return res.status(400).json({ status: 'fail', message: 'itemsAdjust must be an array.' });
+      }
+
+      // Normalize product id strings
+      const toIdString = (v) => (v && v.toString ? v.toString() : String(v));
+      const currentItems = Array.isArray(sale.items) ? sale.items : [];
+
+      // Build quick lookup for current quantities and indices
+      const productIdToIndex = new Map();
+      for (let i = 0; i < currentItems.length; i++) {
+        productIdToIndex.set(toIdString(currentItems[i].product), i);
+      }
+
+      // First pass: validate availability for positive adds
+      for (const adj of adjustments) {
+        if (!adj.product || typeof adj.quantity !== 'number') {
+          return res.status(400).json({ status: 'fail', message: 'Each itemsAdjust entry must include product and numeric quantity' });
+        }
+        if (adj.quantity > 0) {
+          // Ensure enough stock exists to add this quantity
+          const product = await Product.findById(adj.product);
+          if (!product) return res.status(404).json({ status: 'fail', message: 'Product not found in itemsAdjust' });
+          if (Number(product.countInStock || 0) < adj.quantity) {
+            return res.status(400).json({
+              status: 'fail',
+              message: `Insufficient inventory for product ${product.name}. Available: ${product.countInStock || 0}, Requested add: ${adj.quantity}`,
+            });
+          }
+        }
+      }
+
+      // Second pass: apply adjustments and update product inventory
+      for (const adj of adjustments) {
+        const pid = toIdString(adj.product);
+        const qty = Number(adj.quantity || 0);
+        const idx = productIdToIndex.has(pid) ? productIdToIndex.get(pid) : -1;
+
+        // Fetch product for inventory updates
+        const product = await Product.findById(pid);
+        if (!product) continue;
+        const currentSold = product.soldOutQuantity || 0;
+
+        if (qty > 0) {
+          // Add quantity to sale
+          if (idx >= 0) {
+            currentItems[idx].quantity = Number(currentItems[idx].quantity || 0) + qty;
+            // If price provided, update price
+            if (typeof adj.price !== 'undefined') currentItems[idx].price = adj.price;
+            // Update line total
+            currentItems[idx].total = Number(currentItems[idx].price || 0) * Number(currentItems[idx].quantity || 0);
+          } else {
+            // Need price to add a new line
+            if (typeof adj.price === 'undefined') {
+              return res.status(400).json({ status: 'fail', message: 'itemsAdjust requires price when adding a new product' });
+            }
+            currentItems.push({ product: pid, quantity: qty, price: adj.price, total: Number(adj.price || 0) * qty });
+            productIdToIndex.set(pid, currentItems.length - 1);
+          }
+          // Update inventory
+          product.countInStock -= qty;
+          product.soldOutQuantity = currentSold + qty;
+          await product.save();
+        } else if (qty < 0) {
+          // Subtract quantity from sale
+          if (idx < 0) {
+            return res.status(400).json({ status: 'fail', message: 'Cannot subtract product not present in sale' });
+          }
+          const removeQty = Math.min(Math.abs(qty), Number(currentItems[idx].quantity || 0));
+          currentItems[idx].quantity = Number(currentItems[idx].quantity || 0) - removeQty;
+          // Update or remove line total
+          if (currentItems[idx] && currentItems[idx].quantity > 0) {
+            currentItems[idx].total = Number(currentItems[idx].price || 0) * Number(currentItems[idx].quantity || 0);
+          }
+          // If line hits zero, remove it
+          if (currentItems[idx].quantity <= 0) {
+            currentItems.splice(idx, 1);
+            productIdToIndex.delete(pid);
+            // Re-index remaining items for correctness
+            for (let i = 0; i < currentItems.length; i++) {
+              productIdToIndex.set(toIdString(currentItems[i].product), i);
+            }
+          }
+          // Restore inventory
+          product.countInStock += removeQty;
+          product.soldOutQuantity = Math.max(0, currentSold - removeQty);
+          await product.save();
+        } else {
+          // qty === 0: no-op, but allow price update if provided
+          if (idx >= 0 && typeof adj.price !== 'undefined') {
+            currentItems[idx].price = adj.price;
+            currentItems[idx].total = Number(currentItems[idx].price || 0) * Number(currentItems[idx].quantity || 0);
+          }
+        }
+      }
+
+      // Assign adjusted items back
+      sale.items = currentItems;
+
+      // If header totals not explicitly provided, recompute from items
+      if (!Object.prototype.hasOwnProperty.call(req.body, 'totalAmount')) {
+        const sum = sale.items.reduce((s, it) => s + Number(it.total || 0), 0);
+        sale.totalAmount = sum;
+      }
+      if (!Object.prototype.hasOwnProperty.call(req.body, 'grandTotal')) {
+        const sum = Number(sale.totalAmount || 0) - Number(sale.discount || 0) + Number(sale.tax || 0);
+        sale.grandTotal = sum;
+      }
+    }
+
+    // Save updated sale
+    const updatedSale = await sale.save();
+
+    // Record journey
+    await SalesJourney.create({
+      sale: sale._id,
+      user: req.user._id,
+      action: 'updated',
+      changes,
+      notes: 'Sale updated',
+    });
+
+    res.json({
+      status: 'success',
+      data: updatedSale,
+    });
   } catch (error) {
     res.status(500).json({
       status: 'error',
