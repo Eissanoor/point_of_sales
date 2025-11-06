@@ -8,147 +8,153 @@ const ProductDamage = require('../models/productDamageModel');
 const mongoose = require('mongoose');
 
 // Helper function to calculate available stock for a product in a location
+// This calculates stock based on: Purchases + Incoming Transfers - Outgoing Transfers - Damages - Sales
 const calculateAvailableStock = async (productId, locationType, locationId) => {
   let availableStock = 0;
   
   if (locationType === 'warehouse') {
-    const product = await Product.findById(productId);
-    console.log(`Debug calculateAvailableStock - Product: ${product?.name}, Original Warehouse: ${product?.warehouse}, Target Warehouse: ${locationId}`);
+    // Step 1: Add purchases at this specific warehouse
+    // Each purchase adds stock to the warehouse where it was purchased
+    const purchasesAtLocation = await Purchase.find({
+      warehouse: locationId,
+      isActive: true,
+      status: 'completed'
+    });
     
-    const isOriginalWarehouse = product && product.warehouse && product.warehouse.toString() === locationId;
-    
-    // Step 1: Start with original stock if product was originally assigned to this warehouse
-    // Note: countInStock already reflects ALL damages globally (they reduce it when created)
-    // For original warehouse, countInStock already accounts for damages there
-    if (isOriginalWarehouse) {
-      availableStock = product.countInStock - (product.returnedQuantity || 0);
-      console.log(`Debug - Original stock: ${availableStock} (${product.countInStock} - ${product.returnedQuantity || 0})`);
+    for (const purchase of purchasesAtLocation) {
+      const purchaseItem = purchase.items.find(
+        item => {
+          if (!item.product) return false;
+          const itemProductId = item.product.toString ? item.product.toString() : item.product;
+          const targetProductId = productId.toString ? productId.toString() : productId;
+          return itemProductId === targetProductId;
+        }
+      );
+      if (purchaseItem) {
+        availableStock += purchaseItem.quantity || 0;
+      }
     }
     
     // Step 2: Add incoming transfers TO this warehouse
     const incomingTransfers = await StockTransfer.find({
       destinationType: 'warehouse',
-      destinationId: locationId
+      destinationId: locationId,
+      status: 'completed'
     });
-    console.log(`Debug - Found ${incomingTransfers.length} incoming transfers for warehouse ${locationId}`);
     
     for (const transfer of incomingTransfers) {
       const transferredItem = transfer.items.find(
-        i => i.product && i.product.toString() === productId.toString()
+        i => {
+          if (!i.product) return false;
+          const itemProductId = i.product.toString ? i.product.toString() : i.product;
+          const targetProductId = productId.toString ? productId.toString() : productId;
+          return itemProductId === targetProductId;
+        }
       );
-      
       if (transferredItem) {
-        availableStock += transferredItem.quantity;
-        console.log(`Debug - Added incoming transfer stock: ${transferredItem.quantity}, Total: ${availableStock}`);
+        availableStock += transferredItem.quantity || 0;
       }
     }
     
     // Step 3: Subtract outgoing transfers FROM this warehouse
     const outgoingTransfers = await StockTransfer.find({
       sourceType: 'warehouse',
-      sourceId: locationId
+      sourceId: locationId,
+      status: 'completed'
     });
-    console.log(`Debug - Found ${outgoingTransfers.length} outgoing transfers for warehouse ${locationId}`);
     
     for (const transfer of outgoingTransfers) {
       const transferredItem = transfer.items.find(
-        i => i.product && i.product.toString() === productId.toString()
+        i => {
+          if (!i.product) return false;
+          const itemProductId = i.product.toString ? i.product.toString() : i.product;
+          const targetProductId = productId.toString ? productId.toString() : productId;
+          return itemProductId === targetProductId;
+        }
       );
-      
       if (transferredItem) {
-        availableStock -= transferredItem.quantity;
-        console.log(`Debug - Subtracted outgoing transfer stock: ${transferredItem.quantity}, Total: ${availableStock}`);
+        availableStock -= transferredItem.quantity || 0;
       }
     }
     
-    // Step 4: Subtract location-specific damages at this warehouse ONLY
-    // IMPORTANT: Damages must be location-specific. If a product is damaged at Warehouse A,
-    // it should ONLY affect Warehouse A's stock, NOT other warehouses or shops.
-    // 
-    // Since countInStock is reduced globally when damages occur, we need to:
-    // 1. For original warehouse: Start with countInStock (includes all global damages), 
-    //    then ADD BACK damages from OTHER locations, and SUBTRACT damages at THIS location
-    // 2. For other warehouses: Subtract ONLY damages at THIS warehouse (they don't have base stock)
-    if (isOriginalWarehouse) {
-      // For original warehouse: countInStock was reduced by ALL damages globally
-      // We need to add back damages from OTHER locations (they shouldn't affect this warehouse)
-      const otherLocationDamages = await ProductDamage.find({
-        product: productId,
-        warehouse: { $ne: locationId },
-        status: 'approved',
-        isActive: { $ne: false }
-      });
-      
-      let totalOtherDamages = 0;
-      for (const damage of otherLocationDamages) {
-        totalOtherDamages += damage.quantity || 0;
-      }
-      // Add back damages from other locations since they incorrectly reduced countInStock
-      availableStock += totalOtherDamages;
-      console.log(`Debug - Added back damages from other locations: ${totalOtherDamages}, Total: ${availableStock}`);
-      
-      // Now subtract damages at THIS specific warehouse
-      const thisLocationDamages = await ProductDamage.find({
-        product: productId,
-        warehouse: locationId,
-        status: 'approved',
-        isActive: { $ne: false }
-      });
-      
-      let totalThisLocationDamages = 0;
-      for (const damage of thisLocationDamages) {
-        totalThisLocationDamages += damage.quantity || 0;
-      }
-      availableStock -= totalThisLocationDamages;
-      console.log(`Debug - Subtracted damages at this warehouse (${locationId}): ${totalThisLocationDamages}, Total: ${availableStock}`);
-    } else {
-      // For non-original warehouses, subtract ONLY location-specific damages from transferred stock
-      const locationDamages = await ProductDamage.find({
-        product: productId,
-        warehouse: locationId,
-        status: 'approved',
-        isActive: { $ne: false }
-      });
-      
-      let totalLocationDamages = 0;
-      for (const damage of locationDamages) {
-        totalLocationDamages += damage.quantity || 0;
-      }
-      availableStock -= totalLocationDamages;
-      console.log(`Debug - Subtracted location damages at warehouse ${locationId}: ${totalLocationDamages}, Total: ${availableStock}`);
+    // Step 4: Subtract location-specific damages at this warehouse
+    const locationDamages = await ProductDamage.find({
+      product: productId,
+      warehouse: locationId,
+      status: 'approved',
+      isActive: { $ne: false }
+    });
+    
+    let totalLocationDamages = 0;
+    for (const damage of locationDamages) {
+      totalLocationDamages += damage.quantity || 0;
     }
+    availableStock -= totalLocationDamages;
+    
+    // Step 5: Subtract location-specific sales from this warehouse
+    const salesAtLocation = await Sales.find({
+      warehouse: locationId,
+      isActive: true
+    });
+    
+    let totalSalesAtLocation = 0;
+    for (const sale of salesAtLocation) {
+      const saleItem = sale.items.find(
+        item => {
+          if (!item.product) return false;
+          const itemProductId = item.product.toString ? item.product.toString() : item.product;
+          const targetProductId = productId.toString ? productId.toString() : productId;
+          return itemProductId === targetProductId;
+        }
+      );
+      if (saleItem) {
+        totalSalesAtLocation += saleItem.quantity || 0;
+      }
+    }
+    availableStock -= totalSalesAtLocation;
+    
   } else if (locationType === 'shop') {
-    // Shop - calculate stock from transfers only (shops don't have direct purchases)
+    // Shops don't have direct purchases - only transfers
     
-    // Step 1: Get all incoming transfers to this shop
+    // Step 1: Add incoming transfers TO this shop
     const incomingTransfers = await StockTransfer.find({
       destinationType: 'shop',
-      destinationId: locationId
+      destinationId: locationId,
+      status: 'completed'
     });
     
     for (const transfer of incomingTransfers) {
       const transferredItem = transfer.items.find(
-        i => i.product && i.product.toString() === productId.toString()
+        i => {
+          if (!i.product) return false;
+          const itemProductId = i.product.toString ? i.product.toString() : i.product;
+          const targetProductId = productId.toString ? productId.toString() : productId;
+          return itemProductId === targetProductId;
+        }
       );
-      
       if (transferredItem) {
-        availableStock += transferredItem.quantity;
+        availableStock += transferredItem.quantity || 0;
       }
     }
     
-    // Step 2: Subtract outgoing transfers from this shop
+    // Step 2: Subtract outgoing transfers FROM this shop
     const outgoingTransfers = await StockTransfer.find({
       sourceType: 'shop',
-      sourceId: locationId
+      sourceId: locationId,
+      status: 'completed'
     });
     
     for (const transfer of outgoingTransfers) {
       const transferredItem = transfer.items.find(
-        i => i.product && i.product.toString() === productId.toString()
+        i => {
+          if (!i.product) return false;
+          const itemProductId = i.product.toString ? i.product.toString() : i.product;
+          const targetProductId = productId.toString ? productId.toString() : productId;
+          return itemProductId === targetProductId;
+        }
       );
-      
       if (transferredItem) {
-        availableStock -= transferredItem.quantity;
+        availableStock -= transferredItem.quantity || 0;
       }
     }
     
@@ -165,11 +171,32 @@ const calculateAvailableStock = async (productId, locationType, locationId) => {
       totalLocationDamages += damage.quantity || 0;
     }
     availableStock -= totalLocationDamages;
-    console.log(`Debug - Subtracted location damages at shop: ${totalLocationDamages}, Total: ${availableStock}`);
+    
+    // Step 4: Subtract location-specific sales from this shop
+    const salesAtLocation = await Sales.find({
+      shop: locationId,
+      isActive: true
+    });
+    
+    let totalSalesAtLocation = 0;
+    for (const sale of salesAtLocation) {
+      const saleItem = sale.items.find(
+        item => {
+          if (!item.product) return false;
+          const itemProductId = item.product.toString ? item.product.toString() : item.product;
+          const targetProductId = productId.toString ? productId.toString() : productId;
+          return itemProductId === targetProductId;
+        }
+      );
+      if (saleItem) {
+        totalSalesAtLocation += saleItem.quantity || 0;
+      }
+    }
+    availableStock -= totalSalesAtLocation;
   }
   
-  console.log(`Debug - Final calculated stock for ${locationType} ${locationId}: ${availableStock}`);
-  return availableStock;
+  // Ensure stock doesn't go negative (shouldn't happen, but safety check)
+  return Math.max(0, availableStock);
 };
 
 // Helper function to find all locations where a product has stock
@@ -1125,15 +1152,16 @@ const getStockTransfersByLocation = async (req, res) => {
         }))
         .filter(t => t.items.length > 0);
 
-      // Attach damagedAtLocation on purchase items too
+      // Attach availableAtLocation, damagedAtLocation, and soldAtLocation on purchase items too
       if (purchasesData && purchasesData.length > 0) {
         for (const p of purchasesData) {
           if (Array.isArray(p.items)) {
             p.items = p.items.map(it => {
               const pid = it && it.product ? (it.product._id ? it.product._id.toString() : it.product.toString()) : null;
+              const availableAtLocation = pid ? (productIdToAvailable.get(pid) || 0) : 0;
               const damagedAtLocation = pid ? (productIdToDamageAtLocation.get(pid) || 0) : 0;
               const soldAtLocation = pid ? (productIdToSoldAtLocation.get(pid) || 0) : 0;
-              return { ...it, damagedAtLocation, soldAtLocation };
+              return { ...it, availableAtLocation, damagedAtLocation, soldAtLocation };
             });
           }
         }
