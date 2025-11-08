@@ -1112,17 +1112,27 @@ const getStockTransfersByLocation = async (req, res) => {
       }
 
       // Aggregate location-specific sold quantities for these products (sales)
-      let salesMatch = { isActive: true };
-      if (locationType === 'warehouse') {
-        salesMatch.warehouse = new mongoose.Types.ObjectId(locationId);
-      } else {
-        salesMatch.shop = new mongoose.Types.ObjectId(locationId);
-      }
+      // IMPORTANT: Sales items can have warehouse at both document level AND item level
+      // We need to match items where either the document warehouse OR item warehouse matches the location
       const salesAgg = productObjectIds.length > 0
         ? await Sales.aggregate([
-            { $match: salesMatch },
+            { $match: { isActive: true } },
             { $unwind: '$items' },
-            { $match: { 'items.product': { $in: productObjectIds } } },
+            {
+              $match: {
+                'items.product': { $in: productObjectIds },
+                // Match items where either document-level or item-level warehouse/shop matches
+                $or: locationType === 'warehouse'
+                  ? [
+                      { warehouse: new mongoose.Types.ObjectId(locationId) },
+                      { 'items.warehouse': new mongoose.Types.ObjectId(locationId) }
+                    ]
+                  : [
+                      { shop: new mongoose.Types.ObjectId(locationId) },
+                      // Note: items might not have shop field, but document has shop
+                    ]
+              }
+            },
             { $group: { _id: '$items.product', qty: { $sum: '$items.quantity' } } }
           ])
         : [];
