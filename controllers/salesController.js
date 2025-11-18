@@ -1,7 +1,10 @@
+const mongoose = require('mongoose');
 const Sales = require('../models/salesModel');
 const Product = require('../models/productModel');
 const SalesJourney = require('../models/salesJourneyModel');
 const StockTransfer = require('../models/stockTransferModel');
+const Warehouse = require('../models/warehouseModel');
+const Shop = require('../models/shopModel');
 
 // Helper: compute available quantity of a product at a specific warehouse
 async function getAvailableQuantityInWarehouse(productId, warehouseId) {
@@ -257,6 +260,177 @@ const getSales = async (req, res) => {
       totalPages: Math.ceil(totalSales / limitNum),
       currentPage: pageNum,
       totalSales,
+      data: sales,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Get sales filtered by warehouse or shop
+// @route   GET /api/sales/by-location/:locationType/:locationId
+// @access  Private
+const getSalesByLocation = async (req, res) => {
+  try {
+    const { locationType, locationId } = req.params;
+    const {
+      page = 1,
+      limit = 10,
+      startDate,
+      endDate,
+      customer,
+      paymentStatus,
+      minGrandTotal,
+      maxGrandTotal,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.query;
+
+    if (!['warehouse', 'shop'].includes(locationType)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Location type must be either "warehouse" or "shop"',
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(locationId)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid location ID format',
+      });
+    }
+
+    const LocationModel = locationType === 'warehouse' ? Warehouse : Shop;
+    const locationDoc = await LocationModel.findById(locationId).select('name code address');
+
+    if (!locationDoc) {
+      return res.status(404).json({
+        status: 'fail',
+        message: `${locationType} not found`,
+      });
+    }
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.max(parseInt(limit, 10) || 10, 1);
+    const skip = (pageNum - 1) * limitNum;
+
+    const filter = {
+      isActive: true,
+      [locationType]: locationId,
+    };
+
+    if (customer && mongoose.Types.ObjectId.isValid(customer)) {
+      filter.customer = customer;
+    }
+
+    if (paymentStatus) {
+      filter.paymentStatus = paymentStatus;
+    }
+
+    const start = startDate ? new Date(startDate) : null;
+    const end = endDate ? new Date(endDate) : null;
+    if ((start && !isNaN(start)) || (end && !isNaN(end))) {
+      filter.createdAt = {};
+      if (start && !isNaN(start)) filter.createdAt.$gte = start;
+      if (end && !isNaN(end)) filter.createdAt.$lte = end;
+      if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
+    }
+
+    const minTotal = typeof minGrandTotal !== 'undefined' ? Number(minGrandTotal) : null;
+    const maxTotal = typeof maxGrandTotal !== 'undefined' ? Number(maxGrandTotal) : null;
+    if ((minTotal !== null && !Number.isNaN(minTotal)) || (maxTotal !== null && !Number.isNaN(maxTotal))) {
+      filter.grandTotal = {};
+      if (minTotal !== null && !Number.isNaN(minTotal)) filter.grandTotal.$gte = minTotal;
+      if (maxTotal !== null && !Number.isNaN(maxTotal)) filter.grandTotal.$lte = maxTotal;
+      if (Object.keys(filter.grandTotal).length === 0) delete filter.grandTotal;
+    }
+
+    const sortableFields = ['createdAt', 'grandTotal', 'totalAmount', 'invoiceNumber'];
+    const sortKey = sortableFields.includes(sortBy) ? sortBy : 'createdAt';
+    const sortDirection = sortOrder === 'asc' ? 1 : -1;
+    const sort = { [sortKey]: sortDirection };
+
+    const totalSales = await Sales.countDocuments(filter);
+
+    const sales = await Sales.find(filter)
+      .populate('customer', 'name email phoneNumber')
+      .populate('items.product', 'name image barcode')
+      .populate('shop', 'name code')
+      .populate('warehouse', 'name code')
+      .sort(sort)
+      .skip(skip)
+      .limit(limitNum);
+
+    const aggregateMatch = {
+      isActive: true,
+      [locationType]: new mongoose.Types.ObjectId(locationId),
+    };
+
+    if (filter.customer) {
+      aggregateMatch.customer = new mongoose.Types.ObjectId(filter.customer);
+    }
+    if (filter.paymentStatus) {
+      aggregateMatch.paymentStatus = filter.paymentStatus;
+    }
+    if (filter.createdAt) {
+      aggregateMatch.createdAt = filter.createdAt;
+    }
+    if (filter.grandTotal) {
+      aggregateMatch.grandTotal = filter.grandTotal;
+    }
+
+    const summaryAggregation = await Sales.aggregate([
+      { $match: aggregateMatch },
+      {
+        $group: {
+          _id: null,
+          totalAmount: { $sum: '$totalAmount' },
+          totalDiscount: { $sum: '$discount' },
+          totalTax: { $sum: '$tax' },
+          totalGrandTotal: { $sum: '$grandTotal' },
+          averageGrandTotal: { $avg: '$grandTotal' },
+          totalSales: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const paymentStatusBreakdown = await Sales.aggregate([
+      { $match: aggregateMatch },
+      {
+        $group: {
+          _id: '$paymentStatus',
+          count: { $sum: 1 },
+          totalGrandTotal: { $sum: '$grandTotal' },
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
+    const summary = summaryAggregation[0] || {
+      totalAmount: 0,
+      totalDiscount: 0,
+      totalTax: 0,
+      totalGrandTotal: 0,
+      averageGrandTotal: 0,
+      totalSales: 0,
+    };
+
+    res.json({
+      status: 'success',
+      results: sales.length,
+      totalPages: totalSales > 0 ? Math.ceil(totalSales / limitNum) : 0,
+      currentPage: pageNum,
+      totalSales,
+      location: {
+        type: locationType,
+        id: locationId,
+        name: locationDoc.name,
+        code: locationDoc.code || null,
+      },
+     
       data: sales,
     });
   } catch (error) {
@@ -959,6 +1133,7 @@ const getSalesByCustomerId = async (req, res) => {
 module.exports = {
   createSale,
   getSales,
+  getSalesByLocation,
   getSaleById,
   updateSale,
   deleteSale,

@@ -4,6 +4,7 @@ const { protect, admin } = require('../middlewares/authMiddleware');
 const {
   createSale,
   getSales,
+  getSalesByLocation,
   getSaleById,
   updateSale,
   deleteSale,
@@ -14,6 +15,9 @@ const {
 router.route('/')
   .post(protect, createSale)
   .get(protect, getSales);
+
+router.route('/by-location/:locationType/:locationId')
+  .get(protect, getSalesByLocation);
 
 router.route('/by-customer')
   .get(protect, getSalesByCustomer);
