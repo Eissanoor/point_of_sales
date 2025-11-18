@@ -148,8 +148,8 @@ productReturnSchema.index({ status: 1, createdAt: -1 });
 productReturnSchema.index({ returnNumber: 1 });
 productReturnSchema.index({ originalSale: 1 });
 
-// Pre-save middleware to generate return number
-productReturnSchema.pre('save', async function(next) {
+// Pre-validate middleware to generate return number before required validation runs
+productReturnSchema.pre('validate', async function(next) {
   if (this.isNew && !this.returnNumber) {
     const date = new Date();
     const year = date.getFullYear().toString().slice(-2);

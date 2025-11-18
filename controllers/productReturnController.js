@@ -1,6 +1,7 @@
 const ProductReturn = require('../models/productReturnModel');
 const Product = require('../models/productModel');
 const Sales = require('../models/salesModel');
+const SalesJourney = require('../models/salesJourneyModel');
 const Customer = require('../models/customerModel');
 const ProductJourney = require('../models/productJourneyModel');
 const Warehouse = require('../models/warehouseModel');
@@ -252,6 +253,7 @@ const createProductReturn = async (req, res) => {
     }
 
     // Validate original sale if provided
+    let linkedSale = null;
     if (originalSale) {
       const trimmedSaleId = originalSale.toString().trim();
       if (!trimmedSaleId.match(/^[0-9a-fA-F]{24}$/)) {
@@ -260,8 +262,8 @@ const createProductReturn = async (req, res) => {
           message: 'Invalid original sale ID format',
         });
       }
-      const saleExists = await Sales.findById(trimmedSaleId);
-      if (!saleExists) {
+      linkedSale = await Sales.findById(trimmedSaleId);
+      if (!linkedSale) {
         return res.status(404).json({
           status: 'fail',
           message: 'Original sale not found',
@@ -272,6 +274,7 @@ const createProductReturn = async (req, res) => {
     // Validate products and calculate refund amounts
     let totalRefundAmount = 0;
     const validatedProducts = [];
+    const productDetailMap = new Map();
 
     // Process each product with its quantity, returnReason, and condition
     for (let i = 0; i < productsArray.length; i++) {
@@ -380,6 +383,9 @@ const createProductReturn = async (req, res) => {
         refundAmount,
         restockable: trimmedCondition === 'new' || trimmedCondition === 'used',
       });
+      productDetailMap.set(trimmedProductId, {
+        name: productExists.name || 'Unknown Product',
+      });
 
       totalRefundAmount += refundAmount;
     }
@@ -427,6 +433,33 @@ const createProductReturn = async (req, res) => {
           status: 'fail',
           message: 'Shop not found',
         });
+      }
+    }
+
+    // Before creating return, ensure sale (if provided) contains the products/quantities being returned
+    if (linkedSale) {
+      const saleItemMap = new Map();
+      for (const item of linkedSale.items || []) {
+        if (item && item.product) {
+          saleItemMap.set(item.product.toString(), item);
+        }
+      }
+
+      for (const productReturn of validatedProducts) {
+        const saleItem = saleItemMap.get(productReturn.product);
+        const productName = productDetailMap.get(productReturn.product)?.name || productReturn.product;
+        if (!saleItem) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Original sale does not include product ${productName}`,
+          });
+        }
+        if (Number(saleItem.quantity || 0) < Number(productReturn.quantity || 0)) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Cannot return ${productReturn.quantity} units of ${productName}. Sale only contains ${saleItem.quantity}.`,
+          });
+        }
       }
     }
 
@@ -497,6 +530,72 @@ const createProductReturn = async (req, res) => {
             }] : []),
           ],
           notes: `Return processed: ${productReturn.returnReason}`,
+        });
+      }
+    }
+
+    // If linked to a sale, adjust the sale quantities and totals
+    if (linkedSale) {
+      const saleChanges = [];
+      for (const productReturn of validatedProducts) {
+        const saleItem = (linkedSale.items || []).find(
+          item => item.product && item.product.toString() === productReturn.product
+        );
+        if (!saleItem) {
+          continue; // Shouldn't happen due to earlier validation, but guard anyway
+        }
+        const prevQuantity = Number(saleItem.quantity || 0);
+        const newQuantity = Math.max(0, prevQuantity - Number(productReturn.quantity || 0));
+        if (newQuantity !== prevQuantity) {
+          saleChanges.push({
+            field: `item:${saleItem.product.toString()}`,
+            oldValue: prevQuantity,
+            newValue: newQuantity,
+          });
+        }
+        saleItem.quantity = newQuantity;
+        saleItem.total = Number(saleItem.price || 0) * Number(saleItem.quantity || 0);
+      }
+
+      // Remove any zero-quantity items
+      linkedSale.items = (linkedSale.items || []).filter(item => Number(item.quantity || 0) > 0);
+
+      const previousTotalAmount = Number(linkedSale.totalAmount || 0);
+      const previousGrandTotal = Number(linkedSale.grandTotal || 0);
+
+      linkedSale.totalAmount = (linkedSale.items || []).reduce(
+        (sum, item) => sum + Number(item.total || 0),
+        0
+      );
+      linkedSale.grandTotal =
+        Number(linkedSale.totalAmount || 0) -
+        Number(linkedSale.discount || 0) +
+        Number(linkedSale.tax || 0);
+
+      if (previousTotalAmount !== linkedSale.totalAmount) {
+        saleChanges.push({
+          field: 'totalAmount',
+          oldValue: previousTotalAmount,
+          newValue: linkedSale.totalAmount,
+        });
+      }
+
+      if (previousGrandTotal !== linkedSale.grandTotal) {
+        saleChanges.push({
+          field: 'grandTotal',
+          oldValue: previousGrandTotal,
+          newValue: linkedSale.grandTotal,
+        });
+      }
+
+      if (saleChanges.length > 0) {
+        await linkedSale.save();
+        await SalesJourney.create({
+          sale: linkedSale._id,
+          user: req.user._id,
+          action: 'return_adjustment',
+          changes: saleChanges,
+          notes: `Return ${returnRecord.returnNumber || returnRecord._id} processed`,
         });
       }
     }
