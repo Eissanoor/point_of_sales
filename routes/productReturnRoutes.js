@@ -35,7 +35,7 @@ router.get('/:id', protect, admin, getProductReturnById);
 // @route   POST /api/product-returns
 // @desc    Create new product return (auto-processed)
 // @access  Private
-router.post('/', protect, uploadMultiple, createProductReturn);
+router.post('/', protect,  createProductReturn);
 
 // @route   PUT /api/product-returns/:id
 // @desc    Update product return (add notes only)

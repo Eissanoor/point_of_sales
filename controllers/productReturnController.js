@@ -124,18 +124,94 @@ const createProductReturn = async (req, res) => {
       customer,
       originalSale,
       products,
+      productQuantities,
       returnReason,
+      returnReasons,
+      condition,
+      conditions,
       customerNotes,
       warehouse,
       shop,
       refundMethod
     } = req.body;
 
-    // Validate required fields
-    if (!customer || !products || !Array.isArray(products) || products.length === 0) {
+    // Validate required fields - support both old format (products array) and new format (products + productQuantities arrays)
+    let productsArray = [];
+    let quantitiesArray = [];
+    let returnReasonsArray = [];
+    let conditionsArray = [];
+
+    // Check if new format is being used (products and productQuantities as separate arrays)
+    if (products && Array.isArray(products) && productQuantities && Array.isArray(productQuantities)) {
+      // New format: products and productQuantities as separate arrays
+      if (products.length === 0 || productQuantities.length === 0) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Products and productQuantities arrays cannot be empty',
+        });
+      }
+      if (products.length !== productQuantities.length) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Products and productQuantities arrays must have the same length',
+        });
+      }
+      productsArray = products;
+      quantitiesArray = productQuantities;
+      
+      // Handle returnReasons and conditions as arrays or single values
+      if (returnReasons && Array.isArray(returnReasons)) {
+        if (returnReasons.length !== products.length) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'returnReasons array must have the same length as products array',
+          });
+        }
+        returnReasonsArray = returnReasons;
+      } else if (returnReason) {
+        // Single returnReason applied to all products
+        returnReasonsArray = new Array(products.length).fill(returnReason);
+      } else {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'returnReason or returnReasons array is required',
+        });
+      }
+
+      if (conditions && Array.isArray(conditions)) {
+        if (conditions.length !== products.length) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'conditions array must have the same length as products array',
+          });
+        }
+        conditionsArray = conditions;
+      } else if (condition) {
+        // Single condition applied to all products
+        conditionsArray = new Array(products.length).fill(condition);
+      } else {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'condition or conditions array is required',
+        });
+      }
+    } else if (products && Array.isArray(products) && products.length > 0) {
+      // Old format: products as array of objects
+      productsArray = products.map(p => p.product);
+      quantitiesArray = products.map(p => p.quantity);
+      returnReasonsArray = products.map(p => p.returnReason);
+      conditionsArray = products.map(p => p.condition);
+    } else {
       return res.status(400).json({
         status: 'fail',
-        message: 'Customer and products are required',
+        message: 'Customer and products are required. Use either products array (old format) or products + productQuantities arrays (new format)',
+      });
+    }
+
+    if (!customer) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Customer is required',
       });
     }
 
@@ -197,13 +273,17 @@ const createProductReturn = async (req, res) => {
     let totalRefundAmount = 0;
     const validatedProducts = [];
 
-    for (const productReturn of products) {
-      const { product, quantity, returnReason: productReturnReason, condition } = productReturn;
+    // Process each product with its quantity, returnReason, and condition
+    for (let i = 0; i < productsArray.length; i++) {
+      const product = productsArray[i];
+      const quantity = quantitiesArray[i];
+      const productReturnReason = returnReasonsArray[i];
+      const productCondition = conditionsArray[i];
 
-      if (!product || !quantity || !productReturnReason || !condition) {
+      if (!product || !quantity || !productReturnReason || !productCondition) {
         return res.status(400).json({
           status: 'fail',
-          message: 'Product, quantity, return reason, and condition are required for each item',
+          message: `Product, quantity, return reason, and condition are required for item at index ${i}`,
         });
       }
 
@@ -212,13 +292,13 @@ const createProductReturn = async (req, res) => {
       if (!trimmedProductId.match(/^[0-9a-fA-F]{24}$/)) {
         return res.status(400).json({
           status: 'fail',
-          message: 'Invalid product ID format',
+          message: `Invalid product ID format at index ${i}`,
         });
       }
 
       // Trim and validate enum values for product
       const trimmedProductReturnReason = productReturnReason.toString().trim();
-      const trimmedCondition = condition.toString().trim();
+      const trimmedCondition = productCondition.toString().trim();
       
       const validReturnReasons = [
         'defective_product',
@@ -263,7 +343,16 @@ const createProductReturn = async (req, res) => {
 
       // Calculate refund amount based on condition
       let refundAmount = 0;
-      const originalPrice = productReturn.originalPrice || productExists.saleRate || 0;
+      // Use product's saleRate as originalPrice (old format may have provided originalPrice in product object)
+      let originalPrice = productExists.saleRate || 0;
+      // Check if old format was used (products array contains objects with originalPrice)
+      if (products && Array.isArray(products) && products.length > 0 && typeof products[0] === 'object' && 'originalPrice' in products[0]) {
+        // Old format: products is array of objects, check if originalPrice was provided
+        const oldFormatProduct = products.find(p => p.product && p.product.toString().trim() === trimmedProductId);
+        if (oldFormatProduct && oldFormatProduct.originalPrice) {
+          originalPrice = oldFormatProduct.originalPrice;
+        }
+      }
       
       switch (trimmedCondition) {
         case 'new':
@@ -434,12 +523,26 @@ const createProductReturn = async (req, res) => {
   }
 };
 
-// @desc    Update product return (add notes only)
+// @desc    Update product return
 // @route   PUT /api/product-returns/:id
 // @access  Private/Admin
 const updateProductReturn = async (req, res) => {
   try {
-    const { adminNotes } = req.body;
+    const {
+      adminNotes,
+      products,
+      productQuantities,
+      returnReason,
+      returnReasons,
+      condition,
+      conditions,
+      customerNotes,
+      warehouse,
+      shop,
+      refundMethod,
+      status,
+      refundStatus
+    } = req.body;
     
     const returnRecord = await ProductReturn.findById(req.params.id);
     if (!returnRecord) {
@@ -448,11 +551,394 @@ const updateProductReturn = async (req, res) => {
         message: 'Product return record not found',
       });
     }
-    
-    if (adminNotes) {
-      returnRecord.adminNotes = adminNotes;
-      await returnRecord.save();
+
+    // Store old products for stock reversal if needed
+    const oldProducts = returnRecord.products;
+    const wasProcessed = returnRecord.status === 'processed' || returnRecord.status === 'refunded';
+    let productsUpdated = false;
+
+    // Handle products update with new array format
+    if (products && productQuantities) {
+      productsUpdated = true;
+      
+      // Validate required fields - support both old format (products array) and new format (products + productQuantities arrays)
+      let productsArray = [];
+      let quantitiesArray = [];
+      let returnReasonsArray = [];
+      let conditionsArray = [];
+
+      // Check if new format is being used (products and productQuantities as separate arrays)
+      if (products && Array.isArray(products) && productQuantities && Array.isArray(productQuantities)) {
+        // New format: products and productQuantities as separate arrays
+        if (products.length === 0 || productQuantities.length === 0) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'Products and productQuantities arrays cannot be empty',
+          });
+        }
+        if (products.length !== productQuantities.length) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'Products and productQuantities arrays must have the same length',
+          });
+        }
+        productsArray = products;
+        quantitiesArray = productQuantities;
+        
+        // Handle returnReasons and conditions as arrays or single values
+        if (returnReasons && Array.isArray(returnReasons)) {
+          if (returnReasons.length !== products.length) {
+            return res.status(400).json({
+              status: 'fail',
+              message: 'returnReasons array must have the same length as products array',
+            });
+          }
+          returnReasonsArray = returnReasons;
+        } else if (returnReason) {
+          // Single returnReason applied to all products
+          returnReasonsArray = new Array(products.length).fill(returnReason);
+        } else {
+          // Use existing returnReasons from old products if available
+          returnReasonsArray = oldProducts.map(p => p.returnReason);
+        }
+
+        if (conditions && Array.isArray(conditions)) {
+          if (conditions.length !== products.length) {
+            return res.status(400).json({
+              status: 'fail',
+              message: 'conditions array must have the same length as products array',
+            });
+          }
+          conditionsArray = conditions;
+        } else if (condition) {
+          // Single condition applied to all products
+          conditionsArray = new Array(products.length).fill(condition);
+        } else {
+          // Use existing conditions from old products if available
+          conditionsArray = oldProducts.map(p => p.condition);
+        }
+      } else if (products && Array.isArray(products) && products.length > 0) {
+        // Old format: products as array of objects
+        productsArray = products.map(p => p.product);
+        quantitiesArray = products.map(p => p.quantity);
+        returnReasonsArray = products.map(p => p.returnReason);
+        conditionsArray = products.map(p => p.condition);
+      } else {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid products format. Use either products array (old format) or products + productQuantities arrays (new format)',
+        });
+      }
+
+      // Validate products and calculate refund amounts
+      let totalRefundAmount = 0;
+      const validatedProducts = [];
+
+      // Process each product with its quantity, returnReason, and condition
+      for (let i = 0; i < productsArray.length; i++) {
+        const product = productsArray[i];
+        const quantity = quantitiesArray[i];
+        const productReturnReason = returnReasonsArray[i];
+        const productCondition = conditionsArray[i];
+
+        if (!product || !quantity || !productReturnReason || !productCondition) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Product, quantity, return reason, and condition are required for item at index ${i}`,
+          });
+        }
+
+        // Trim and validate product ID
+        const trimmedProductId = product.toString().trim();
+        if (!trimmedProductId.match(/^[0-9a-fA-F]{24}$/)) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Invalid product ID format at index ${i}`,
+          });
+        }
+
+        // Trim and validate enum values for product
+        const trimmedProductReturnReason = productReturnReason.toString().trim();
+        const trimmedCondition = productCondition.toString().trim();
+        
+        const validReturnReasons = [
+          'defective_product',
+          'wrong_item',
+          'damaged_during_shipping',
+          'not_as_described',
+          'customer_changed_mind',
+          'expired_product',
+          'quality_issue',
+          'other'
+        ];
+        
+        const validConditions = [
+          'new',
+          'used',
+          'damaged',
+          'defective'
+        ];
+
+        if (!validReturnReasons.includes(trimmedProductReturnReason)) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Invalid return reason at index ${i}. Valid options: ${validReturnReasons.join(', ')}`,
+          });
+        }
+
+        if (!validConditions.includes(trimmedCondition)) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Invalid condition at index ${i}. Valid options: ${validConditions.join(', ')}`,
+          });
+        }
+
+        // Check if product exists
+        const productExists = await Product.findById(trimmedProductId);
+        if (!productExists) {
+          return res.status(404).json({
+            status: 'fail',
+            message: `Product ${trimmedProductId} not found at index ${i}`,
+          });
+        }
+
+        // Calculate refund amount based on condition
+        let refundAmount = 0;
+        // Use product's saleRate as originalPrice (old format may have provided originalPrice in product object)
+        let originalPrice = productExists.saleRate || 0;
+        // Check if old format was used (products array contains objects with originalPrice)
+        if (products && Array.isArray(products) && products.length > 0 && typeof products[0] === 'object' && 'originalPrice' in products[0]) {
+          // Old format: products is array of objects, check if originalPrice was provided
+          const oldFormatProduct = products.find(p => p.product && p.product.toString().trim() === trimmedProductId);
+          if (oldFormatProduct && oldFormatProduct.originalPrice) {
+            originalPrice = oldFormatProduct.originalPrice;
+          }
+        }
+        
+        switch (trimmedCondition) {
+          case 'new':
+            refundAmount = originalPrice * parseInt(quantity);
+            break;
+          case 'used':
+            refundAmount = originalPrice * parseInt(quantity) * 0.8; // 80% refund
+            break;
+          case 'damaged':
+            refundAmount = originalPrice * parseInt(quantity) * 0.5; // 50% refund
+            break;
+          case 'defective':
+            refundAmount = originalPrice * parseInt(quantity); // Full refund
+            break;
+          default:
+            refundAmount = 0;
+        }
+
+        validatedProducts.push({
+          product: trimmedProductId,
+          quantity: parseInt(quantity),
+          originalPrice,
+          returnReason: trimmedProductReturnReason,
+          condition: trimmedCondition,
+          refundAmount,
+          restockable: trimmedCondition === 'new' || trimmedCondition === 'used',
+        });
+
+        totalRefundAmount += refundAmount;
+      }
+
+      // If return was already processed, reverse old stock changes first
+      if (wasProcessed) {
+        for (const oldProductReturn of oldProducts) {
+          const product = await Product.findById(oldProductReturn.product);
+          if (product) {
+            // Reverse returned quantity
+            product.returnedQuantity = Math.max(0, (product.returnedQuantity || 0) - oldProductReturn.quantity);
+            
+            // If was restocked, remove from available stock
+            if (oldProductReturn.restockable) {
+              product.countInStock = Math.max(0, (product.countInStock || 0) - oldProductReturn.quantity);
+            }
+            
+            await product.save();
+
+            // Create product journey record
+            await ProductJourney.create({
+              product: product._id,
+              user: req.user._id,
+              action: 'return_updated_reversed',
+              changes: [
+                {
+                  field: 'returnedQuantity',
+                  oldValue: product.returnedQuantity + oldProductReturn.quantity,
+                  newValue: product.returnedQuantity,
+                },
+                ...(oldProductReturn.restockable ? [{
+                  field: 'countInStock',
+                  oldValue: product.countInStock + oldProductReturn.quantity,
+                  newValue: product.countInStock,
+                }] : []),
+              ],
+              notes: 'Return updated - old stock changes reversed',
+            });
+          }
+        }
+      }
+
+      // Update products and totalRefundAmount
+      returnRecord.products = validatedProducts;
+      returnRecord.totalRefundAmount = totalRefundAmount;
+
+      // Apply new stock changes if was processed
+      if (wasProcessed) {
+        for (const productReturn of validatedProducts) {
+          const product = await Product.findById(productReturn.product);
+          if (product) {
+            // Update returned quantity
+            product.returnedQuantity = (product.returnedQuantity || 0) + productReturn.quantity;
+            
+            // If restockable, add back to available stock
+            if (productReturn.restockable) {
+              product.countInStock = (product.countInStock || 0) + productReturn.quantity;
+            }
+            
+            await product.save();
+
+            // Create product journey record
+            await ProductJourney.create({
+              product: product._id,
+              user: req.user._id,
+              action: 'return_updated_applied',
+              changes: [
+                {
+                  field: 'returnedQuantity',
+                  oldValue: product.returnedQuantity - productReturn.quantity,
+                  newValue: product.returnedQuantity,
+                },
+                ...(productReturn.restockable ? [{
+                  field: 'countInStock',
+                  oldValue: product.countInStock - productReturn.quantity,
+                  newValue: product.countInStock,
+                }] : []),
+              ],
+              notes: `Return updated: ${productReturn.returnReason}`,
+            });
+          }
+        }
+      }
     }
+
+    // Update other fields
+    if (adminNotes !== undefined) {
+      returnRecord.adminNotes = adminNotes;
+    }
+    
+    if (customerNotes !== undefined) {
+      returnRecord.customerNotes = customerNotes;
+    }
+
+    if (returnReason !== undefined && !productsUpdated) {
+      returnRecord.returnReason = returnReason;
+    }
+
+    // Validate and update warehouse/shop
+    if (warehouse !== undefined || shop !== undefined) {
+      if (warehouse && shop) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Cannot specify both warehouse and shop',
+        });
+      }
+
+      if (warehouse) {
+        const trimmedWarehouseId = warehouse.toString().trim();
+        if (!trimmedWarehouseId.match(/^[0-9a-fA-F]{24}$/)) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'Invalid warehouse ID format',
+          });
+        }
+        const warehouseExists = await Warehouse.findById(trimmedWarehouseId);
+        if (!warehouseExists) {
+          return res.status(404).json({
+            status: 'fail',
+            message: 'Warehouse not found',
+          });
+        }
+        returnRecord.warehouse = trimmedWarehouseId;
+        returnRecord.shop = null;
+      }
+
+      if (shop) {
+        const trimmedShopId = shop.toString().trim();
+        if (!trimmedShopId.match(/^[0-9a-fA-F]{24}$/)) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'Invalid shop ID format',
+          });
+        }
+        const shopExists = await Shop.findById(trimmedShopId);
+        if (!shopExists) {
+          return res.status(404).json({
+            status: 'fail',
+            message: 'Shop not found',
+          });
+        }
+        returnRecord.shop = trimmedShopId;
+        returnRecord.warehouse = null;
+      }
+    }
+
+    // Validate and update refund method
+    if (refundMethod !== undefined) {
+      const trimmedRefundMethod = refundMethod.toString().trim();
+      const validRefundMethods = [
+        'cash',
+        'credit',
+        'bank_transfer',
+        'store_credit'
+      ];
+      if (!validRefundMethods.includes(trimmedRefundMethod)) {
+        return res.status(400).json({
+          status: 'fail',
+          message: `Invalid refund method. Valid options: ${validRefundMethods.join(', ')}`,
+        });
+      }
+      returnRecord.refundMethod = trimmedRefundMethod;
+    }
+
+    // Validate and update status
+    if (status !== undefined) {
+      const validStatuses = ['pending', 'approved', 'rejected', 'processed', 'refunded'];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({
+          status: 'fail',
+          message: `Invalid status. Valid options: ${validStatuses.join(', ')}`,
+        });
+      }
+      returnRecord.status = status;
+      
+      if (status === 'processed' && !returnRecord.processedAt) {
+        returnRecord.processedAt = new Date();
+        returnRecord.processedBy = req.user._id;
+      }
+    }
+
+    // Validate and update refund status
+    if (refundStatus !== undefined) {
+      const validRefundStatuses = ['pending', 'processed', 'completed'];
+      if (!validRefundStatuses.includes(refundStatus)) {
+        return res.status(400).json({
+          status: 'fail',
+          message: `Invalid refund status. Valid options: ${validRefundStatuses.join(', ')}`,
+        });
+      }
+      returnRecord.refundStatus = refundStatus;
+      
+      if (refundStatus === 'completed' && !returnRecord.refundedAt) {
+        returnRecord.refundedAt = new Date();
+      }
+    }
+
+    await returnRecord.save();
 
     // Populate the response
     const populatedReturn = await ProductReturn.findById(returnRecord._id)
