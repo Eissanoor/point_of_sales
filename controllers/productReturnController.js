@@ -346,8 +346,19 @@ const createProductReturn = async (req, res) => {
 
       // Calculate refund amount based on condition
       let refundAmount = 0;
-      // Use product's saleRate as originalPrice (old format may have provided originalPrice in product object)
+      // Use product's saleRate as originalPrice (fallback)
       let originalPrice = productExists.saleRate || 0;
+      
+      // If linked to a sale, use the actual sale item price (most accurate)
+      if (linkedSale) {
+        const saleItem = (linkedSale.items || []).find(
+          item => item.product && item.product.toString() === trimmedProductId
+        );
+        if (saleItem && saleItem.price) {
+          originalPrice = Number(saleItem.price || 0);
+        }
+      }
+      
       // Check if old format was used (products array contains objects with originalPrice)
       if (products && Array.isArray(products) && products.length > 0 && typeof products[0] === 'object' && 'originalPrice' in products[0]) {
         // Old format: products is array of objects, check if originalPrice was provided
@@ -505,6 +516,10 @@ const createProductReturn = async (req, res) => {
         // Update returned quantity
         product.returnedQuantity = (product.returnedQuantity || 0) + productReturn.quantity;
         
+        // Reduce soldOutQuantity since items are being returned
+        const currentSoldOut = Number(product.soldOutQuantity || 0);
+        product.soldOutQuantity = Math.max(0, currentSoldOut - Number(productReturn.quantity));
+        
         // If restockable, add back to available stock
         if (productReturn.restockable) {
           product.countInStock = (product.countInStock || 0) + productReturn.quantity;
@@ -513,22 +528,32 @@ const createProductReturn = async (req, res) => {
         await product.save();
 
         // Create product journey record
+        const journeyChanges = [
+          {
+            field: 'returnedQuantity',
+            oldValue: product.returnedQuantity - productReturn.quantity,
+            newValue: product.returnedQuantity,
+          },
+          {
+            field: 'soldOutQuantity',
+            oldValue: currentSoldOut,
+            newValue: product.soldOutQuantity,
+          },
+        ];
+        
+        if (productReturn.restockable) {
+          journeyChanges.push({
+            field: 'countInStock',
+            oldValue: product.countInStock - productReturn.quantity,
+            newValue: product.countInStock,
+          });
+        }
+        
         await ProductJourney.create({
           product: product._id,
           user: req.user._id,
           action: 'return_processed',
-          changes: [
-            {
-              field: 'returnedQuantity',
-              oldValue: product.returnedQuantity - productReturn.quantity,
-              newValue: product.returnedQuantity,
-            },
-            ...(productReturn.restockable ? [{
-              field: 'countInStock',
-              oldValue: product.countInStock - productReturn.quantity,
-              newValue: product.countInStock,
-            }] : []),
-          ],
+          changes: journeyChanges,
           notes: `Return processed: ${productReturn.returnReason}`,
         });
       }
@@ -560,17 +585,23 @@ const createProductReturn = async (req, res) => {
       // Remove any zero-quantity items
       linkedSale.items = (linkedSale.items || []).filter(item => Number(item.quantity || 0) > 0);
 
+      // If all items were returned, set totals to 0
       const previousTotalAmount = Number(linkedSale.totalAmount || 0);
       const previousGrandTotal = Number(linkedSale.grandTotal || 0);
 
-      linkedSale.totalAmount = (linkedSale.items || []).reduce(
-        (sum, item) => sum + Number(item.total || 0),
-        0
-      );
-      linkedSale.grandTotal =
-        Number(linkedSale.totalAmount || 0) -
-        Number(linkedSale.discount || 0) +
-        Number(linkedSale.tax || 0);
+      if (linkedSale.items.length === 0) {
+        linkedSale.totalAmount = 0;
+        linkedSale.grandTotal = 0;
+      } else {
+        linkedSale.totalAmount = (linkedSale.items || []).reduce(
+          (sum, item) => sum + Number(item.total || 0),
+          0
+        );
+        linkedSale.grandTotal =
+          Number(linkedSale.totalAmount || 0) -
+          Number(linkedSale.discount || 0) +
+          Number(linkedSale.tax || 0);
+      }
 
       if (previousTotalAmount !== linkedSale.totalAmount) {
         saleChanges.push({
@@ -588,8 +619,11 @@ const createProductReturn = async (req, res) => {
         });
       }
 
+      // Always save the sale if we made any modifications
+      // (saleChanges will have at least item quantity changes if we processed returns)
+      await linkedSale.save();
+      
       if (saleChanges.length > 0) {
-        await linkedSale.save();
         await SalesJourney.create({
           sale: linkedSale._id,
           user: req.user._id,

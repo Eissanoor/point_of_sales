@@ -16,7 +16,15 @@ const salesJourneySchema = new mongoose.Schema(
     action: {
       type: String,
       required: true,
-      enum: ['created', 'updated', 'payment_updated', 'deleted', 'refunded', 'partially_refunded'],
+      enum: [
+        'created',
+        'updated',
+        'payment_updated',
+        'deleted',
+        'refunded',
+        'partially_refunded',
+        'return_adjustment',
+      ],
     },
     changes: [{
       field: {
