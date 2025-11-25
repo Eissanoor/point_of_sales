@@ -2,6 +2,7 @@ const Purchase = require('../models/purchaseModel');
 const Product = require('../models/productModel');
 const Supplier = require('../models/supplierModel');
 const Warehouse = require('../models/warehouseModel');
+const Shop = require('../models/shopModel');
 const Currency = require('../models/currencyModel');
 const BankAccount = require('../models/bankAccountModel');
 const cloudinary = require('cloudinary').v2;
@@ -16,6 +17,8 @@ const getPurchases = async (req, res) => {
       product,
       supplier,
       warehouse,
+      shop,
+      locationType,
       page = 1, 
       limit = 10,
       sortBy = 'purchaseDate',
@@ -56,6 +59,16 @@ const getPurchases = async (req, res) => {
       filter.warehouse = warehouse;
     }
     
+    // Filter by shop
+    if (shop) {
+      filter.shop = shop;
+    }
+    
+    // Filter by location type
+    if (locationType) {
+      filter.locationType = locationType;
+    }
+    
     // Filter by date range
     if (startDate || endDate) {
       filter.purchaseDate = {};
@@ -88,6 +101,7 @@ const getPurchases = async (req, res) => {
       .populate('items.product', 'name description')
       .populate('supplier', 'name email phoneNumber')
       .populate('warehouse', 'name code')
+      .populate('shop', 'name code')
       .populate('currency', 'name code symbol')
       .sort(sort)
       .skip(skip)
@@ -118,6 +132,7 @@ const getPurchaseById = async (req, res) => {
       .populate('items.product', 'name description category')
       .populate('supplier', 'name email phoneNumber address')
       .populate('warehouse', 'name code address')
+      .populate('shop', 'name code address')
       .populate('currency', 'name code symbol')
       .populate('bankAccount', 'accountName accountNumber bankName');
 
@@ -149,6 +164,8 @@ const createPurchase = async (req, res) => {
       items,
       supplier,
       warehouse,
+      shop,
+      locationType,
       currency,
       purchaseDate,
       invoiceNumber,
@@ -174,10 +191,57 @@ const createPurchase = async (req, res) => {
       });
     }
     
-    if (!supplier || !warehouse) {
+    if (!supplier) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Please provide supplier and warehouse',
+        message: 'Please provide a supplier',
+      });
+    }
+
+    const hasWarehouse = Boolean(warehouse);
+    const hasShop = Boolean(shop);
+
+    if (hasWarehouse && hasShop) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Please provide either a warehouse or a shop, not both',
+      });
+    }
+
+    if (!hasWarehouse && !hasShop) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Please provide warehouse or shop information',
+      });
+    }
+
+    // Normalize IDs
+    const normalizedWarehouseId = hasWarehouse ? warehouse.toString().trim() : null;
+    const normalizedShopId = hasShop ? shop.toString().trim() : null;
+
+    if (normalizedWarehouseId && !normalizedWarehouseId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({ status: 'fail', message: 'Invalid warehouse ID format' });
+    }
+
+    if (normalizedShopId && !normalizedShopId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({ status: 'fail', message: 'Invalid shop ID format' });
+    }
+
+    const resolvedLocationType = locationType
+      ? (locationType === 'shop' ? 'shop' : 'warehouse')
+      : (normalizedShopId ? 'shop' : 'warehouse');
+
+    if (resolvedLocationType === 'warehouse' && !normalizedWarehouseId) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Warehouse is required for warehouse-based purchases',
+      });
+    }
+
+    if (resolvedLocationType === 'shop' && !normalizedShopId) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Shop is required for shop-based purchases',
       });
     }
     
@@ -210,13 +274,26 @@ const createPurchase = async (req, res) => {
       });
     }
     
-    // Check if warehouse exists
-    const warehouseExists = await Warehouse.findById(warehouse);
-    if (!warehouseExists) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Warehouse not found',
-      });
+    // Check if location exists
+    let locationId = null;
+    if (resolvedLocationType === 'warehouse') {
+      const warehouseExists = await Warehouse.findById(normalizedWarehouseId);
+      if (!warehouseExists) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Warehouse not found',
+        });
+      }
+      locationId = normalizedWarehouseId;
+    } else {
+      const shopExists = await Shop.findById(normalizedShopId);
+      if (!shopExists) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Shop not found',
+        });
+      }
+      locationId = normalizedShopId;
     }
     
     // Get currency exchange rate if currency is provided
@@ -267,7 +344,9 @@ const createPurchase = async (req, res) => {
       user: req.user._id,
       items: normalizedItems,
       supplier,
-      warehouse,
+      locationType: resolvedLocationType,
+      warehouse: resolvedLocationType === 'warehouse' ? locationId : null,
+      shop: resolvedLocationType === 'shop' ? locationId : null,
       currency: currency || null,
       currencyExchangeRate,
       purchaseDate: purchaseDate || new Date(),
@@ -287,7 +366,8 @@ const createPurchase = async (req, res) => {
           retailRate: item.retailRate,
           wholesaleRate: item.wholesaleRate,
           supplier: supplier,
-          warehouse: warehouse,
+          warehouse: resolvedLocationType === 'warehouse' ? locationId : null,
+          shop: resolvedLocationType === 'shop' ? locationId : null,
           currency: currency || products.find(p => p._id.toString() === item.product).currency,
           currencyExchangeRate: currencyExchangeRate,
         }
@@ -326,9 +406,9 @@ const updatePurchase = async (req, res) => {
         quantity: item.quantity
       }));
       
-      // Update fields if provided
+      // Update fields if provided (excluding location fields handled separately)
       for (const [key, value] of Object.entries(req.body)) {
-        if (!['items', 'bankAccount'].includes(key) && purchase[key] !== value) {
+        if (!['items', 'bankAccount', 'warehouse', 'shop', 'locationType'].includes(key) && purchase[key] !== value) {
           purchase[key] = value;
           
           // If currency is being updated, also update the exchange rate
@@ -340,6 +420,66 @@ const updatePurchase = async (req, res) => {
           }
         }
       }
+
+      // Handle location updates
+      let nextLocationType = purchase.locationType || 'warehouse';
+      let nextWarehouseId = purchase.warehouse ? purchase.warehouse.toString() : null;
+      let nextShopId = purchase.shop ? purchase.shop.toString() : null;
+
+      if (typeof req.body.locationType !== 'undefined') {
+        if (!['warehouse', 'shop'].includes(req.body.locationType)) {
+          return res.status(400).json({ status: 'fail', message: 'Invalid location type. Use "warehouse" or "shop"' });
+        }
+        nextLocationType = req.body.locationType;
+      }
+
+      if (typeof req.body.warehouse !== 'undefined') {
+        if (req.body.warehouse) {
+          const trimmedWarehouseId = req.body.warehouse.toString().trim();
+          if (!trimmedWarehouseId.match(/^[0-9a-fA-F]{24}$/)) {
+            return res.status(400).json({ status: 'fail', message: 'Invalid warehouse ID format' });
+          }
+          const warehouseExists = await Warehouse.findById(trimmedWarehouseId);
+          if (!warehouseExists) {
+            return res.status(404).json({ status: 'fail', message: 'Warehouse not found' });
+          }
+          nextWarehouseId = trimmedWarehouseId;
+        } else {
+          nextWarehouseId = null;
+        }
+      }
+
+      if (typeof req.body.shop !== 'undefined') {
+        if (req.body.shop) {
+          const trimmedShopId = req.body.shop.toString().trim();
+          if (!trimmedShopId.match(/^[0-9a-fA-F]{24}$/)) {
+            return res.status(400).json({ status: 'fail', message: 'Invalid shop ID format' });
+          }
+          const shopExists = await Shop.findById(trimmedShopId);
+          if (!shopExists) {
+            return res.status(404).json({ status: 'fail', message: 'Shop not found' });
+          }
+          nextShopId = trimmedShopId;
+        } else {
+          nextShopId = null;
+        }
+      }
+
+      if (nextLocationType === 'warehouse') {
+        if (!nextWarehouseId) {
+          return res.status(400).json({ status: 'fail', message: 'Warehouse is required when location type is warehouse' });
+        }
+        nextShopId = null;
+      } else {
+        if (!nextShopId) {
+          return res.status(400).json({ status: 'fail', message: 'Shop is required when location type is shop' });
+        }
+        nextWarehouseId = null;
+      }
+
+      purchase.locationType = nextLocationType;
+      purchase.warehouse = nextWarehouseId;
+      purchase.shop = nextShopId;
 
       // Optional bank account update
       if (typeof req.body.bankAccount !== 'undefined') {
@@ -435,7 +575,8 @@ const updatePurchase = async (req, res) => {
               retailRate: item.retailRate,
               wholesaleRate: item.wholesaleRate,
               supplier: purchase.supplier,
-              warehouse: purchase.warehouse,
+              warehouse: purchase.locationType === 'warehouse' ? purchase.warehouse : null,
+              shop: purchase.locationType === 'shop' ? purchase.shop : null,
               currency: purchase.currency,
               currencyExchangeRate: purchase.currencyExchangeRate,
             }
@@ -444,13 +585,14 @@ const updatePurchase = async (req, res) => {
       } else {
         // Items were not changed but header fields may have changed (supplier, warehouse, currency)
         // Ensure product master fields reflect latest purchase header
-        if (req.body.supplier || req.body.warehouse || req.body.currency) {
+        if (req.body.supplier || req.body.warehouse || req.body.shop || req.body.locationType || req.body.currency) {
           for (const item of purchase.items) {
             await Product.findByIdAndUpdate(item.product, {
               $set: {
                 // Do not touch stock when items unchanged
                 supplier: purchase.supplier,
-                warehouse: purchase.warehouse,
+                warehouse: purchase.locationType === 'warehouse' ? purchase.warehouse : null,
+                shop: purchase.locationType === 'shop' ? purchase.shop : null,
                 currency: purchase.currency,
                 currencyExchangeRate: purchase.currencyExchangeRate,
               }
@@ -519,7 +661,7 @@ const deletePurchase = async (req, res) => {
 // @access  Private
 const getPurchaseStats = async (req, res) => {
   try {
-    const { startDate, endDate, supplier, warehouse } = req.query;
+    const { startDate, endDate, supplier, warehouse, shop, locationType } = req.query;
     
     const filter = { isActive: true };
     
@@ -531,6 +673,8 @@ const getPurchaseStats = async (req, res) => {
     
     if (supplier) filter.supplier = supplier;
     if (warehouse) filter.warehouse = warehouse;
+    if (shop) filter.shop = shop;
+    if (locationType) filter.locationType = locationType;
     
     const stats = await Purchase.aggregate([
       { $match: filter },
@@ -597,6 +741,7 @@ const getPurchasesByProduct = async (req, res) => {
       .populate('items.product', 'name description')
       .populate('supplier', 'name email')
       .populate('warehouse', 'name code')
+      .populate('shop', 'name code')
       .populate('currency', 'name code symbol')
       .sort({ purchaseDate: -1 })
       .skip(skip)

@@ -5,6 +5,8 @@ const Currency = require('../models/currencyModel');
 const QuantityUnit = require('../models/quantityUnitModel');
 const PackingUnit = require('../models/packingUnitModel');
 const Pochues = require('../models/pochuesModel');
+const Supplier = require('../models/supplierModel');
+const Warehouse = require('../models/warehouseModel');
 const cloudinary = require('../config/cloudinary');
 const currencyUtils = require('../utils/currencyUtils');
 const StockTransfer = require('../models/stockTransferModel');
@@ -38,6 +40,49 @@ const cleanupOrphanedReferences = async () => {
   }
 };
 
+// Helper to auto-create a purchase record when adding a product with supplier/location
+const autoCreatePurchaseRecord = async ({
+  productId,
+  productName,
+  userId,
+  supplierId,
+  locationType,
+  locationId,
+  quantity,
+  purchaseRate,
+  retailRate,
+  wholesaleRate,
+  currencyId,
+  currencyExchangeRate,
+}) => {
+  if (!quantity || quantity <= 0) {
+    return null;
+  }
+
+  return Purchase.create({
+    user: userId,
+    supplier: supplierId,
+    locationType,
+    warehouse: locationType === 'warehouse' ? locationId : null,
+    shop: locationType === 'shop' ? locationId : null,
+    items: [
+      {
+        product: productId,
+        quantity,
+        purchaseRate: purchaseRate || 0,
+        retailRate: retailRate || 0,
+        wholesaleRate: wholesaleRate || 0,
+      },
+    ],
+    currency: currencyId || null,
+    currencyExchangeRate,
+    purchaseDate: new Date(),
+    invoiceNumber: '',
+    notes: `Auto-generated while creating product ${productName}`,
+    paymentMethod: 'cash',
+  });
+};
+
 // @desc    Get all products
 // @route   GET /api/products
 // @access  Public
@@ -48,6 +93,7 @@ const getProducts = async (req, res) => {
       category,
       supplier,
       warehouse,
+      shop,
       page = 1, 
       limit = 10,
       sortBy = 'createdAt',
@@ -85,6 +131,11 @@ const getProducts = async (req, res) => {
     // Filter by warehouse
     if (warehouse) {
       filter.warehouse = warehouse;
+    }
+    
+    // Filter by shop
+    if (shop) {
+      filter.shop = shop;
     }
     
     // Filter by price range
@@ -132,6 +183,7 @@ const getProducts = async (req, res) => {
       .populate('category', 'name')
       .populate('supplier', 'name')
       .populate('warehouse', 'name code')
+      .populate('shop', 'name code')
       .populate('currency', 'name code symbol')
       .populate('quantityUnit', 'name')
       .populate('packingUnit', 'name')
@@ -165,6 +217,7 @@ const getProductById = async (req, res) => {
       .populate('category', 'name')
       .populate('supplier', 'name email phoneNumber')
       .populate('warehouse', 'name code')
+      .populate('shop', 'name code')
       .populate('currency', 'name code symbol')
       .populate('quantityUnit', 'name')
       .populate('packingUnit', 'name')
@@ -254,7 +307,8 @@ const createProduct = async (req, res) => {
       packingUnit,
       pochues,
       pouchesOrPieces,
-      countInStock
+      countInStock,
+      shop
     } = req.body;
     
     // Check if category exists (only if provided)
@@ -300,6 +354,81 @@ const createProduct = async (req, res) => {
         });
       }
     }
+
+    // Validate supplier and location combination
+    let trimmedSupplierId = null;
+    if (supplier) {
+      const supplierId = supplier.toString().trim();
+      if (!supplierId.match(/^[0-9a-fA-F]{24}$/)) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid supplier ID format',
+        });
+      }
+      const supplierExists = await Supplier.findById(supplierId);
+      if (!supplierExists) {
+        return res.status(404).json({
+          status: 'fail',
+          message: 'Supplier not found',
+        });
+      }
+      trimmedSupplierId = supplierId;
+    }
+
+    if (warehouse && shop) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Cannot specify both warehouse and shop when creating a product',
+      });
+    }
+
+    let trimmedWarehouseId = null;
+    if (warehouse) {
+      const warehouseId = warehouse.toString().trim();
+      if (!warehouseId.match(/^[0-9a-fA-F]{24}$/)) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid warehouse ID format',
+        });
+      }
+      const warehouseExists = await Warehouse.findById(warehouseId);
+      if (!warehouseExists) {
+        return res.status(404).json({
+          status: 'fail',
+          message: 'Warehouse not found',
+        });
+      }
+      trimmedWarehouseId = warehouseId;
+    }
+
+    let trimmedShopId = null;
+    if (shop) {
+      const shopId = shop.toString().trim();
+      if (!shopId.match(/^[0-9a-fA-F]{24}$/)) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid shop ID format',
+        });
+      }
+      const shopExists = await Shop.findById(shopId);
+      if (!shopExists) {
+        return res.status(404).json({
+          status: 'fail',
+          message: 'Shop not found',
+        });
+      }
+      trimmedShopId = shopId;
+    }
+
+    const initialQuantity = Number(countInStock) || 0;
+    const shouldAutoPurchase = Boolean(trimmedSupplierId && (trimmedWarehouseId || trimmedShopId));
+
+    if (shouldAutoPurchase && initialQuantity <= 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'countInStock must be greater than 0 when supplier and location are provided',
+      });
+    }
     
     // Upload image to cloudinary if provided
     let imageUrl = '';
@@ -329,8 +458,9 @@ const createProduct = async (req, res) => {
       image: imageUrl,
       imagePublicId,
       category: category || null,
-      supplier: supplier || null,
-      warehouse: warehouse || null,
+      supplier: trimmedSupplierId || null,
+      warehouse: trimmedWarehouseId || null,
+      shop: trimmedShopId || null,
       currency: currency || null,
       currencyExchangeRate,
       description: description || '',
@@ -344,8 +474,40 @@ const createProduct = async (req, res) => {
       packingUnit: packingUnit || null,
       pochues: pochues || null,
       pouchesOrPieces: pouchesOrPieces || 0,
-      countInStock: countInStock || 0,
+      countInStock: initialQuantity,
     });
+
+    if (shouldAutoPurchase) {
+      try {
+        await autoCreatePurchaseRecord({
+          productId: product._id,
+          productName: product.name,
+          userId: req.user._id,
+          supplierId: trimmedSupplierId,
+          locationType: trimmedWarehouseId ? 'warehouse' : 'shop',
+          locationId: trimmedWarehouseId || trimmedShopId,
+          quantity: initialQuantity,
+          purchaseRate: Number(purchaseRate) || 0,
+          retailRate: Number(retailRate) || 0,
+          wholesaleRate: Number(wholesaleRate) || 0,
+          currencyId: currency || null,
+          currencyExchangeRate,
+        });
+      } catch (autoError) {
+        await Product.findByIdAndDelete(product._id);
+        if (imagePublicId) {
+          try {
+            await cloudinary.uploader.destroy(imagePublicId);
+          } catch (_) {
+            // Ignore cleanup errors
+          }
+        }
+        return res.status(500).json({
+          status: 'error',
+          message: `Failed to create purchase for this product: ${autoError.message}`,
+        });
+      }
+    }
     
     // Create product journey record
     await ProductJourney.create({
@@ -758,6 +920,16 @@ const getProductsByLocation = async (req, res) => {
       
       // Create a product map to track quantities
       const productMap = {};
+
+      // Step 0: Include products originally assigned to this shop
+      const originalShopProducts = await Product.find({ shop: locationId }).lean();
+      originalShopProducts.forEach(product => {
+        productMap[product._id.toString()] = {
+          ...product,
+          initialStock: product.countInStock,
+          currentStock: product.countInStock,
+        };
+      });
       
       // Step 1: Handle incoming transfers TO this shop
       const incomingTransfers = await StockTransfer.find({

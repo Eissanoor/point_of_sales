@@ -553,6 +553,20 @@ const calculateAvailableStock = async (productId, warehouseId, shopId) => {
 
   // Shop-based calculation
   if (shopId) {
+    // Base stock: if product is originally assigned to this shop
+    if (product.shop && product.shop.toString() === shopId.toString()) {
+      currentStock += Number(product.countInStock || 0);
+    }
+
+    // Add purchases in this shop for this product
+    const shopPurchases = await Purchase.aggregate([
+      { $match: { isActive: true, locationType: 'shop', shop: new (require('mongoose').Types.ObjectId)(shopId) } },
+      { $unwind: '$items' },
+      { $match: { 'items.product': new (require('mongoose').Types.ObjectId)(productId) } },
+      { $group: { _id: null, qty: { $sum: '$items.quantity' } } }
+    ]);
+    currentStock += shopPurchases.length > 0 ? Number(shopPurchases[0].qty || 0) : 0;
+
     // Incoming transfers TO this shop
     const incomingShop = await StockTransfer.aggregate([
       { $match: { destinationType: 'shop', destinationId: new (require('mongoose').Types.ObjectId)(shopId) } },

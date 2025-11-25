@@ -47,10 +47,24 @@ const purchaseSchema = new mongoose.Schema(
       required: [true, 'Please select a supplier'],
       ref: 'Supplier',
     },
+    locationType: {
+      type: String,
+      enum: ['warehouse', 'shop'],
+      default: 'warehouse',
+    },
     warehouse: {
       type: mongoose.Schema.Types.ObjectId,
-      required: [true, 'Please select a warehouse'],
       ref: 'Warehouse',
+      required: function () {
+        return this.locationType === 'warehouse';
+      },
+    },
+    shop: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Shop',
+      required: function () {
+        return this.locationType === 'shop';
+      },
     },
     bankAccount: {
       type: mongoose.Schema.Types.ObjectId,
@@ -165,6 +179,8 @@ purchaseSchema.plugin(autoIncrementPlugin);
 purchaseSchema.index({ product: 1, purchaseDate: -1 });
 purchaseSchema.index({ supplier: 1, purchaseDate: -1 });
 purchaseSchema.index({ warehouse: 1, purchaseDate: -1 });
+purchaseSchema.index({ shop: 1, purchaseDate: -1 });
+purchaseSchema.index({ locationType: 1, purchaseDate: -1 });
 
 const Purchase = mongoose.model('Purchase', purchaseSchema);
 

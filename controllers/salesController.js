@@ -46,6 +46,11 @@ async function getAvailableQuantityInShop(productId, shopId) {
 
   let available = 0;
 
+  const product = await Product.findById(productId).lean();
+  if (product && product.shop && product.shop.toString() === shopId.toString()) {
+    available += Number(product.countInStock || 0);
+  }
+
   // Incoming transfers to this shop for this product
   const incoming = await StockTransfer.aggregate([
     { $match: { destinationType: 'shop', destinationId: shopObjectId } },
