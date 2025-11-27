@@ -12,6 +12,7 @@ const customerSchema = new mongoose.Schema(
       type: String,
       lowercase: true,
       trim: true,
+      // Note: Duplicate emails are allowed - no unique constraint
     },
     phoneNumber: {
       type: String,
