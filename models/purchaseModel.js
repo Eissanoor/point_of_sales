@@ -108,6 +108,24 @@ const purchaseSchema = new mongoose.Schema(
       publicId: { type: String, default: '' },
       fileName: { type: String, default: '' },
     },
+    payments: [{
+      method: {
+        type: String,
+        enum: ['cash', 'bank', 'credit', 'check', 'online'],
+        required: [true, 'Payment method is required'],
+      },
+      amount: {
+        type: Number,
+        required: [true, 'Payment amount is required'],
+        min: [0, 'Payment amount cannot be negative'],
+      },
+      bankAccount: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'BankAccount',
+        default: null,
+      },
+    }],
+    // Keep paymentMethod for backward compatibility (deprecated)
     paymentMethod: {
       type: String,
       enum: ['cash', 'bank', 'credit', 'check', 'online'],

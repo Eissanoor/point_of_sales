@@ -81,9 +81,9 @@ const getPurchases = async (req, res) => {
       filter.status = status;
     }
     
-    // Filter by payment method
+    // Filter by payment method (searches in payments array)
     if (paymentMethod) {
-      filter.paymentMethod = paymentMethod;
+      filter['payments.method'] = paymentMethod;
     }
     
     // Only show active purchases
@@ -170,8 +170,9 @@ const createPurchase = async (req, res) => {
       purchaseDate,
       invoiceNumber,
       notes,
-      paymentMethod,
-      bankAccount
+      payments,
+      paymentMethod, // For backward compatibility
+      bankAccount // For backward compatibility
     } = req.body;
     // Normalize items: when coming from multipart/form-data it's a JSON string
     let normalizedItems = items;
@@ -305,18 +306,100 @@ const createPurchase = async (req, res) => {
       }
     }
 
-    // Optional bank account validation when provided
-    let bankAccountId = null;
-    if (bankAccount) {
-      const bank = await BankAccount.findById(bankAccount);
-      if (!bank) {
+    // Normalize and validate payments
+    let normalizedPayments = payments;
+    if (typeof normalizedPayments === 'string') {
+      try {
+        normalizedPayments = JSON.parse(normalizedPayments);
+      } catch (e) {
+        return res.status(400).json({ status: 'fail', message: 'Invalid payments format. Must be a JSON array.' });
+      }
+    }
+
+    // If payments array is not provided, use legacy paymentMethod and bankAccount for backward compatibility
+    if (!normalizedPayments || !Array.isArray(normalizedPayments) || normalizedPayments.length === 0) {
+      // Backward compatibility: use paymentMethod and bankAccount if provided
+      const legacyMethod = paymentMethod || 'cash';
+      // Calculate total amount for single payment
+      const totalAmount = normalizedItems.reduce((sum, item) => {
+        return sum + (item.quantity * item.purchaseRate);
+      }, 0);
+      
+      normalizedPayments = [{
+        method: legacyMethod,
+        amount: totalAmount,
+        bankAccount: bankAccount || null
+      }];
+    }
+
+    // Validate payments array
+    if (!Array.isArray(normalizedPayments) || normalizedPayments.length === 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Please provide at least one payment method',
+      });
+    }
+
+    // Validate each payment
+    for (const payment of normalizedPayments) {
+      if (!payment.method || !payment.amount) {
         return res.status(400).json({
           status: 'fail',
-          message: 'Bank account not found',
+          message: 'Each payment must have: method and amount',
         });
       }
-      bankAccountId = bank._id;
+
+      if (!['cash', 'bank', 'credit', 'check', 'online'].includes(payment.method)) {
+        return res.status(400).json({
+          status: 'fail',
+          message: `Invalid payment method: ${payment.method}. Allowed: cash, bank, credit, check, online`,
+        });
+      }
+
+      if (typeof payment.amount !== 'number' || payment.amount <= 0) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Payment amount must be a positive number',
+        });
+      }
+
+      // Validate bank account for bank/online payments
+      if ((payment.method === 'bank' || payment.method === 'online') && payment.bankAccount) {
+        const bank = await BankAccount.findById(payment.bankAccount);
+        if (!bank) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Bank account not found for ${payment.method} payment`,
+          });
+        }
+      }
     }
+
+    // Calculate total payment amount
+    const totalPaymentAmount = normalizedPayments.reduce((sum, payment) => sum + payment.amount, 0);
+    
+    // Calculate total purchase amount (will be calculated in pre-save hook, but we need it here for validation)
+    const calculatedTotalAmount = normalizedItems.reduce((sum, item) => {
+      return sum + (item.quantity * item.purchaseRate);
+    }, 0);
+
+    // Optional: Validate that payments match total (you can remove this if you want to allow partial payments)
+    // For now, I'll allow partial payments but warn if overpayment
+    if (totalPaymentAmount > calculatedTotalAmount * 1.01) { // Allow 1% tolerance for rounding
+      return res.status(400).json({
+        status: 'fail',
+        message: `Total payment amount (${totalPaymentAmount}) exceeds purchase total (${calculatedTotalAmount})`,
+      });
+    }
+
+    // Prepare payments array for database
+    const paymentsForDB = normalizedPayments.map(payment => ({
+      method: payment.method,
+      amount: payment.amount,
+      bankAccount: (payment.method === 'bank' || payment.method === 'online') && payment.bankAccount 
+        ? payment.bankAccount 
+        : null
+    }));
 
     // Optional transaction receipt upload
     let transactionRecipt = { url: '', publicId: '', fileName: '' };
@@ -352,8 +435,9 @@ const createPurchase = async (req, res) => {
       purchaseDate: purchaseDate || new Date(),
       invoiceNumber: invoiceNumber || '', // Will be auto-generated if empty
       notes: notes || '',
-      paymentMethod: paymentMethod || 'cash',
-      bankAccount: bankAccountId,
+      payments: paymentsForDB,
+      paymentMethod: normalizedPayments[0]?.method || 'cash', // Keep for backward compatibility
+      bankAccount: normalizedPayments.find(p => p.bankAccount)?.bankAccount || null, // Keep for backward compatibility
       transactionRecipt,
     });
     
@@ -481,7 +565,7 @@ const updatePurchase = async (req, res) => {
       purchase.warehouse = nextWarehouseId;
       purchase.shop = nextShopId;
 
-      // Optional bank account update
+      // Optional bank account update (for backward compatibility)
       if (typeof req.body.bankAccount !== 'undefined') {
         if (req.body.bankAccount) {
           const bank = await BankAccount.findById(req.body.bankAccount);
@@ -492,6 +576,89 @@ const updatePurchase = async (req, res) => {
         } else {
           purchase.bankAccount = null;
         }
+      }
+
+      // Handle payments update if provided
+      if (typeof req.body.payments !== 'undefined') {
+        let updatePayments = req.body.payments;
+        if (typeof updatePayments === 'string') {
+          try {
+            updatePayments = JSON.parse(updatePayments);
+          } catch (e) {
+            return res.status(400).json({ status: 'fail', message: 'Invalid payments format. Must be a JSON array.' });
+          }
+        }
+
+        if (!Array.isArray(updatePayments) || updatePayments.length === 0) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'Please provide at least one payment method',
+          });
+        }
+
+        // Validate each payment
+        for (const payment of updatePayments) {
+          if (!payment.method || !payment.amount) {
+            return res.status(400).json({
+              status: 'fail',
+              message: 'Each payment must have: method and amount',
+            });
+          }
+
+          if (!['cash', 'bank', 'credit', 'check', 'online'].includes(payment.method)) {
+            return res.status(400).json({
+              status: 'fail',
+              message: `Invalid payment method: ${payment.method}. Allowed: cash, bank, credit, check, online`,
+            });
+          }
+
+          if (typeof payment.amount !== 'number' || payment.amount <= 0) {
+            return res.status(400).json({
+              status: 'fail',
+              message: 'Payment amount must be a positive number',
+            });
+          }
+
+          // Validate bank account for bank/online payments
+          if ((payment.method === 'bank' || payment.method === 'online') && payment.bankAccount) {
+            const bank = await BankAccount.findById(payment.bankAccount);
+            if (!bank) {
+              return res.status(400).json({
+                status: 'fail',
+                message: `Bank account not found for ${payment.method} payment`,
+              });
+            }
+          }
+        }
+
+        // Calculate total payment amount
+        const totalPaymentAmount = updatePayments.reduce((sum, payment) => sum + payment.amount, 0);
+        
+        // Calculate total purchase amount
+        const calculatedTotalAmount = purchase.items.reduce((sum, item) => {
+          return sum + (item.quantity * item.purchaseRate);
+        }, 0);
+
+        // Validate that payments don't exceed total (allow 1% tolerance)
+        if (totalPaymentAmount > calculatedTotalAmount * 1.01) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Total payment amount (${totalPaymentAmount}) exceeds purchase total (${calculatedTotalAmount})`,
+          });
+        }
+
+        // Update payments
+        purchase.payments = updatePayments.map(payment => ({
+          method: payment.method,
+          amount: payment.amount,
+          bankAccount: (payment.method === 'bank' || payment.method === 'online') && payment.bankAccount 
+            ? payment.bankAccount 
+            : null
+        }));
+
+        // Update legacy fields for backward compatibility
+        purchase.paymentMethod = updatePayments[0]?.method || 'cash';
+        purchase.bankAccount = updatePayments.find(p => p.bankAccount)?.bankAccount || null;
       }
 
       // Optional transaction receipt replacement
