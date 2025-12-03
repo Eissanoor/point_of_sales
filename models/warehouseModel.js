@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const autoIncrementPlugin = require('./autoIncrementPlugin');
+const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const warehouseSchema = new mongoose.Schema(
   {
@@ -58,6 +59,11 @@ const warehouseSchema = new mongoose.Schema(
       required: true,
       ref: 'User',
     },
+    referCode: {
+      type: String,
+      unique: true,
+      trim: true,
+    },
   },
   {
     timestamps: true,
@@ -66,6 +72,18 @@ const warehouseSchema = new mongoose.Schema(
 
 // Apply the auto-increment plugin
 warehouseSchema.plugin(autoIncrementPlugin);
+
+// Pre-save hook to generate referCode
+warehouseSchema.pre('save', async function(next) {
+  if (!this.referCode) {
+    try {
+      this.referCode = await generateReferCode('Warehouse');
+    } catch (error) {
+      return next(error);
+    }
+  }
+  next();
+});
 
 // Create indices for faster queries
 warehouseSchema.index({ name: 1 });

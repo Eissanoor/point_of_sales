@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const autoIncrementPlugin = require('./autoIncrementPlugin');
+const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const bankAccountSchema = new mongoose.Schema(
   {
@@ -67,6 +68,11 @@ const bankAccountSchema = new mongoose.Schema(
     isActive: {
       type: Boolean,
       default: true
+    },
+    referCode: {
+      type: String,
+      unique: true,
+      trim: true
     }
   },
   {
@@ -76,6 +82,18 @@ const bankAccountSchema = new mongoose.Schema(
 
 // Apply the auto-increment plugin
 bankAccountSchema.plugin(autoIncrementPlugin);
+
+// Pre-save hook to generate referCode
+bankAccountSchema.pre('save', async function(next) {
+  if (!this.referCode) {
+    try {
+      this.referCode = await generateReferCode('BankAccount');
+    } catch (error) {
+      return next(error);
+    }
+  }
+  next();
+});
 
 const BankAccount = mongoose.model('BankAccount', bankAccountSchema);
 

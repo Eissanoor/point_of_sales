@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const autoIncrementPlugin = require('./autoIncrementPlugin');
+const { generateReferCode } = require('../utils/referCodeGenerator');
 
 // Schema for individual purchase items
 const purchaseItemSchema = new mongoose.Schema({
@@ -140,6 +141,11 @@ const purchaseSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    referCode: {
+      type: String,
+      unique: true,
+      trim: true,
+    },
   },
   {
     timestamps: true,
@@ -149,6 +155,11 @@ const purchaseSchema = new mongoose.Schema(
 // Calculate totals and generate invoice number before saving
 purchaseSchema.pre('save', async function(next) {
   try {
+    // Generate referCode if not provided
+    if (!this.referCode) {
+      this.referCode = await generateReferCode('Purchase');
+    }
+    
     // Generate invoice number if not provided
     if (!this.invoiceNumber || this.invoiceNumber === '') {
       const currentDate = new Date();

@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const autoIncrementPlugin = require('./autoIncrementPlugin');
+const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const reviewSchema = new mongoose.Schema(
   {
@@ -155,6 +156,11 @@ const productSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    referCode: {
+      type: String,
+      unique: true,
+      trim: true,
+    },
   },
   {
     timestamps: true,
@@ -163,6 +169,18 @@ const productSchema = new mongoose.Schema(
 
 // Apply the auto-increment plugin
 productSchema.plugin(autoIncrementPlugin);
+
+// Pre-save hook to generate referCode
+productSchema.pre('save', async function(next) {
+  if (!this.referCode) {
+    try {
+      this.referCode = await generateReferCode('Product');
+    } catch (error) {
+      return next(error);
+    }
+  }
+  next();
+});
 
 const Product = mongoose.model('Product', productSchema);
 

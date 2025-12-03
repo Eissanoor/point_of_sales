@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const autoIncrementPlugin = require('./autoIncrementPlugin');
+const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const expenseSchema = new mongoose.Schema(
   {
@@ -88,6 +89,11 @@ const expenseSchema = new mongoose.Schema(
     isActive: {
       type: Boolean,
       default: true
+    },
+    referCode: {
+      type: String,
+      unique: true,
+      trim: true
     }
   },
   {
@@ -95,12 +101,22 @@ const expenseSchema = new mongoose.Schema(
   }
 );
 
-// Pre-save middleware to calculate PKR amount
-expenseSchema.pre('save', function(next) {
-  if (this.totalAmount && this.exchangeRate) {
-    this.amountInPKR = this.totalAmount * this.exchangeRate;
+// Pre-save middleware to calculate PKR amount and generate referCode
+expenseSchema.pre('save', async function(next) {
+  try {
+    // Generate referCode if not provided
+    if (!this.referCode) {
+      this.referCode = await generateReferCode('Expense');
+    }
+    
+    // Calculate PKR amount
+    if (this.totalAmount && this.exchangeRate) {
+      this.amountInPKR = this.totalAmount * this.exchangeRate;
+    }
+    next();
+  } catch (error) {
+    next(error);
   }
-  next();
 });
 
 // Apply the auto-increment plugin
