@@ -11,9 +11,10 @@ const supplierSchema = new mongoose.Schema(
     },
     email: {
       type: String,
+      required: false,
       trim: true,
       lowercase: true,
-      match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Please provide a valid email address'],
+      default: null
     },
     phoneNumber: {
       type: String,

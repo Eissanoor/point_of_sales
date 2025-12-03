@@ -25,7 +25,7 @@ const createSupplier = asyncHandler(async (req, res) => {
 
   const supplier = await Supplier.create({
     name,
-    email,
+    email: email || undefined,
     phoneNumber,
     cnicNumber,
     manager,
@@ -102,7 +102,7 @@ const updateSupplier = asyncHandler(async (req, res) => {
     }
 
     supplier.name = req.body.name || supplier.name;
-    supplier.email = req.body.email || supplier.email;
+    supplier.email = req.body.email !== undefined ? (req.body.email || null) : supplier.email;
     supplier.phoneNumber = req.body.phoneNumber || supplier.phoneNumber;
     supplier.cnicNumber = req.body.cnicNumber || supplier.cnicNumber;
     supplier.manager = req.body.manager || supplier.manager;
