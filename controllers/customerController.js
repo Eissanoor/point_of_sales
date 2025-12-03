@@ -19,7 +19,7 @@ const createCustomer = async (req, res) => {
     // Create new customer
     const customer = await Customer.create({
       name,
-      email,
+      email: email || undefined,
       phoneNumber,
       cnicNumber,
       address,
@@ -137,7 +137,7 @@ const updateCustomer = async (req, res) => {
 
     if (customer) {
       customer.name = req.body.name || customer.name;
-      customer.email = req.body.email || customer.email;
+      customer.email = req.body.email !== undefined ? (req.body.email || null) : customer.email;
       customer.phoneNumber = req.body.phoneNumber || customer.phoneNumber;
       customer.cnicNumber = req.body.cnicNumber || customer.cnicNumber;
       customer.address = req.body.address || customer.address;

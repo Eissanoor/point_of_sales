@@ -13,6 +13,14 @@ const dropCustomerEmailIndex = async () => {
     const db = mongoose.connection.db;
     const collection = db.collection('customers');
 
+    // First, convert all empty string emails to null
+    console.log('Converting empty string emails to null...');
+    const updateResult = await collection.updateMany(
+      { email: '' },
+      { $set: { email: null } }
+    );
+    console.log(`✅ Updated ${updateResult.modifiedCount} documents with empty email strings`);
+
     // Get all indexes
     const indexes = await collection.indexes();
     console.log('Current indexes:', indexes);

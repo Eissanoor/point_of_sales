@@ -71,8 +71,13 @@ const supplierSchema = new mongoose.Schema(
 // Apply the auto-increment plugin
 supplierSchema.plugin(autoIncrementPlugin);
 
-// Pre-save hook to generate referCode
+// Pre-save hook to generate referCode and handle empty email
 supplierSchema.pre('save', async function(next) {
+  // Convert empty string email to null
+  if (this.email === '') {
+    this.email = null;
+  }
+  
   if (!this.referCode) {
     try {
       this.referCode = await generateReferCode('Supplier');
