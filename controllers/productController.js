@@ -293,6 +293,7 @@ const createProduct = async (req, res) => {
     const {
       name,
       category,
+      subCategory,
       supplier,
       warehouse,
       currency,
@@ -318,6 +319,25 @@ const createProduct = async (req, res) => {
         return res.status(400).json({
           status: 'fail',
           message: 'Invalid category',
+        });
+      }
+    }
+
+    // Check if subCategory exists and belongs to the category (only if provided)
+    if (subCategory) {
+      const SubCategory = require('../models/subCategoryModel');
+      const subCategoryExists = await SubCategory.findById(subCategory);
+      if (!subCategoryExists) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid subCategory',
+        });
+      }
+      // If category is also provided, validate that subCategory belongs to it
+      if (category && subCategoryExists.category.toString() !== category.toString()) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'SubCategory does not belong to the provided category',
         });
       }
     }
@@ -458,6 +478,7 @@ const createProduct = async (req, res) => {
       image: imageUrl,
       imagePublicId,
       category: category || null,
+      subCategory: subCategory || null,
       supplier: trimmedSupplierId || null,
       warehouse: trimmedWarehouseId || null,
       shop: trimmedShopId || null,
@@ -599,6 +620,49 @@ const updateProduct = async (req, res) => {
                 status: 'fail',
                 message: 'Invalid pochues',
               });
+            }
+          }
+
+          // Validate subCategory if being updated
+          if (key === 'subCategory' && value) {
+            const SubCategory = require('../models/subCategoryModel');
+            const subCategoryExists = await SubCategory.findById(value);
+            if (!subCategoryExists) {
+              return res.status(400).json({
+                status: 'fail',
+                message: 'Invalid subCategory',
+              });
+            }
+            // Validate that subCategory belongs to the product's category
+            const productCategory = product.category || (req.body.category ? req.body.category : null);
+            if (productCategory && subCategoryExists.category.toString() !== productCategory.toString()) {
+              return res.status(400).json({
+                status: 'fail',
+                message: 'SubCategory does not belong to the product category',
+              });
+            }
+          }
+
+          // Validate category if being updated
+          if (key === 'category' && value) {
+            const categoryExists = await Category.findById(value);
+            if (!categoryExists) {
+              return res.status(400).json({
+                status: 'fail',
+                message: 'Invalid category',
+              });
+            }
+            // If subCategory exists, validate it belongs to the new category
+            const productSubCategory = product.subCategory || (req.body.subCategory ? req.body.subCategory : null);
+            if (productSubCategory) {
+              const SubCategory = require('../models/subCategoryModel');
+              const subCategoryDoc = await SubCategory.findById(productSubCategory);
+              if (subCategoryDoc && subCategoryDoc.category.toString() !== value.toString()) {
+                return res.status(400).json({
+                  status: 'fail',
+                  message: 'Product subCategory does not belong to the new category',
+                });
+              }
             }
           }
         }

@@ -102,6 +102,13 @@ The `items` field should be a JSON array string:
 ]
 ```
 
+### Item Object Fields:
+- `product` (required): Product ID (ObjectId)
+- `quantity` (required): Number of items (minimum: 1)
+- `purchaseRate` (required): Purchase price per unit (minimum: 0)
+- `retailRate` (required): Retail selling price per unit (minimum: 0)
+- `wholesaleRate` (required): Wholesale selling price per unit (minimum: 0)
+
 ## Validation Rules
 
 1. **Total Payment Amount**: The sum of all payment amounts should not exceed the total purchase amount (with 1% tolerance for rounding)
