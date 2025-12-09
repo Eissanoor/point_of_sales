@@ -22,11 +22,12 @@ const {
   getPaymentAnalytics
 } = require('../controllers/paymentController');
 const { protect } = require('../middlewares/authMiddleware');
+const { uploadMultiple } = require('../middlewares/uploadMiddleware');
 
 // Routes that don't need a specific ID
 router.route('/')
   .get(protect, getPayments)
-  .post(protect, createPayment);
+  .post(protect, uploadMultiple, createPayment);
 
 router.route('/stats')
   .get(protect, getPaymentStats);
@@ -41,7 +42,7 @@ router.route('/check-overdue')
   .get(protect, checkOverduePayments);
 
 router.route('/customer')
-  .post(protect, createCustomerPayment);
+  .post(protect, uploadMultiple, createCustomerPayment);
 
 router.route('/apply-customer-advance')
   .post(protect, applyAdvancePaymentToSale);
@@ -49,7 +50,7 @@ router.route('/apply-customer-advance')
 // Routes that need a specific ID
 router.route('/:id')
   .get(protect, getPaymentById)
-  .put(protect, updatePayment)
+  .put(protect, uploadMultiple, updatePayment)
   .delete(protect, deletePayment);
 
 router.route('/:id/journey')

@@ -3,16 +3,32 @@ const Product = require('../models/productModel');
 const Payment = require('../models/paymentModel');
 const PaymentJourney = require('../models/paymentJourneyModel');
 const Customer = require('../models/customerModel');
+const BankAccount = require('../models/bankAccountModel');
+const cloudinary = require('cloudinary').v2;
 
 // @desc    Create a new payment
 // @route   POST /api/payments
 // @access  Private
 const createPayment = async (req, res) => {
   try {
+    // Parse JSON fields if they come as strings (from multipart/form-data)
+    let payments = req.body.payments;
+    if (typeof payments === 'string') {
+      try {
+        payments = JSON.parse(payments);
+      } catch (e) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid payments format. Must be a valid JSON array.',
+        });
+      }
+    }
+
     const { 
       sale, 
       amount, 
-      paymentMethod, 
+      paymentMethod, // For backward compatibility
+      bankAccount, // For backward compatibility
       paymentDate,
       transactionId, 
       status, 
@@ -22,22 +38,143 @@ const createPayment = async (req, res) => {
       isPartial
     } = req.body;
 
-    // Verify the sale exists
-    const saleRecord = await Sales.findById(sale);
-    if (!saleRecord) {
-      return res.status(404).json({
+    // Verify the sale exists (if provided)
+    let saleRecord = null;
+    let customerId = req.body.customer;
+    
+    if (sale) {
+      saleRecord = await Sales.findById(sale);
+      if (!saleRecord) {
+        return res.status(404).json({
+          status: 'fail',
+          message: 'Sale not found',
+        });
+      }
+      customerId = saleRecord.customer;
+    }
+
+    // Validate customer exists
+    if (!customerId) {
+      return res.status(400).json({
         status: 'fail',
-        message: 'Sale not found',
+        message: 'Customer is required',
       });
     }
 
-    // Calculate total payments already made for this sale
-    const existingPayments = await Payment.find({ sale });
-    const totalPaid = existingPayments.reduce((sum, payment) => sum + payment.amount, 0);
-    
-    // Calculate remaining balance
-    const remainingBalance = saleRecord.grandTotal - totalPaid;
-    
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Customer not found',
+      });
+    }
+
+    // Normalize payments array (support both new format and backward compatibility)
+    let normalizedPayments = [];
+    if (payments && Array.isArray(payments) && payments.length > 0) {
+      // New format: multiple payment methods
+      normalizedPayments = payments;
+    } else if (paymentMethod && amount) {
+      // Backward compatibility: single payment method
+      normalizedPayments = [{
+        method: paymentMethod,
+        amount: parseFloat(amount),
+        bankAccount: bankAccount || null
+      }];
+    } else {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Please provide either payments array or paymentMethod with amount',
+      });
+    }
+
+    // Validate payments array
+    if (!Array.isArray(normalizedPayments) || normalizedPayments.length === 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Please provide at least one payment method',
+      });
+    }
+
+    // Validate each payment
+    for (const payment of normalizedPayments) {
+      if (!payment.method || payment.amount === undefined) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Each payment must have: method and amount',
+        });
+      }
+
+      const validMethods = ['cash', 'credit_card', 'debit_card', 'advance_adjustment', 'bank_transfer', 'check', 'online_payment', 'mobile_payment', 'other', 'advance'];
+      if (!validMethods.includes(payment.method)) {
+        return res.status(400).json({
+          status: 'fail',
+          message: `Invalid payment method: ${payment.method}. Allowed: ${validMethods.join(', ')}`,
+        });
+      }
+
+      if (typeof payment.amount !== 'number' || payment.amount <= 0) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Payment amount must be a positive number',
+        });
+      }
+
+      // Validate bank account for bank_transfer payments
+      if (payment.method === 'bank_transfer' && payment.bankAccount) {
+        const bank = await BankAccount.findById(payment.bankAccount);
+        if (!bank) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'Bank account not found for bank_transfer payment',
+          });
+        }
+      }
+    }
+
+    // Calculate total payment amount
+    const totalPaymentAmount = normalizedPayments.reduce((sum, payment) => sum + payment.amount, 0);
+
+    // Calculate total payments already made for this sale (if sale exists)
+    let totalPaid = 0;
+    let remainingBalance = 0;
+    if (saleRecord) {
+      const existingPayments = await Payment.find({ sale });
+      totalPaid = existingPayments.reduce((sum, payment) => sum + payment.amount, 0);
+      remainingBalance = saleRecord.grandTotal - totalPaid;
+    }
+
+    // Handle file uploads for attachments
+    let uploadedAttachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        try {
+          const uploadResult = await new Promise((resolve, reject) => {
+            const stream = cloudinary.uploader.upload_stream(
+              { folder: 'payment-attachments' },
+              (error, result) => {
+                if (error) return reject(error);
+                resolve(result);
+              }
+            );
+            stream.end(file.buffer);
+          });
+          
+          uploadedAttachments.push({
+            url: uploadResult.secure_url || '',
+            name: file.originalname || '',
+            type: file.mimetype || ''
+          });
+        } catch (uploadError) {
+          console.error('Error uploading file:', uploadError);
+          // Continue with other files even if one fails
+        }
+      }
+    } else if (attachments && Array.isArray(attachments)) {
+      // If attachments are provided as JSON (for API calls)
+      uploadedAttachments = attachments;
+    }
+
     // Generate payment number
     const date = new Date(paymentDate || Date.now());
     const year = date.getFullYear().toString().slice(-2);
@@ -54,29 +191,38 @@ const createPayment = async (req, res) => {
     
     const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
     let excessAmount = 0;
-    let regularPaymentAmount = amount;
+    let regularPaymentAmount = totalPaymentAmount;
     let advancePayment = null;
 
-    // Check if payment amount exceeds remaining balance
-    if (amount > remainingBalance) {
-      excessAmount = amount - remainingBalance;
+    // Check if payment amount exceeds remaining balance (only if sale exists)
+    if (saleRecord && totalPaymentAmount > remainingBalance) {
+      excessAmount = totalPaymentAmount - remainingBalance;
       regularPaymentAmount = remainingBalance;
     }
+
+    // Prepare payments array for database
+    const paymentsForDB = normalizedPayments.map(payment => ({
+      method: payment.method,
+      amount: payment.amount,
+      bankAccount: (payment.method === 'bank_transfer' || payment.method === 'online_payment') && payment.bankAccount 
+        ? payment.bankAccount 
+        : null
+    }));
 
     // Create new payment for the invoice (up to the remaining balance)
     const payment = await Payment.create({
       paymentNumber,
-      sale,
-      customer: saleRecord.customer,
+      sale: sale || null,
+      customer: customerId,
       amount: regularPaymentAmount,
-      paymentMethod,
+      payments: paymentsForDB,
       paymentDate: paymentDate || Date.now(),
       transactionId,
       status: status || 'completed',
       notes,
-      attachments,
+      attachments: uploadedAttachments,
       user: req.user._id,
-      isPartial: false, // Since we're handling excess separately, this payment completes the invoice
+      isPartial: isPartial || false,
       currency
     });
 
@@ -86,26 +232,41 @@ const createPayment = async (req, res) => {
       user: req.user._id,
       action: 'created',
       changes: [],
-      notes: `Payment ${paymentNumber} created for invoice ${saleRecord.invoiceNumber}`,
+      notes: saleRecord 
+        ? `Payment ${paymentNumber} created for invoice ${saleRecord.invoiceNumber}` 
+        : `Payment ${paymentNumber} created for customer`,
     });
     
-    // Update sale payment status to paid
-    await Sales.findByIdAndUpdate(sale, { paymentStatus: 'paid' });
+    // Update sale payment status to paid (if sale exists)
+    if (saleRecord) {
+      const newRemainingBalance = remainingBalance - regularPaymentAmount;
+      if (newRemainingBalance <= 0) {
+        await Sales.findByIdAndUpdate(sale, { paymentStatus: 'paid' });
+      } else {
+        await Sales.findByIdAndUpdate(sale, { paymentStatus: 'partial' });
+      }
+    }
     
     // If there's excess payment, create an advance payment record
     if (excessAmount > 0) {
       const advancePaymentNumber = `${paymentNumber}-ADV`;
       
+      // Distribute excess amount proportionally across payment methods
+      const excessPayments = paymentsForDB.map(p => ({
+        ...p,
+        amount: (p.amount / totalPaymentAmount) * excessAmount
+      }));
+      
       advancePayment = await Payment.create({
         paymentNumber: advancePaymentNumber,
-        customer: saleRecord.customer,
+        customer: customerId,
         amount: excessAmount,
-        paymentMethod,
+        payments: excessPayments,
         paymentDate: paymentDate || Date.now(),
         transactionId: transactionId ? `${transactionId}-ADV` : undefined,
         status: status || 'completed',
         notes: notes ? `${notes} (Excess payment - advance for future invoices)` : 'Excess payment - advance for future invoices',
-        attachments,
+        attachments: uploadedAttachments,
         user: req.user._id,
         isPartial: false,
         currency,
@@ -118,7 +279,7 @@ const createPayment = async (req, res) => {
         user: req.user._id,
         action: 'created',
         changes: [],
-        notes: `Excess payment ${advancePaymentNumber} created for customer ${saleRecord.customer.name || saleRecord.customer} for future use`,
+        notes: `Excess payment ${advancePaymentNumber} created for customer for future use`,
       });
     }
     
@@ -128,12 +289,12 @@ const createPayment = async (req, res) => {
         payment,
         advancePayment,
         excessAmount,
-        originalAmount: amount,
-        invoiceAmount: regularPaymentAmount,
-        remainingBalance: 0, // Since we've fully paid the invoice
+        originalAmount: totalPaymentAmount,
+        invoiceAmount: saleRecord ? regularPaymentAmount : totalPaymentAmount,
+        remainingBalance: saleRecord ? (remainingBalance - regularPaymentAmount) : 0,
         message: excessAmount > 0 ? 
           `Payment of ${regularPaymentAmount} applied to invoice. Excess amount of ${excessAmount} recorded as advance payment.` : 
-          `Payment of ${regularPaymentAmount} completed the invoice.`
+          saleRecord ? `Payment of ${regularPaymentAmount} applied to invoice.` : `Payment of ${totalPaymentAmount} recorded.`
       }
     });
   } catch (error) {
@@ -300,9 +461,23 @@ const getPaymentById = async (req, res) => {
 // @access  Private
 const updatePayment = async (req, res) => {
   try {
+    // Parse JSON fields if they come as strings (from multipart/form-data)
+    let payments = req.body.payments;
+    if (typeof payments === 'string') {
+      try {
+        payments = JSON.parse(payments);
+      } catch (e) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid payments format. Must be a valid JSON array.',
+        });
+      }
+    }
+
     const { 
       amount, 
-      paymentMethod, 
+      paymentMethod, // For backward compatibility
+      bankAccount, // For backward compatibility
       paymentDate,
       transactionId, 
       status, 
@@ -320,34 +495,168 @@ const updatePayment = async (req, res) => {
       });
     }
 
-    // Get the sale
-    const saleRecord = await Sales.findById(payment.sale);
-    if (!saleRecord) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Associated sale not found',
-      });
+    // Get the sale (if exists)
+    let saleRecord = null;
+    if (payment.sale) {
+      saleRecord = await Sales.findById(payment.sale);
+      if (!saleRecord) {
+        return res.status(404).json({
+          status: 'fail',
+          message: 'Associated sale not found',
+        });
+      }
     }
 
     // Calculate total payments already made for this sale (excluding this payment)
-    const existingPayments = await Payment.find({ 
-      sale: payment.sale,
-      _id: { $ne: payment._id }
-    });
-    const totalPaid = existingPayments.reduce((sum, p) => sum + p.amount, 0);
-    
-    // Check if new payment amount is valid
-    if (amount && totalPaid + amount > saleRecord.grandTotal) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Payment amount exceeds the remaining balance',
+    let totalPaid = 0;
+    if (saleRecord) {
+      const existingPayments = await Payment.find({ 
+        sale: payment.sale,
+        _id: { $ne: payment._id }
       });
+      totalPaid = existingPayments.reduce((sum, p) => sum + p.amount, 0);
+    }
+
+    // Normalize payments array (support both new format and backward compatibility)
+    let normalizedPayments = null;
+    if (payments && Array.isArray(payments) && payments.length > 0) {
+      // New format: multiple payment methods
+      normalizedPayments = payments;
+    } else if (paymentMethod && amount) {
+      // Backward compatibility: single payment method
+      normalizedPayments = [{
+        method: paymentMethod,
+        amount: parseFloat(amount),
+        bankAccount: bankAccount || null
+      }];
+    }
+
+    // Validate payments array if provided
+    if (normalizedPayments) {
+      for (const pay of normalizedPayments) {
+        if (!pay.method || pay.amount === undefined) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'Each payment must have: method and amount',
+          });
+        }
+
+        const validMethods = ['cash', 'credit_card', 'debit_card', 'advance_adjustment', 'bank_transfer', 'check', 'online_payment', 'mobile_payment', 'other', 'advance'];
+        if (!validMethods.includes(pay.method)) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Invalid payment method: ${pay.method}`,
+          });
+        }
+
+        // Validate bank account for bank_transfer payments
+        if (pay.method === 'bank_transfer' && pay.bankAccount) {
+          const bank = await BankAccount.findById(pay.bankAccount);
+          if (!bank) {
+            return res.status(400).json({
+              status: 'fail',
+              message: 'Bank account not found for bank_transfer payment',
+            });
+          }
+        }
+      }
+
+      // Calculate total payment amount
+      const totalPaymentAmount = normalizedPayments.reduce((sum, p) => sum + p.amount, 0);
+      
+      // Check if new payment amount is valid (only if sale exists)
+      if (saleRecord && totalPaid + totalPaymentAmount > saleRecord.grandTotal) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Payment amount exceeds the remaining balance',
+        });
+      }
+    }
+
+    // Handle file uploads for attachments
+    let uploadedAttachments = payment.attachments || [];
+    if (req.files && req.files.length > 0) {
+      // Delete old attachments from Cloudinary
+      if (payment.attachments && payment.attachments.length > 0) {
+        for (const attachment of payment.attachments) {
+          if (attachment.url) {
+            try {
+              const publicId = attachment.url.split('/').slice(-2).join('/').split('.')[0];
+              await cloudinary.uploader.destroy(`payment-attachments/${publicId}`);
+            } catch (error) {
+              console.error('Error deleting old attachment:', error);
+            }
+          }
+        }
+      }
+
+      // Upload new files
+      uploadedAttachments = [];
+      for (const file of req.files) {
+        try {
+          const uploadResult = await new Promise((resolve, reject) => {
+            const stream = cloudinary.uploader.upload_stream(
+              { folder: 'payment-attachments' },
+              (error, result) => {
+                if (error) return reject(error);
+                resolve(result);
+              }
+            );
+            stream.end(file.buffer);
+          });
+          
+          uploadedAttachments.push({
+            url: uploadResult.secure_url || '',
+            name: file.originalname || '',
+            type: file.mimetype || ''
+          });
+        } catch (uploadError) {
+          console.error('Error uploading file:', uploadError);
+        }
+      }
+    } else if (attachments && Array.isArray(attachments)) {
+      // If attachments are provided as JSON (for API calls)
+      uploadedAttachments = attachments;
     }
 
     // Track changes for payment journey
     const changes = [];
     
-    if (amount !== undefined && amount !== payment.amount) {
+    if (normalizedPayments) {
+      const paymentsForDB = normalizedPayments.map(pay => ({
+        method: pay.method,
+        amount: pay.amount,
+        bankAccount: (pay.method === 'bank_transfer' || pay.method === 'online_payment') && pay.bankAccount 
+          ? pay.bankAccount 
+          : null
+      }));
+
+      const totalPaymentAmount = paymentsForDB.reduce((sum, p) => sum + p.amount, 0);
+      
+      if (totalPaymentAmount !== payment.amount) {
+        changes.push({
+          field: 'amount',
+          oldValue: payment.amount,
+          newValue: totalPaymentAmount
+        });
+        payment.amount = totalPaymentAmount;
+      }
+
+      if (JSON.stringify(paymentsForDB) !== JSON.stringify(payment.payments || [])) {
+        changes.push({
+          field: 'payments',
+          oldValue: payment.payments,
+          newValue: paymentsForDB
+        });
+        payment.payments = paymentsForDB;
+        
+        // Update legacy fields for backward compatibility
+        if (paymentsForDB.length > 0) {
+          payment.paymentMethod = paymentsForDB[0].method;
+          payment.bankAccount = paymentsForDB.find(p => p.bankAccount)?.bankAccount || null;
+        }
+      }
+    } else if (amount !== undefined && amount !== payment.amount) {
       changes.push({
         field: 'amount',
         oldValue: payment.amount,
@@ -356,7 +665,7 @@ const updatePayment = async (req, res) => {
       payment.amount = amount;
     }
     
-    if (paymentMethod && paymentMethod !== payment.paymentMethod) {
+    if (paymentMethod && !normalizedPayments && paymentMethod !== payment.paymentMethod) {
       changes.push({
         field: 'paymentMethod',
         oldValue: payment.paymentMethod,
@@ -401,13 +710,13 @@ const updatePayment = async (req, res) => {
       payment.notes = notes;
     }
     
-    if (attachments) {
+    if (uploadedAttachments.length > 0 && JSON.stringify(uploadedAttachments) !== JSON.stringify(payment.attachments || [])) {
       changes.push({
         field: 'attachments',
         oldValue: payment.attachments,
-        newValue: attachments
+        newValue: uploadedAttachments
       });
-      payment.attachments = attachments;
+      payment.attachments = uploadedAttachments;
     }
     
     if (currency && (!payment.currency || currency.toString() !== payment.currency.toString())) {
@@ -419,9 +728,12 @@ const updatePayment = async (req, res) => {
       payment.currency = currency;
     }
     
-    // Update isPartial status
-    if (amount !== undefined) {
-      const newIsPartial = totalPaid + amount < saleRecord.grandTotal;
+    // Update isPartial status (only if sale exists)
+    if (saleRecord && (amount !== undefined || normalizedPayments)) {
+      const newAmount = normalizedPayments 
+        ? normalizedPayments.reduce((sum, p) => sum + p.amount, 0)
+        : amount;
+      const newIsPartial = totalPaid + newAmount < saleRecord.grandTotal;
       if (newIsPartial !== payment.isPartial) {
         changes.push({
           field: 'isPartial',
@@ -444,24 +756,26 @@ const updatePayment = async (req, res) => {
         notes: `Payment ${payment.paymentNumber} updated`,
       });
       
-      // Update sale payment status
-      const allPayments = await Payment.find({ sale: payment.sale });
-      const totalPaidAmount = allPayments.reduce((sum, p) => sum + p.amount, 0);
-      let paymentStatus = 'unpaid';
+      // Update sale payment status (only if sale exists)
+      if (saleRecord) {
+        const allPayments = await Payment.find({ sale: payment.sale });
+        const totalPaidAmount = allPayments.reduce((sum, p) => sum + p.amount, 0);
+        let paymentStatus = 'unpaid';
       
-      if (totalPaidAmount >= saleRecord.grandTotal) {
-        paymentStatus = 'paid';
-      } else if (totalPaidAmount > 0) {
-        paymentStatus = 'partially_paid';
+        if (totalPaidAmount >= saleRecord.grandTotal) {
+          paymentStatus = 'paid';
+        } else if (totalPaidAmount > 0) {
+          paymentStatus = 'partially_paid';
+        }
+        
+        // Check if payment is overdue
+        const today = new Date();
+        if (saleRecord.dueDate && today > saleRecord.dueDate && totalPaidAmount < saleRecord.grandTotal) {
+          paymentStatus = 'overdue';
+        }
+        
+        await Sales.findByIdAndUpdate(saleRecord._id, { paymentStatus });
       }
-      
-      // Check if payment is overdue
-      const today = new Date();
-      if (saleRecord.dueDate && today > saleRecord.dueDate && totalPaidAmount < saleRecord.grandTotal) {
-        paymentStatus = 'overdue';
-      }
-      
-      await Sales.findByIdAndUpdate(saleRecord._id, { paymentStatus });
     }
 
     res.json({

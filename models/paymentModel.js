@@ -29,10 +29,35 @@ const paymentSchema = new mongoose.Schema(
       required: true,
       min: 0,
     },
+    // Support for multiple payment methods
+    payments: [{
+      method: {
+        type: String,
+        required: true,
+        enum: ['cash', 'credit_card', 'debit_card', 'advance_adjustment', 'bank_transfer', 'check', 'online_payment', 'mobile_payment', 'other', 'advance'],
+      },
+      amount: {
+        type: Number,
+        required: true,
+        min: 0,
+      },
+      bankAccount: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'BankAccount',
+        default: null,
+      },
+    }],
+    // Keep paymentMethod for backward compatibility (deprecated)
     paymentMethod: {
       type: String,
-      required: true,
+      required: false,
       enum: ['cash', 'credit_card', 'debit_card', 'advance_adjustment','bank_transfer', 'check', 'online_payment', 'mobile_payment', 'other','advance'],
+    },
+    // Keep bankAccount for backward compatibility (deprecated)
+    bankAccount: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'BankAccount',
+      default: null,
     },
     paymentDate: {
       type: Date,
@@ -145,8 +170,29 @@ paymentSchema.virtual('paymentTypeDisplay').get(function() {
   return types[this.paymentType] || 'Unknown';
 });
 
-// Pre-save middleware to generate payment number if not provided
+// Pre-save middleware to generate payment number and normalize payments
 paymentSchema.pre('save', async function(next) {
+  // Normalize payments array from single paymentMethod (backward compatibility)
+  if (!this.payments || this.payments.length === 0) {
+    if (this.paymentMethod) {
+      this.payments = [{
+        method: this.paymentMethod,
+        amount: this.amount,
+        bankAccount: this.bankAccount || null
+      }];
+    }
+  } else {
+    // Calculate total amount from payments array
+    this.amount = this.payments.reduce((sum, payment) => sum + (payment.amount || 0), 0);
+    
+    // Set legacy fields for backward compatibility
+    if (this.payments.length > 0) {
+      this.paymentMethod = this.payments[0].method;
+      this.bankAccount = this.payments.find(p => p.bankAccount)?.bankAccount || null;
+    }
+  }
+
+  // Generate payment number if not provided
   if (this.isNew && !this.paymentNumber) {
     const count = await this.constructor.countDocuments();
     const date = new Date();
