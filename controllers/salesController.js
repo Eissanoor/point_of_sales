@@ -452,7 +452,7 @@ const getSalesByLocation = async (req, res) => {
 const getSaleById = async (req, res) => {
   try {
     const sale = await Sales.findById(req.params.id)
-      .populate('customer', 'name email phoneNumber address')
+      .populate('customer', 'name email phoneNumber address referCode')
       .populate('items.product', 'name image barcode')
       .populate('user', 'name');
 
@@ -978,7 +978,7 @@ const getSalesByCustomerId = async (req, res) => {
     
     // Find sales for the specific customer with pagination
     const sales = await Sales.find(query)
-      .populate('customer', 'name email phoneNumber address')
+      .populate('customer', 'name email phoneNumber address referCode')
       .populate({
         path: 'items.product',
         select: 'name image price barcode category',
