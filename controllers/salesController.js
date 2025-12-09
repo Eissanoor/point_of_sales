@@ -1106,7 +1106,8 @@ const getSalesByCustomerId = async (req, res) => {
         name: customer.name,
         email: customer.email,
         phoneNumber: customer.phoneNumber,
-        address: customer.address
+        address: customer.address,
+        referCode: customer.referCode
       },
       summary: {
         totalAmount: summary.totalAmount,
