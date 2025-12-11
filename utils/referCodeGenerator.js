@@ -21,7 +21,8 @@ const REFER_CODE_PREFIXES = {
   'Warehouse': 'WH',
   'Purchase': 'PU',
   'BankAccount': 'BK',
-  'Expense': 'EX'
+  'Expense': 'EX',
+  'Sales': 'SA'
 };
 
 /**
