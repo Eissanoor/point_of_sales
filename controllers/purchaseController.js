@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Purchase = require('../models/purchaseModel');
 const Product = require('../models/productModel');
 const Supplier = require('../models/supplierModel');
@@ -147,6 +148,135 @@ const getPurchaseById = async (req, res) => {
         message: 'Purchase not found',
       });
     }
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Get purchase invoice data by purchase ID (optimized for invoice generation)
+// @route   GET /api/purchases/invoice/:purchaseId
+// @access  Private
+// @param   purchaseId - MongoDB ObjectId of the purchase
+const getPurchaseInvoiceById = async (req, res) => {
+  try {
+    const { purchaseId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(purchaseId)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid purchase ID format',
+      });
+    }
+
+    // Fetch purchase with essential fields for invoice
+    const purchase = await Purchase.findById(purchaseId)
+      .populate('supplier', 'name email phoneNumber address city state country')
+      .populate('items.product', 'name barcode')
+      .populate('shop', 'name location phoneNumber email')
+      .populate('warehouse', 'name country state city zipCode phoneNumber email')
+      .populate('currency', 'name code symbol')
+      .populate('bankAccount', 'accountName accountNumber bankName');
+
+    if (!purchase) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Purchase not found',
+      });
+    }
+
+    // Calculate payment summary from embedded payments
+    const totalPaid = purchase.payments?.reduce((sum, payment) => sum + (payment.amount || 0), 0) || 0;
+    const remainingBalance = Math.max(0, purchase.totalAmount - totalPaid);
+
+    // Prepare invoice items
+    const items = purchase.items.map((item) => ({
+      productName: item.product?.name || 'N/A',
+      barcode: item.product?.barcode || '',
+      quantity: item.quantity,
+      purchaseRate: item.purchaseRate,
+      retailRate: item.retailRate,
+      wholesaleRate: item.wholesaleRate,
+      total: item.itemTotal || (item.purchaseRate * item.quantity),
+    }));
+
+    // Build supplier address
+    const supplierAddress = [
+      purchase.supplier?.address,
+      purchase.supplier?.city,
+      purchase.supplier?.state,
+      purchase.supplier?.country,
+    ]
+      .filter(Boolean)
+      .join(', ');
+
+    // Invoice data
+    const invoiceData = {
+      invoiceNumber: purchase.invoiceNumber,
+      referCode: purchase.referCode,
+      purchaseDate: purchase.purchaseDate,
+      status: purchase.status,
+
+      supplier: {
+        name: purchase.supplier?.name || 'N/A',
+        email: purchase.supplier?.email || '',
+        phoneNumber: purchase.supplier?.phoneNumber || '',
+        address: supplierAddress || 'N/A',
+      },
+
+      shop: purchase.shop ? {
+        name: purchase.shop.name,
+        address: purchase.shop.location?.address || '',
+        phoneNumber: purchase.shop.phoneNumber || '',
+        email: purchase.shop.email || '',
+      } : null,
+
+      warehouse: purchase.warehouse ? {
+        name: purchase.warehouse.name,
+        address: [
+          purchase.warehouse.city,
+          purchase.warehouse.state,
+          purchase.warehouse.zipCode,
+          purchase.warehouse.country,
+        ]
+          .filter(Boolean)
+          .join(', '),
+        phoneNumber: purchase.warehouse.phoneNumber || '',
+        email: purchase.warehouse.email || '',
+      } : null,
+
+      currency: purchase.currency ? {
+        name: purchase.currency.name,
+        code: purchase.currency.code,
+        symbol: purchase.currency.symbol,
+      } : null,
+
+      bankAccount: purchase.bankAccount ? {
+        accountName: purchase.bankAccount.accountName,
+        accountNumber: purchase.bankAccount.accountNumber,
+        bankName: purchase.bankAccount.bankName,
+      } : null,
+
+      items: items,
+
+      totals: {
+        totalAmount: purchase.totalAmount || 0,
+        totalQuantity: purchase.totalQuantity || 0,
+      },
+
+      payment: {
+        totalPaid: totalPaid,
+        remainingBalance: remainingBalance,
+        payments: purchase.payments || [],
+      },
+    };
+
+    res.json({
+      status: 'success',
+      data: invoiceData,
+    });
   } catch (error) {
     res.status(500).json({
       status: 'error',
@@ -933,6 +1063,7 @@ const getPurchasesByProduct = async (req, res) => {
 module.exports = {
   getPurchases,
   getPurchaseById,
+  getPurchaseInvoiceById,
   createPurchase,
   updatePurchase,
   deletePurchase,

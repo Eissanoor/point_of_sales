@@ -3,6 +3,7 @@ const router = express.Router();
 const {
   getPurchases,
   getPurchaseById,
+  getPurchaseInvoiceById,
   createPurchase,
   updatePurchase,
   deletePurchase,
@@ -31,6 +32,11 @@ router.route('/stats').get(protect, getPurchaseStats);
 // @desc    Get purchases by product
 // @access  Private
 router.route('/product/:productId').get(protect, getPurchasesByProduct);
+
+// @route   GET /api/purchases/invoice/:purchaseId
+// @desc    Get purchase invoice data by purchase ID
+// @access  Private
+router.route('/invoice/:purchaseId').get(protect, getPurchaseInvoiceById);
 
 // @route   GET /api/purchases/:id
 // @desc    Get purchase by ID
