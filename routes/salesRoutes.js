@@ -6,6 +6,7 @@ const {
   getSales,
   getSalesByLocation,
   getSaleById,
+  getSaleInvoiceById,
   updateSale,
   deleteSale,
   getSalesByCustomer,
@@ -24,6 +25,9 @@ router.route('/by-customer')
 
 router.route('/customer/:customerId')
   .get(protect, getSalesByCustomerId);
+
+router.route('/invoice/:saleId')
+  .get(protect, getSaleInvoiceById);
 
 router.route('/:id')
   .get(protect, getSaleById)

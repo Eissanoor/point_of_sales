@@ -496,6 +496,127 @@ const getSaleById = async (req, res) => {
   }
 };
 
+// @desc    Get sale invoice data by sale ID (optimized for invoice generation)
+// @route   GET /api/sales/invoice/:saleId
+// @access  Private
+// @param   saleId - MongoDB ObjectId of the sale
+const getSaleInvoiceById = async (req, res) => {
+  try {
+    const { saleId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(saleId)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid sale ID format',
+      });
+    }
+
+    // Fetch sale with essential fields for invoice
+    const sale = await Sales.findById(saleId)
+      .populate('customer', 'name email phoneNumber address city state country zipCode')
+      .populate('items.product', 'name barcode')
+      .populate('shop', 'name location phoneNumber email')
+      .populate('warehouse', 'name country state city zipCode phoneNumber email');
+
+    if (!sale) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Sale not found',
+      });
+    }
+
+    // Get payment summary
+    const Payment = require('../models/paymentModel');
+    const payments = await Payment.find({ sale: saleId }).lean();
+    const totalPaid = payments.reduce((sum, payment) => sum + (payment.amount || 0), 0);
+    const remainingBalance = Math.max(0, sale.grandTotal - totalPaid);
+
+    // Prepare invoice items
+    const items = sale.items.map((item) => ({
+      productName: item.product?.name || 'N/A',
+      barcode: item.product?.barcode || '',
+      quantity: item.quantity,
+      price: item.price,
+      total: item.price * item.quantity,
+    }));
+
+    // Calculate subtotal from items
+    const subtotal = items.reduce((sum, item) => sum + item.total, 0);
+
+    // Build customer address
+    const customerAddress = [
+      sale.customer?.address,
+      sale.customer?.city,
+      sale.customer?.state,
+      sale.customer?.zipCode,
+      sale.customer?.country,
+    ]
+      .filter(Boolean)
+      .join(', ');
+
+    // Invoice data
+    const invoiceData = {
+      invoiceNumber: sale.invoiceNumber,
+      referCode: sale.referCode,
+      invoiceDate: sale.createdAt,
+      dueDate: sale.dueDate,
+      paymentStatus: sale.paymentStatus,
+      
+      customer: {
+        name: sale.customer?.name || 'N/A',
+        email: sale.customer?.email || '',
+        phoneNumber: sale.customer?.phoneNumber || '',
+        address: customerAddress || 'N/A',
+      },
+
+      shop: sale.shop ? {
+        name: sale.shop.name,
+        address: sale.shop.location?.address || '',
+        phoneNumber: sale.shop.phoneNumber || '',
+        email: sale.shop.email || '',
+      } : null,
+
+      warehouse: sale.warehouse ? {
+        name: sale.warehouse.name,
+        address: [
+          sale.warehouse.city,
+          sale.warehouse.state,
+          sale.warehouse.zipCode,
+          sale.warehouse.country,
+        ]
+          .filter(Boolean)
+          .join(', '),
+        phoneNumber: sale.warehouse.phoneNumber || '',
+        email: sale.warehouse.email || '',
+      } : null,
+
+      items: items,
+
+      totals: {
+        subtotal: subtotal,
+        discount: sale.discount || 0,
+        tax: sale.tax || 0,
+        grandTotal: sale.grandTotal,
+      },
+
+      payment: {
+        totalPaid: totalPaid,
+        remainingBalance: remainingBalance,
+      },
+    };
+
+    res.json({
+      status: 'success',
+      data: invoiceData,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 // @desc    Update sale by ID
 // @route   PUT /api/sales/:id
 // @access  Private
@@ -1141,6 +1262,7 @@ module.exports = {
   getSales,
   getSalesByLocation,
   getSaleById,
+  getSaleInvoiceById,
   updateSale,
   deleteSale,
   getSalesByCustomer,
