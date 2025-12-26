@@ -39,6 +39,7 @@ const miscellaneousExpenseRoutes = require('./routes/miscellaneousExpenseRoutes'
 const financialExpenseRoutes = require('./routes/financialExpenseRoutes');
 const bankAccountRoutes = require('./routes/bankAccountRoutes');
 const bankPaymentVoucherRoutes = require('./routes/bankPaymentVoucherRoutes');
+const cashPaymentVoucherRoutes = require('./routes/cashPaymentVoucherRoutes');
 const purchaseRoutes = require('./routes/purchaseRoutes');
 const quantityUnitRoutes = require('./routes/quantityUnitRoutes');
 const packingUnitRoutes = require('./routes/packingUnitRoutes');
@@ -99,6 +100,7 @@ app.use('/api/transporters', transporterRoutes);
 app.use('/api/shipments', shipmentRoutes);
 app.use('/api/bank-accounts', bankAccountRoutes);
 app.use('/api/bank-payment-vouchers', bankPaymentVoucherRoutes);
+app.use('/api/cash-payment-vouchers', cashPaymentVoucherRoutes);
 app.use('/api/purchases', purchaseRoutes);
 app.use('/api/quantity-units', quantityUnitRoutes);
 app.use('/api/packing-units', packingUnitRoutes);
