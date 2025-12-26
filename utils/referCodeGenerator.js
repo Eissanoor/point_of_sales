@@ -24,6 +24,7 @@ const REFER_CODE_PREFIXES = {
   'BankPaymentVoucher': 'BPV',
   'CashPaymentVoucher': 'CPV',
   'JournalPaymentVoucher': 'JV',
+  'OpeningBalanceVoucher': 'OBV',
   'Expense': 'EX',
   'Sales': 'SA'
 };
