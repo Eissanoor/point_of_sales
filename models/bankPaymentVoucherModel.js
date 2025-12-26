@@ -122,11 +122,41 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
         trim: true,
       },
     },
-    attachments: [{
-      url: String,
-      name: String,
-      type: String,
-    }],
+    attachments: {
+      type: [{
+        url: {
+          type: String,
+          default: ''
+        },
+        name: {
+          type: String,
+          default: ''
+        },
+        type: {
+          type: String,
+          default: ''
+        }
+      }],
+      default: [],
+      validate: {
+        validator: function(v) {
+          // Ensure it's an array
+          if (!Array.isArray(v)) return false;
+          // Ensure each element is an object with proper structure
+          // Allow plain objects and Mongoose subdocuments
+          return v.every(att => {
+            if (!att) return false;
+            if (Array.isArray(att)) return false;
+            // Check if it's an object (plain object, Mongoose document, etc.)
+            const isObject = typeof att === 'object';
+            // Check if it has the expected structure (at least one of url, name, type)
+            const hasStructure = att.url !== undefined || att.name !== undefined || att.type !== undefined;
+            return isObject && hasStructure;
+          });
+        },
+        message: 'Attachments must be an array of objects'
+      }
+    },
     user: {
       type: mongoose.Schema.Types.ObjectId,
       required: true,
@@ -150,9 +180,50 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
 // Apply the auto-increment plugin
 bankPaymentVoucherSchema.plugin(autoIncrementPlugin);
 
-// Pre-save hook to generate referCode and voucher number
+// Pre-save hook to normalize attachments and generate referCode
 bankPaymentVoucherSchema.pre('save', async function(next) {
   try {
+    // Normalize attachments if they come in as a string
+    if (this.attachments && typeof this.attachments === 'string') {
+      try {
+        let cleanString = this.attachments.trim();
+        // Remove any leading/trailing quotes if present
+        if ((cleanString.startsWith('"') && cleanString.endsWith('"')) || 
+            (cleanString.startsWith("'") && cleanString.endsWith("'"))) {
+          cleanString = cleanString.slice(1, -1);
+        }
+        // Replace escaped characters
+        cleanString = cleanString.replace(/\\n/g, '').replace(/\\'/g, "'").replace(/\\"/g, '"');
+        
+        const parsed = JSON.parse(cleanString);
+        if (Array.isArray(parsed)) {
+          this.attachments = parsed.filter(att => 
+            att && typeof att === 'object' && !Array.isArray(att)
+          ).map(att => ({
+            url: String(att.url || ''),
+            name: String(att.name || ''),
+            type: String(att.type || '')
+          }));
+        } else if (parsed && typeof parsed === 'object') {
+          this.attachments = [{
+            url: String(parsed.url || ''),
+            name: String(parsed.name || ''),
+            type: String(parsed.type || '')
+          }];
+        } else {
+          this.attachments = [];
+        }
+      } catch (e) {
+        console.error('Error parsing attachments in pre-save hook:', e);
+        this.attachments = [];
+      }
+    }
+    
+    // Ensure attachments is always an array
+    if (!Array.isArray(this.attachments)) {
+      this.attachments = [];
+    }
+
     // Generate referCode if not provided
     if (!this.referCode) {
       this.referCode = await generateReferCode('BankPaymentVoucher');
@@ -197,64 +268,6 @@ bankPaymentVoucherSchema.pre('save', async function(next) {
       this.transactionId = `TRX-${prefix}-${timestamp}-${randomPart}`;
     }
 
-    // Validate and clean attachments array - prevent strings from being saved
-    if (this.attachments) {
-      let cleanAttachments = [];
-      
-      // If it's a string, try to parse it
-      if (typeof this.attachments === 'string') {
-        try {
-          const parsed = JSON.parse(this.attachments);
-          if (Array.isArray(parsed)) {
-            cleanAttachments = parsed;
-          } else {
-            cleanAttachments = [];
-          }
-        } catch (e) {
-          cleanAttachments = [];
-        }
-      } else if (Array.isArray(this.attachments)) {
-        cleanAttachments = this.attachments;
-      } else {
-        cleanAttachments = [];
-      }
-      
-      // Deep clean: process each element
-      const finalAttachments = [];
-      for (const att of cleanAttachments) {
-        let processedAtt = att;
-        
-        // If element is a string, try to parse it
-        if (typeof processedAtt === 'string') {
-          try {
-            processedAtt = JSON.parse(processedAtt);
-            // If parsing results in an array, take first element
-            if (Array.isArray(processedAtt) && processedAtt.length > 0) {
-              processedAtt = processedAtt[0];
-            }
-          } catch (e) {
-            // Skip invalid strings
-            continue;
-          }
-        }
-        
-        // If it's an array, take first element
-        if (Array.isArray(processedAtt) && processedAtt.length > 0) {
-          processedAtt = processedAtt[0];
-        }
-        
-        // Only add if it's a valid object with url
-        if (processedAtt && typeof processedAtt === 'object' && !Array.isArray(processedAtt) && processedAtt.url) {
-          finalAttachments.push({
-            url: String(processedAtt.url || ''),
-            name: String(processedAtt.name || ''),
-            type: String(processedAtt.type || '')
-          });
-        }
-      }
-      
-      this.attachments = finalAttachments;
-    }
 
     // Set payeeModel based on payeeType
     if (this.payeeType === 'supplier') {

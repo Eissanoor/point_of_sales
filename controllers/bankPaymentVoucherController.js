@@ -118,7 +118,11 @@ const createBankPaymentVoucher = async (req, res) => {
       status,
       attachments,
     } = req.body;
-
+    
+    console.log('req.file:', req.file);
+    console.log('attachments from req.body:', attachments);
+    console.log('attachments type:', typeof attachments);
+    
     // Validate bank account exists
     const bankAccountExists = await BankAccount.findById(bankAccount);
     if (!bankAccountExists) {
@@ -152,9 +156,64 @@ const createBankPaymentVoucher = async (req, res) => {
 
     // Handle file uploads for attachments
     let uploadedAttachments = [];
+    
+    // Helper function to parse attachments string
+    const parseAttachmentsString = (attachmentsStr) => {
+      if (!attachmentsStr || typeof attachmentsStr !== 'string') {
+        return [];
+      }
+      
+      try {
+        let cleanString = attachmentsStr.trim();
+        
+        // Remove outer quotes if present
+        if ((cleanString.startsWith('"') && cleanString.endsWith('"')) || 
+            (cleanString.startsWith("'") && cleanString.endsWith("'"))) {
+          cleanString = cleanString.slice(1, -1);
+        }
+        
+        // Handle escaped characters - unescape the string
+        cleanString = cleanString
+          .replace(/\\n/g, '')
+          .replace(/\\r/g, '')
+          .replace(/\\t/g, '')
+          .replace(/\\'/g, "'")
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\');
+        
+        // Try to parse as JSON
+        const parsed = JSON.parse(cleanString);
+        
+        if (Array.isArray(parsed)) {
+          return parsed;
+        } else if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          // Single object, wrap in array
+          return [parsed];
+        }
+        
+        return [];
+      } catch (parseError) {
+        console.error('Error parsing attachments string:', parseError.message);
+        console.error('Raw attachments string:', attachmentsStr);
+        
+        // Try alternative parsing - look for JSON-like structure
+        try {
+          // Try to extract JSON from the string using regex
+          const jsonMatch = attachmentsStr.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            return Array.isArray(parsed) ? parsed : [parsed];
+          }
+        } catch (e) {
+          console.error('Alternative parsing also failed:', e.message);
+        }
+        
+        return [];
+      }
+    };
+    
+    // If a file is uploaded via req.file (single file)
     if (req.file) {
-      console.log('req.file', req.file);
-      // Single file uploaded - use that
       try {
         const uploadResult = await new Promise((resolve, reject) => {
           const stream = cloudinary.uploader.upload_stream(
@@ -167,43 +226,70 @@ const createBankPaymentVoucher = async (req, res) => {
           stream.end(req.file.buffer);
         });
         
-        uploadedAttachments = [{
-          url: uploadResult.secure_url || '',
-          name: req.file.originalname || '',
-          type: req.file.mimetype || ''
-        }];
+        uploadedAttachments.push({
+          url: String(uploadResult.secure_url || ''),
+          name: String(req.file.originalname || ''),
+          type: String(req.file.mimetype || '')
+        });
+        
+        console.log('File uploaded to Cloudinary, attachment added:', uploadedAttachments[0]);
       } catch (uploadError) {
         console.error('Error uploading file:', uploadError);
+        // Continue even if upload fails
       }
-    } else if (attachments) {
-      // Handle attachments from req.body (could be array or string from multipart/form-data)
+    }
+    
+    // Handle attachments from req.body (already uploaded to Cloudinary or provided as data)
+    if (attachments !== undefined && attachments !== null) {
+      let parsedAttachments = [];
+      
       if (Array.isArray(attachments)) {
-        // Already an array - validate and use
-        uploadedAttachments = attachments.filter(att => {
-          return att && typeof att === 'object' && !Array.isArray(att) && att.url;
-        }).map(att => ({
-          url: String(att.url || ''),
-          name: String(att.name || ''),
-          type: String(att.type || '')
-        }));
+        // Already an array
+        parsedAttachments = attachments;
       } else if (typeof attachments === 'string') {
-        // String from multipart/form-data - try to parse
-        try {
-          const parsed = JSON.parse(attachments);
-          if (Array.isArray(parsed)) {
-            uploadedAttachments = parsed.filter(att => {
-              return att && typeof att === 'object' && !Array.isArray(att) && att.url;
-            }).map(att => ({
-              url: String(att.url || ''),
-              name: String(att.name || ''),
-              type: String(att.type || '')
-            }));
-          }
-        } catch (e) {
-          // Invalid JSON string - ignore
-          uploadedAttachments = [];
-        }
+        // String that needs parsing
+        parsedAttachments = parseAttachmentsString(attachments);
+      } else if (typeof attachments === 'object' && !Array.isArray(attachments)) {
+        // Single object
+        parsedAttachments = [attachments];
       }
+      
+      // Normalize and validate each attachment
+      const normalizedAttachments = parsedAttachments
+        .filter(att => {
+          // Filter out invalid entries
+          if (!att || Array.isArray(att)) return false;
+          if (typeof att !== 'object') return false;
+          // Must have at least url or name
+          return att.url || att.name;
+        })
+        .map(att => {
+          // Ensure proper structure
+          return {
+            url: String(att.url || ''),
+            name: String(att.name || ''),
+            type: String(att.type || att.mimetype || '')
+          };
+        });
+      
+      // Merge with any file uploads
+      if (req.file && uploadedAttachments.length > 0) {
+        // If file was uploaded, combine with existing attachments
+        uploadedAttachments = [...uploadedAttachments, ...normalizedAttachments];
+      } else {
+        // Use parsed attachments
+        uploadedAttachments = normalizedAttachments;
+      }
+      
+      console.log('Final attachments to save:', uploadedAttachments);
+    }
+
+    // Validate user is authenticated
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({
+        status: 'fail',
+        message: 'User not authenticated',
+      });
     }
 
     // Create voucher (voucherNumber and voucherDate will be auto-generated if not provided)
@@ -213,9 +299,9 @@ const createBankPaymentVoucher = async (req, res) => {
       payeeType,
       payee,
       payeeName,
-      amount,
+      amount: typeof amount === 'string' ? parseFloat(amount) : amount,
       currency,
-      currencyExchangeRate: currencyExchangeRate || 1,
+      currencyExchangeRate: currencyExchangeRate ? (typeof currencyExchangeRate === 'string' ? parseFloat(currencyExchangeRate) : currencyExchangeRate) : 1,
       paymentMethod,
       checkNumber,
       transactionId,
@@ -233,13 +319,35 @@ const createBankPaymentVoucher = async (req, res) => {
 
     // Only set voucherDate if explicitly provided, otherwise model default will handle it
     if (voucherDate) {
-      voucherData.voucherDate = voucherDate;
+      // Handle different date formats (ISO string, DD/MM/YYYY, etc.)
+      const parsedDate = new Date(voucherDate);
+      if (!isNaN(parsedDate.getTime())) {
+        voucherData.voucherDate = parsedDate;
+      } else {
+        console.warn('Invalid voucherDate format, using default:', voucherDate);
+      }
     }
 
     // Only set voucherNumber if explicitly provided, otherwise model will auto-generate it
     if (req.body.voucherNumber) {
       voucherData.voucherNumber = req.body.voucherNumber;
     }
+
+    // Final safety check: ensure attachments is always an array of proper objects
+    if (!Array.isArray(voucherData.attachments)) {
+      voucherData.attachments = [];
+    } else {
+      voucherData.attachments = voucherData.attachments
+        .filter(att => att && typeof att === 'object' && !Array.isArray(att))
+        .map(att => ({
+          url: String(att.url || ''),
+          name: String(att.name || ''),
+          type: String(att.type || '')
+        }));
+    }
+
+    console.log('Final voucherData.attachments before save:', voucherData.attachments);
+    console.log('Full voucherData before save:', JSON.stringify(voucherData, null, 2));
 
     const voucher = await BankPaymentVoucher.create(voucherData);
 
@@ -259,9 +367,41 @@ const createBankPaymentVoucher = async (req, res) => {
       },
     });
   } catch (error) {
+    console.error('Error creating bank payment voucher:', error);
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    
+    // If it's a validation error, log the details
+    if (error.name === 'ValidationError') {
+      console.error('Validation errors:', error.errors);
+      const validationErrors = Object.keys(error.errors).map(key => ({
+        field: key,
+        message: error.errors[key].message,
+        value: error.errors[key].value
+      }));
+      console.error('Validation error details:', validationErrors);
+      
+      return res.status(400).json({
+        status: 'error',
+        message: 'Validation failed',
+        errors: validationErrors,
+      });
+    }
+    
+    // If it's a duplicate key error
+    if (error.code === 11000) {
+      const duplicateField = Object.keys(error.keyPattern)[0];
+      return res.status(400).json({
+        status: 'error',
+        message: `${duplicateField} already exists`,
+        field: duplicateField,
+      });
+    }
+    
     res.status(500).json({
       status: 'error',
       message: error.message,
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 };
@@ -312,8 +452,69 @@ const updateBankPaymentVoucher = async (req, res) => {
       attachments,
     } = req.body;
 
+    console.log('Update - req.file:', req.file);
+    console.log('Update - attachments from req.body:', attachments);
+    console.log('Update - attachments type:', typeof attachments);
+
+    // Helper function to parse attachments string (same as create function)
+    const parseAttachmentsString = (attachmentsStr) => {
+      if (!attachmentsStr || typeof attachmentsStr !== 'string') {
+        return [];
+      }
+      
+      try {
+        let cleanString = attachmentsStr.trim();
+        
+        // Remove outer quotes if present
+        if ((cleanString.startsWith('"') && cleanString.endsWith('"')) || 
+            (cleanString.startsWith("'") && cleanString.endsWith("'"))) {
+          cleanString = cleanString.slice(1, -1);
+        }
+        
+        // Handle escaped characters - unescape the string
+        cleanString = cleanString
+          .replace(/\\n/g, '')
+          .replace(/\\r/g, '')
+          .replace(/\\t/g, '')
+          .replace(/\\'/g, "'")
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\');
+        
+        // Try to parse as JSON
+        const parsed = JSON.parse(cleanString);
+        
+        if (Array.isArray(parsed)) {
+          return parsed;
+        } else if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          // Single object, wrap in array
+          return [parsed];
+        }
+        
+        return [];
+      } catch (parseError) {
+        console.error('Error parsing attachments string:', parseError.message);
+        console.error('Raw attachments string:', attachmentsStr);
+        
+        // Try alternative parsing - look for JSON-like structure
+        try {
+          // Try to extract JSON from the string using regex
+          const jsonMatch = attachmentsStr.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            return Array.isArray(parsed) ? parsed : [parsed];
+          }
+        } catch (e) {
+          console.error('Alternative parsing also failed:', e.message);
+        }
+        
+        return [];
+      }
+    };
+
     // Handle file uploads for attachments
     let uploadedAttachments = voucher.attachments || [];
+    
+    // If a new file is uploaded via req.file (single file)
     if (req.file) {
       // Delete old attachments from Cloudinary if replacing
       if (voucher.attachments && voucher.attachments.length > 0) {
@@ -329,7 +530,7 @@ const updateBankPaymentVoucher = async (req, res) => {
         }
       }
 
-      // Upload new single file
+      // Upload new file
       uploadedAttachments = [];
       try {
         const uploadResult = await new Promise((resolve, reject) => {
@@ -343,75 +544,69 @@ const updateBankPaymentVoucher = async (req, res) => {
           stream.end(req.file.buffer);
         });
         
-        uploadedAttachments = [{
-          url: uploadResult.secure_url || '',
-          name: req.file.originalname || '',
-          type: req.file.mimetype || ''
-        }];
+        uploadedAttachments.push({
+          url: String(uploadResult.secure_url || ''),
+          name: String(req.file.originalname || ''),
+          type: String(req.file.mimetype || '')
+        });
+        
+        console.log('Update - File uploaded to Cloudinary, attachment added:', uploadedAttachments[0]);
       } catch (uploadError) {
         console.error('Error uploading file:', uploadError);
+        // Keep existing attachments if upload fails
+        uploadedAttachments = voucher.attachments || [];
       }
-    } else if (attachments !== undefined) {
-      // Handle attachments from req.body (could be array or string from multipart/form-data)
-      if (Array.isArray(attachments)) {
-        // Already an array - validate and use
-        uploadedAttachments = attachments.filter(att => {
-          return att && typeof att === 'object' && !Array.isArray(att) && att.url;
-        }).map(att => ({
-          url: String(att.url || ''),
-          name: String(att.name || ''),
-          type: String(att.type || '')
-        }));
-      } else if (typeof attachments === 'string') {
-        // String from multipart/form-data - try to parse
-        try {
-          const parsed = JSON.parse(attachments);
-          if (Array.isArray(parsed)) {
-            uploadedAttachments = parsed.filter(att => {
-              return att && typeof att === 'object' && !Array.isArray(att) && att.url;
-            }).map(att => ({
-              url: String(att.url || ''),
-              name: String(att.name || ''),
-              type: String(att.type || '')
-            }));
-          } else {
-            // Keep existing attachments if parsed value is not an array
-            uploadedAttachments = voucher.attachments || [];
-          }
-        } catch (e) {
-          // Invalid JSON string - keep existing attachments
-          uploadedAttachments = voucher.attachments || [];
-        }
-      } else if (attachments === null) {
-        // Explicitly set to empty array if null
-        uploadedAttachments = [];
-      }
-    }
-
-    // Final safety check: Ensure uploadedAttachments is always an array of valid objects
-    // This prevents any strings from being saved
-    if (!Array.isArray(uploadedAttachments)) {
-      uploadedAttachments = [];
     }
     
-    // Deep clean: Remove any strings, arrays, or invalid objects
-    uploadedAttachments = uploadedAttachments
-      .filter(att => {
-        // Only keep if it's an object (not string, not array, not null)
-        if (!att || typeof att !== 'object' || Array.isArray(att)) {
-          return false;
+    // Handle attachments from req.body (already uploaded to Cloudinary or provided as data)
+    if (attachments !== undefined) {
+      if (attachments === null) {
+        // Explicitly set to empty array if null
+        uploadedAttachments = [];
+      } else {
+        let parsedAttachments = [];
+        
+        if (Array.isArray(attachments)) {
+          // Already an array
+          parsedAttachments = attachments;
+        } else if (typeof attachments === 'string') {
+          // String that needs parsing
+          parsedAttachments = parseAttachmentsString(attachments);
+        } else if (typeof attachments === 'object' && !Array.isArray(attachments)) {
+          // Single object
+          parsedAttachments = [attachments];
         }
-        // Must have url property
-        if (!att.url || typeof att.url !== 'string') {
-          return false;
+        
+        // Normalize and validate each attachment
+        const normalizedAttachments = parsedAttachments
+          .filter(att => {
+            // Filter out invalid entries
+            if (!att || Array.isArray(att)) return false;
+            if (typeof att !== 'object') return false;
+            // Must have at least url or name
+            return att.url || att.name;
+          })
+          .map(att => {
+            // Ensure proper structure
+            return {
+              url: String(att.url || ''),
+              name: String(att.name || ''),
+              type: String(att.type || att.mimetype || '')
+            };
+          });
+        
+        // Merge with any file uploads
+        if (req.file && uploadedAttachments.length > 0) {
+          // If file was uploaded, combine with existing attachments
+          uploadedAttachments = [...uploadedAttachments, ...normalizedAttachments];
+        } else {
+          // Use parsed attachments
+          uploadedAttachments = normalizedAttachments;
         }
-        return true;
-      })
-      .map(att => ({
-        url: String(att.url || ''),
-        name: String(att.name || ''),
-        type: String(att.type || '')
-      }));
+        
+        console.log('Update - Final attachments to save:', uploadedAttachments);
+      }
+    }
 
     // Update fields
     if (voucherDate !== undefined) voucher.voucherDate = voucherDate;
@@ -443,7 +638,21 @@ const updateBankPaymentVoucher = async (req, res) => {
     if (description !== undefined) voucher.description = description;
     if (notes !== undefined) voucher.notes = notes;
     if (status !== undefined) voucher.status = status;
-    voucher.attachments = uploadedAttachments;
+    if (attachments !== undefined || req.file) {
+      // Final safety check: ensure attachments is always an array of proper objects
+      if (!Array.isArray(uploadedAttachments)) {
+        voucher.attachments = [];
+      } else {
+        voucher.attachments = uploadedAttachments
+          .filter(att => att && typeof att === 'object' && !Array.isArray(att))
+          .map(att => ({
+            url: String(att.url || ''),
+            name: String(att.name || ''),
+            type: String(att.type || '')
+          }));
+      }
+      console.log('Update - Final voucher.attachments before save:', voucher.attachments);
+    }
 
     const updatedVoucher = await voucher.save();
 

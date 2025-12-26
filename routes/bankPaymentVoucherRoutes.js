@@ -21,7 +21,7 @@ const {
 router.route('/').get(protect, getBankPaymentVouchers);
 
 // @route   POST /api/bank-payment-vouchers
-// @desc    Create new bank payment voucher (supports multipart/form-data for file uploads)
+// @desc    Create new bank payment voucher (supports file upload)
 // @access  Private
 // @field   attachment - File field name for uploading a single attachment file
 router.route('/').post(protect, uploadSingleAttachment, createBankPaymentVoucher);
@@ -37,7 +37,7 @@ router.route('/bank-account/:bankAccountId').get(protect, getVouchersByBankAccou
 router.route('/:id').get(protect, getBankPaymentVoucherById);
 
 // @route   PUT /api/bank-payment-vouchers/:id
-// @desc    Update bank payment voucher (supports multipart/form-data for file uploads)
+// @desc    Update bank payment voucher (supports file upload)
 // @access  Private
 // @field   attachment - File field name for uploading a single attachment file
 router.route('/:id').put(protect, uploadSingleAttachment, updateBankPaymentVoucher);
