@@ -23,6 +23,7 @@ const REFER_CODE_PREFIXES = {
   'BankAccount': 'BK',
   'BankPaymentVoucher': 'BPV',
   'CashPaymentVoucher': 'CPV',
+  'JournalPaymentVoucher': 'JV',
   'Expense': 'EX',
   'Sales': 'SA'
 };
