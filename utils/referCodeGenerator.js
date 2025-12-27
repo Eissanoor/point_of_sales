@@ -26,6 +26,7 @@ const REFER_CODE_PREFIXES = {
   'JournalPaymentVoucher': 'JV',
   'OpeningBalanceVoucher': 'OBV',
   'ReconcileBankAccountsVoucher': 'RBV',
+  'BankAccountTransferVoucher': 'BTV',
   'Expense': 'EX',
   'Sales': 'SA'
 };
