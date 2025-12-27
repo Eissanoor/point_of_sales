@@ -27,6 +27,7 @@ const REFER_CODE_PREFIXES = {
   'OpeningBalanceVoucher': 'OBV',
   'ReconcileBankAccountsVoucher': 'RBV',
   'BankAccountTransferVoucher': 'BTV',
+  'SarafEntryVoucher': 'SEV',
   'Expense': 'EX',
   'Sales': 'SA'
 };

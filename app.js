@@ -44,6 +44,7 @@ const journalPaymentVoucherRoutes = require('./routes/journalPaymentVoucherRoute
 const openingBalanceVoucherRoutes = require('./routes/openingBalanceVoucherRoutes');
 const reconcileBankAccountsVoucherRoutes = require('./routes/reconcileBankAccountsVoucherRoutes');
 const bankAccountTransferVoucherRoutes = require('./routes/bankAccountTransferVoucherRoutes');
+const sarafEntryVoucherRoutes = require('./routes/sarafEntryVoucherRoutes');
 const purchaseRoutes = require('./routes/purchaseRoutes');
 const quantityUnitRoutes = require('./routes/quantityUnitRoutes');
 const packingUnitRoutes = require('./routes/packingUnitRoutes');
@@ -109,6 +110,7 @@ app.use('/api/journal-payment-vouchers', journalPaymentVoucherRoutes);
 app.use('/api/opening-balance-vouchers', openingBalanceVoucherRoutes);
 app.use('/api/reconcile-bank-accounts-vouchers', reconcileBankAccountsVoucherRoutes);
 app.use('/api/bank-account-transfer-vouchers', bankAccountTransferVoucherRoutes);
+app.use('/api/saraf-entry-vouchers', sarafEntryVoucherRoutes);
 app.use('/api/purchases', purchaseRoutes);
 app.use('/api/quantity-units', quantityUnitRoutes);
 app.use('/api/packing-units', packingUnitRoutes);
