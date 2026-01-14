@@ -35,7 +35,10 @@ const REFER_CODE_PREFIXES = {
   'Asset': 'AS',
   'Owner': 'OW',
   'PartnershipAccount': 'PA',
-  'Income': 'IN'
+  'Income': 'IN',
+  'PropertyAccount': 'PROP',
+  'Employee': 'EMP',
+  'Liability': 'LB'
 };
 
 /**

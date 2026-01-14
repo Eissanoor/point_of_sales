@@ -57,6 +57,9 @@ const productReturnRoutes = require('./routes/productReturnRoutes');
 const ownerRoutes = require('./routes/ownerRoutes');
 const partnershipAccountRoutes = require('./routes/partnershipAccountRoutes');
 const incomeRoutes = require('./routes/incomeRoutes');
+const propertyAccountRoutes = require('./routes/propertyAccountRoutes');
+const employeeRoutes = require('./routes/employeeRoutes');
+const liabilityRoutes = require('./routes/liabilityRoutes');
 
 // Initialize express app
 const app = express();
@@ -129,6 +132,9 @@ app.use('/api/product-returns', productReturnRoutes);
 app.use('/api/owners', ownerRoutes);
 app.use('/api/partnership-accounts', partnershipAccountRoutes);
 app.use('/api/incomes', incomeRoutes);
+app.use('/api/property-accounts', propertyAccountRoutes);
+app.use('/api/employees', employeeRoutes);
+app.use('/api/liabilities', liabilityRoutes);
 
 // Root route
 app.get('/', (req, res) => {
