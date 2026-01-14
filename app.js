@@ -40,6 +40,9 @@ const financialExpenseRoutes = require('./routes/financialExpenseRoutes');
 const bankAccountRoutes = require('./routes/bankAccountRoutes');
 const bankPaymentVoucherRoutes = require('./routes/bankPaymentVoucherRoutes');
 const cashPaymentVoucherRoutes = require('./routes/cashPaymentVoucherRoutes');
+const cashBookRoutes = require('./routes/cashBookRoutes');
+const capitalRoutes = require('./routes/capitalRoutes');
+const assetRoutes = require('./routes/assetRoutes');
 const journalPaymentVoucherRoutes = require('./routes/journalPaymentVoucherRoutes');
 const openingBalanceVoucherRoutes = require('./routes/openingBalanceVoucherRoutes');
 const reconcileBankAccountsVoucherRoutes = require('./routes/reconcileBankAccountsVoucherRoutes');
@@ -51,6 +54,9 @@ const packingUnitRoutes = require('./routes/packingUnitRoutes');
 const pochuesRoutes = require('./routes/pochuesRoutes');
 const productDamageRoutes = require('./routes/productDamageRoutes');
 const productReturnRoutes = require('./routes/productReturnRoutes');
+const ownerRoutes = require('./routes/ownerRoutes');
+const partnershipAccountRoutes = require('./routes/partnershipAccountRoutes');
+const incomeRoutes = require('./routes/incomeRoutes');
 
 // Initialize express app
 const app = express();
@@ -106,6 +112,9 @@ app.use('/api/shipments', shipmentRoutes);
 app.use('/api/bank-accounts', bankAccountRoutes);
 app.use('/api/bank-payment-vouchers', bankPaymentVoucherRoutes);
 app.use('/api/cash-payment-vouchers', cashPaymentVoucherRoutes);
+app.use('/api/cash-books', cashBookRoutes);
+app.use('/api/capitals', capitalRoutes);
+app.use('/api/assets', assetRoutes);
 app.use('/api/journal-payment-vouchers', journalPaymentVoucherRoutes);
 app.use('/api/opening-balance-vouchers', openingBalanceVoucherRoutes);
 app.use('/api/reconcile-bank-accounts-vouchers', reconcileBankAccountsVoucherRoutes);
@@ -117,6 +126,9 @@ app.use('/api/packing-units', packingUnitRoutes);
 app.use('/api/pochues', pochuesRoutes);
 app.use('/api/product-damages', productDamageRoutes);
 app.use('/api/product-returns', productReturnRoutes);
+app.use('/api/owners', ownerRoutes);
+app.use('/api/partnership-accounts', partnershipAccountRoutes);
+app.use('/api/incomes', incomeRoutes);
 
 // Root route
 app.get('/', (req, res) => {

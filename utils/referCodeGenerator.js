@@ -29,7 +29,13 @@ const REFER_CODE_PREFIXES = {
   'BankAccountTransferVoucher': 'BTV',
   'SarafEntryVoucher': 'SEV',
   'Expense': 'EX',
-  'Sales': 'SA'
+  'Sales': 'SA',
+  'CashBook': 'CB',
+  'Capital': 'CAP',
+  'Asset': 'AS',
+  'Owner': 'OW',
+  'PartnershipAccount': 'PA',
+  'Income': 'IN'
 };
 
 /**
