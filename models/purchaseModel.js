@@ -137,6 +137,19 @@ const purchaseSchema = new mongoose.Schema(
       enum: ['pending', 'completed', 'cancelled'],
       default: 'completed',
     },
+    paymentStatus: {
+      type: String,
+      enum: ['unpaid', 'partially_paid', 'paid', 'overdue'],
+      default: 'unpaid',
+    },
+    dueDate: {
+      type: Date,
+      default: function() {
+        const date = new Date();
+        date.setDate(date.getDate() + 30); // Default 30 days due date
+        return date;
+      },
+    },
     isActive: {
       type: Boolean,
       default: true,

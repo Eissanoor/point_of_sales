@@ -62,6 +62,11 @@ const customerSchema = new mongoose.Schema(
       unique: true,
       trim: true,
     },
+    advanceBalance: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
   },
   {
     timestamps: true,

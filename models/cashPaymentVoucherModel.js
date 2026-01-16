@@ -106,7 +106,7 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     },
     relatedSupplierPayment: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'SupplierPayment',
+      ref: 'Payment', // Now references unified Payment model
     },
     description: {
       type: String,

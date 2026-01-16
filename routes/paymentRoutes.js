@@ -19,7 +19,13 @@ const {
   getPaymentSummary,
   getPaymentsByCustomer,
   createRefund,
-  getPaymentAnalytics
+  getPaymentAnalytics,
+  // Supplier payment functions
+  createSupplierPayment,
+  getPaymentsByPurchaseId,
+  getPaymentsBySupplier,
+  getSupplierAdvancePayments,
+  applyAdvancePaymentToPurchase
 } = require('../controllers/paymentController');
 const { protect } = require('../middlewares/authMiddleware');
 const { uploadMultiple } = require('../middlewares/uploadMiddleware');
@@ -47,6 +53,12 @@ router.route('/customer')
 router.route('/apply-customer-advance')
   .post(protect, applyAdvancePaymentToSale);
 
+router.route('/supplier')
+  .post(protect, uploadMultiple, createSupplierPayment);
+
+router.route('/apply-supplier-advance')
+  .post(protect, applyAdvancePaymentToPurchase);
+
 // Routes that need a specific ID
 router.route('/:id')
   .get(protect, getPaymentById)
@@ -59,14 +71,23 @@ router.route('/:id/journey')
 router.route('/sale/:saleId')
   .get(protect, getPaymentsBySaleId);
 
+router.route('/purchase/:purchaseId')
+  .get(protect, getPaymentsByPurchaseId);
+
 router.route('/customer/:customerId')
   .get(protect, getPaymentsByCustomer);
+
+router.route('/supplier/:supplierId')
+  .get(protect, getPaymentsBySupplier);
 
 router.route('/customer/:customerId/analytics')
   .get(protect, getCustomerPaymentAnalytics);
 
 router.route('/customer/:customerId/advance')
   .get(protect, getCustomerAdvancePayments);
+
+router.route('/supplier/:supplierId/advance')
+  .get(protect, getSupplierAdvancePayments);
 
 // Routes for customer payment journey
 router.route('/customer/:customerId/journey')

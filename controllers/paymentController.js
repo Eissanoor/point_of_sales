@@ -3,6 +3,8 @@ const Product = require('../models/productModel');
 const Payment = require('../models/paymentModel');
 const PaymentJourney = require('../models/paymentJourneyModel');
 const Customer = require('../models/customerModel');
+const Supplier = require('../models/supplierModel');
+const Purchase = require('../models/purchaseModel');
 const BankAccount = require('../models/bankAccountModel');
 const cloudinary = require('cloudinary').v2;
 
@@ -271,6 +273,11 @@ const createPayment = async (req, res) => {
         isPartial: false,
         currency,
         isAdvancePayment: true
+      });
+      
+      // Update customer advance balance
+      await Customer.findByIdAndUpdate(customerId, {
+        $inc: { advanceBalance: excessAmount }
       });
       
       // Create payment journey record for advance payment
@@ -1417,6 +1424,11 @@ const createCustomerPayment = async (req, res) => {
         isAdvancePayment: true // Flag to indicate this is an advance payment
       });
       
+      // Update customer advance balance
+      await Customer.findByIdAndUpdate(customerId, {
+        $inc: { advanceBalance: amount }
+      });
+      
       // Create payment journey record
       await PaymentJourney.create({
         payment: payment._id,
@@ -1599,6 +1611,11 @@ const createCustomerPayment = async (req, res) => {
         isPartial: false,
         currency,
         isAdvancePayment: true // Flag to indicate this is an advance payment
+      });
+      
+      // Update customer advance balance
+      await Customer.findByIdAndUpdate(customerId, {
+        $inc: { advanceBalance: excessAmount }
       });
       
       payments.push(excessPayment);
@@ -2541,6 +2558,11 @@ const applyAdvancePaymentToSale = async (req, res) => {
         notes: `Payment ${paymentNumber} created from advance payment for invoice ${sale.invoiceNumber}`,
       });
 
+      // Update customer advance balance
+      await Customer.findByIdAndUpdate(customerId, {
+        $inc: { advanceBalance: -amountToApply }
+      });
+
       // Update sale payment status
       let paymentStatus = 'unpaid';
       if (amountToApply >= remainingBalance) {
@@ -2999,6 +3021,650 @@ const getPaymentAnalytics = async (req, res) => {
   }
 };
 
+// ==================== SUPPLIER PAYMENT FUNCTIONS ====================
+
+// @desc    Create payment for a supplier (purchase payment)
+// @route   POST /api/payments/supplier
+// @access  Private
+const createSupplierPayment = async (req, res) => {
+  try {
+    // Parse JSON fields if they come as strings (from multipart/form-data)
+    let payments = req.body.payments;
+    if (typeof payments === 'string') {
+      try {
+        payments = JSON.parse(payments);
+      } catch (e) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Invalid payments format. Must be a valid JSON array.',
+        });
+      }
+    }
+
+    const { 
+      purchase, 
+      amount, 
+      paymentMethod, // For backward compatibility
+      bankAccount, // For backward compatibility
+      paymentDate,
+      transactionId, 
+      status, 
+      notes,
+      attachments,
+      currency,
+      isPartial
+    } = req.body;
+
+    // Verify the purchase exists (if provided)
+    let purchaseRecord = null;
+    let supplierId = req.body.supplier;
+    
+    if (purchase) {
+      purchaseRecord = await Purchase.findById(purchase);
+      if (!purchaseRecord) {
+        return res.status(404).json({
+          status: 'fail',
+          message: 'Purchase not found',
+        });
+      }
+      supplierId = purchaseRecord.supplier;
+    }
+
+    // Validate supplier exists
+    if (!supplierId) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Supplier is required',
+      });
+    }
+
+    const supplier = await Supplier.findById(supplierId);
+    if (!supplier) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Supplier not found',
+      });
+    }
+
+    // Normalize payments array (support both new format and backward compatibility)
+    let normalizedPayments = [];
+    if (payments && Array.isArray(payments) && payments.length > 0) {
+      normalizedPayments = payments;
+    } else if (paymentMethod && amount) {
+      normalizedPayments = [{
+        method: paymentMethod,
+        amount: parseFloat(amount),
+        bankAccount: bankAccount || null
+      }];
+    } else {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Please provide either payments array or paymentMethod with amount',
+      });
+    }
+
+    // Validate payments array
+    if (!Array.isArray(normalizedPayments) || normalizedPayments.length === 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Please provide at least one payment method',
+      });
+    }
+
+    // Validate each payment
+    for (const payment of normalizedPayments) {
+      if (!payment.method || payment.amount === undefined) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Each payment must have: method and amount',
+        });
+      }
+
+      const validMethods = ['cash', 'credit_card', 'debit_card', 'advance_adjustment', 'bank_transfer', 'check', 'online_payment', 'mobile_payment', 'other', 'advance'];
+      if (!validMethods.includes(payment.method)) {
+        return res.status(400).json({
+          status: 'fail',
+          message: `Invalid payment method: ${payment.method}. Allowed: ${validMethods.join(', ')}`,
+        });
+      }
+
+      if (typeof payment.amount !== 'number' || payment.amount <= 0) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Payment amount must be a positive number',
+        });
+      }
+
+      // Validate bank account for bank_transfer payments
+      if (payment.method === 'bank_transfer' && payment.bankAccount) {
+        const bank = await BankAccount.findById(payment.bankAccount);
+        if (!bank) {
+          return res.status(400).json({
+            status: 'fail',
+            message: 'Bank account not found for bank_transfer payment',
+          });
+        }
+      }
+    }
+
+    // Calculate total payment amount
+    const totalPaymentAmount = normalizedPayments.reduce((sum, payment) => sum + payment.amount, 0);
+
+    // Calculate total payments already made for this purchase (if purchase exists)
+    let totalPaid = 0;
+    let remainingBalance = 0;
+    if (purchaseRecord) {
+      const existingPayments = await Payment.find({ purchase });
+      totalPaid = existingPayments.reduce((sum, payment) => sum + payment.amount, 0);
+      remainingBalance = purchaseRecord.totalAmount - totalPaid;
+    }
+
+    // Handle file uploads for attachments
+    let uploadedAttachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        try {
+          const uploadResult = await new Promise((resolve, reject) => {
+            const stream = cloudinary.uploader.upload_stream(
+              { folder: 'payment-attachments' },
+              (error, result) => {
+                if (error) return reject(error);
+                resolve(result);
+              }
+            );
+            stream.end(file.buffer);
+          });
+          
+          uploadedAttachments.push({
+            url: uploadResult.secure_url || '',
+            name: file.originalname || '',
+            type: file.mimetype || ''
+          });
+        } catch (uploadError) {
+          console.error('Error uploading file:', uploadError);
+        }
+      }
+    } else if (attachments && Array.isArray(attachments)) {
+      uploadedAttachments = attachments;
+    }
+
+    // Generate payment number
+    const date = new Date(paymentDate || Date.now());
+    const year = date.getFullYear().toString().slice(-2);
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const day = date.getDate().toString().padStart(2, '0');
+    
+    const paymentsCount = await Payment.countDocuments({
+      createdAt: {
+        $gte: new Date(date.setHours(0, 0, 0, 0)),
+        $lt: new Date(date.setHours(23, 59, 59, 999)),
+      },
+    });
+    
+    const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
+    let excessAmount = 0;
+    let regularPaymentAmount = totalPaymentAmount;
+    let advancePayment = null;
+
+    // Check if payment amount exceeds remaining balance (only if purchase exists)
+    if (purchaseRecord && totalPaymentAmount > remainingBalance) {
+      excessAmount = totalPaymentAmount - remainingBalance;
+      regularPaymentAmount = remainingBalance;
+    }
+
+    // Prepare payments array for database
+    const paymentsForDB = normalizedPayments.map(payment => ({
+      method: payment.method,
+      amount: payment.amount,
+      bankAccount: (payment.method === 'bank_transfer' || payment.method === 'online_payment') && payment.bankAccount 
+        ? payment.bankAccount 
+        : null
+    }));
+
+    // Create new payment for the purchase (up to the remaining balance)
+    const payment = await Payment.create({
+      paymentNumber,
+      purchase: purchase || null,
+      supplier: supplierId,
+      amount: regularPaymentAmount,
+      payments: paymentsForDB,
+      paymentDate: paymentDate || Date.now(),
+      transactionId,
+      status: status || 'completed',
+      notes,
+      attachments: uploadedAttachments,
+      user: req.user._id,
+      isPartial: isPartial || false,
+      currency,
+      paymentType: 'purchase_payment'
+    });
+
+    // Create payment journey record
+    await PaymentJourney.create({
+      payment: payment._id,
+      user: req.user._id,
+      action: 'created',
+      changes: [],
+      notes: purchaseRecord 
+        ? `Payment ${paymentNumber} created for purchase ${purchaseRecord.invoiceNumber}` 
+        : `Payment ${paymentNumber} created for supplier`,
+    });
+    
+    // Update purchase payment status (if purchase exists)
+    if (purchaseRecord) {
+      const newRemainingBalance = remainingBalance - regularPaymentAmount;
+      if (newRemainingBalance <= 0) {
+        await Purchase.findByIdAndUpdate(purchase, { paymentStatus: 'paid' });
+      } else {
+        await Purchase.findByIdAndUpdate(purchase, { paymentStatus: 'partially_paid' });
+      }
+    }
+    
+    // If there's excess payment, create an advance payment record
+    if (excessAmount > 0) {
+      const advancePaymentNumber = `${paymentNumber}-ADV`;
+      
+      // Distribute excess amount proportionally across payment methods
+      const excessPayments = paymentsForDB.map(p => ({
+        ...p,
+        amount: (p.amount / totalPaymentAmount) * excessAmount
+      }));
+      
+      advancePayment = await Payment.create({
+        paymentNumber: advancePaymentNumber,
+        supplier: supplierId,
+        amount: excessAmount,
+        payments: excessPayments,
+        paymentDate: paymentDate || Date.now(),
+        transactionId: transactionId ? `${transactionId}-ADV` : undefined,
+        status: status || 'completed',
+        notes: notes ? `${notes} (Excess payment - advance for future purchases)` : 'Excess payment - advance for future purchases',
+        attachments: uploadedAttachments,
+        user: req.user._id,
+        isPartial: false,
+        currency,
+        isAdvancePayment: true,
+        paymentType: 'advance_payment'
+      });
+      
+      // Update supplier advance balance
+      await Supplier.findByIdAndUpdate(supplierId, {
+        $inc: { advanceBalance: excessAmount }
+      });
+      
+      // Create payment journey record for advance payment
+      await PaymentJourney.create({
+        payment: advancePayment._id,
+        user: req.user._id,
+        action: 'created',
+        changes: [],
+        notes: `Excess payment ${advancePaymentNumber} created for supplier for future use`,
+      });
+    }
+    
+    res.status(201).json({
+      status: 'success',
+      data: {
+        payment,
+        advancePayment,
+        excessAmount,
+        originalAmount: totalPaymentAmount,
+        purchaseAmount: purchaseRecord ? regularPaymentAmount : totalPaymentAmount,
+        remainingBalance: purchaseRecord ? (remainingBalance - regularPaymentAmount) : 0,
+        message: excessAmount > 0 ? 
+          `Payment of ${regularPaymentAmount} applied to purchase. Excess amount of ${excessAmount} recorded as advance payment.` : 
+          purchaseRecord ? `Payment of ${regularPaymentAmount} applied to purchase.` : `Payment of ${totalPaymentAmount} recorded.`
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Get payments by purchase ID
+// @route   GET /api/payments/purchase/:purchaseId
+// @access  Private
+const getPaymentsByPurchaseId = async (req, res) => {
+  try {
+    const { purchaseId } = req.params;
+    
+    // Verify the purchase exists
+    const purchaseRecord = await Purchase.findById(purchaseId);
+    if (!purchaseRecord) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Purchase not found',
+      });
+    }
+    
+    // Get all payments for this purchase
+    const payments = await Payment.find({ purchase: purchaseId })
+      .populate('user', 'name email')
+      .populate('currency', 'name code symbol')
+      .sort({ paymentDate: 1 });
+    
+    // Calculate payment summary
+    const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
+    const remainingBalance = purchaseRecord.totalAmount - totalPaid;
+    const paymentStatus = remainingBalance <= 0 ? 'paid' : 
+                          totalPaid > 0 ? 'partially_paid' : 'unpaid';
+    
+    res.json({
+      status: 'success',
+      results: payments.length,
+      data: payments,
+      summary: {
+        invoiceNumber: purchaseRecord.invoiceNumber,
+        invoiceTotal: purchaseRecord.totalAmount,
+        totalPaid,
+        remainingBalance,
+        paymentStatus,
+        paymentPercentage: (totalPaid / purchaseRecord.totalAmount * 100).toFixed(2)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Get payments by supplier ID
+// @route   GET /api/payments/supplier/:supplierId
+// @access  Private
+const getPaymentsBySupplier = async (req, res) => {
+  try {
+    const { supplierId } = req.params;
+    const { 
+      page = 1, 
+      limit = 10, 
+      startDate, 
+      endDate, 
+      paymentMethod, 
+      status,
+      paymentType 
+    } = req.query;
+    
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    // Check if supplier exists
+    const supplier = await Supplier.findById(supplierId);
+    if (!supplier) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Supplier not found'
+      });
+    }
+    
+    // Build filter
+    const filter = { supplier: supplierId };
+    
+    if (startDate || endDate) {
+      filter.paymentDate = {};
+      if (startDate) filter.paymentDate.$gte = new Date(startDate);
+      if (endDate) filter.paymentDate.$lte = new Date(endDate);
+    }
+    
+    if (paymentMethod) filter.paymentMethod = paymentMethod;
+    if (status) filter.status = status;
+    if (paymentType) filter.paymentType = paymentType;
+    
+    // Count total payments
+    const totalPayments = await Payment.countDocuments(filter);
+    
+    // Get payments
+    const payments = await Payment.find(filter)
+      .populate('purchase', 'invoiceNumber totalAmount')
+      .populate('supplier', 'name email phoneNumber')
+      .populate('user', 'name email')
+      .populate('currency', 'name code symbol')
+      .sort({ paymentDate: -1 })
+      .skip(skip)
+      .limit(limitNum);
+    
+    // Calculate supplier totals
+    const supplierTotals = await Payment.aggregate([
+      { $match: { supplier: supplierId } },
+      {
+        $group: {
+          _id: null,
+          totalPaid: { $sum: '$amount' },
+          totalRefunded: { $sum: '$refundAmount' },
+          totalAdvancePayments: {
+            $sum: {
+              $cond: [{ $eq: ['$isAdvancePayment', true] }, '$amount', 0]
+            }
+          },
+          paymentCount: { $sum: 1 }
+        }
+      }
+    ]);
+    
+    const totals = supplierTotals.length > 0 ? supplierTotals[0] : {
+      totalPaid: 0,
+      totalRefunded: 0,
+      totalAdvancePayments: 0,
+      paymentCount: 0
+    };
+    
+    res.json({
+      status: 'success',
+      results: payments.length,
+      totalPages: Math.ceil(totalPayments / limitNum),
+      currentPage: pageNum,
+      totalPayments,
+      supplierTotals: totals,
+      data: payments
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+};
+
+// @desc    Get all advance payments for a supplier
+// @route   GET /api/payments/supplier/:supplierId/advance
+// @access  Private
+const getSupplierAdvancePayments = async (req, res) => {
+  try {
+    const { supplierId } = req.params;
+    
+    // Verify the supplier exists
+    const supplier = await Supplier.findById(supplierId);
+    if (!supplier) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Supplier not found',
+      });
+    }
+    
+    // Find all advance payments for this supplier
+    const advancePayments = await Payment.find({ 
+      supplier: supplierId,
+      isAdvancePayment: true
+    }).sort({ paymentDate: -1 });
+    
+    // Calculate total advance amount
+    const totalAdvance = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
+    
+    res.json({
+      status: 'success',
+      results: advancePayments.length,
+      data: {
+        advancePayments,
+        totalAdvance,
+        supplier: {
+          id: supplier._id,
+          name: supplier.name,
+          advanceBalance: supplier.advanceBalance || 0
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Apply supplier's advance payment to a purchase
+// @route   POST /api/payments/apply-supplier-advance
+// @access  Private
+const applyAdvancePaymentToPurchase = async (req, res) => {
+  try {
+    const { supplierId, purchaseId } = req.body;
+
+    // Verify the supplier exists
+    const supplier = await Supplier.findById(supplierId);
+    if (!supplier) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Supplier not found',
+      });
+    }
+
+    // Get supplier's current advance balance
+    const advanceBalance = supplier.advanceBalance || 0;
+
+    if (advanceBalance <= 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'No advance payment available for this supplier',
+      });
+    }
+
+    // Find the purchase
+    const purchase = await Purchase.findById(purchaseId);
+    if (!purchase) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Purchase not found',
+      });
+    }
+
+    // Verify purchase belongs to supplier
+    if (purchase.supplier.toString() !== supplierId) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Purchase does not belong to this supplier',
+      });
+    }
+
+    // Calculate remaining balance for the purchase
+    const existingPayments = await Payment.find({ purchase: purchaseId });
+    const totalPaid = existingPayments.reduce((sum, payment) => sum + payment.amount, 0);
+    const remainingBalance = purchase.totalAmount - totalPaid;
+
+    if (remainingBalance <= 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Purchase is already fully paid',
+      });
+    }
+
+    // Determine how much advance payment to apply
+    const amountToApply = Math.min(advanceBalance, remainingBalance);
+
+    // Generate payment number
+    const date = new Date();
+    const year = date.getFullYear().toString().slice(-2);
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const day = date.getDate().toString().padStart(2, '0');
+    
+    const paymentsCount = await Payment.countDocuments({
+      createdAt: {
+        $gte: new Date(date.setHours(0, 0, 0, 0)),
+        $lt: new Date(date.setHours(23, 59, 59, 999)),
+      },
+    });
+    
+    const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
+
+    // Create a new payment record using the advance payment
+    const payment = await Payment.create({
+      paymentNumber,
+      purchase: purchaseId,
+      supplier: supplierId,
+      amount: amountToApply,
+      paymentMethod: 'advance',
+      payments: [{
+        method: 'advance',
+        amount: amountToApply
+      }],
+      paymentDate: new Date(),
+      status: 'completed',
+      notes: `Payment applied from supplier's advance payment balance (${advanceBalance} available, ${amountToApply} applied)`,
+      user: req.user._id,
+      isPartial: amountToApply < remainingBalance,
+      currency: purchase.currency,
+      paymentType: 'purchase_payment'
+    });
+
+    // Create payment journey record
+    await PaymentJourney.create({
+      payment: payment._id,
+      user: req.user._id,
+      action: 'created',
+      changes: [],
+      notes: `Payment ${paymentNumber} created from advance payment for purchase ${purchase.invoiceNumber}`,
+    });
+
+    // Update supplier advance balance
+    await Supplier.findByIdAndUpdate(supplierId, {
+      $inc: { advanceBalance: -amountToApply }
+    });
+
+    // Update purchase payment status
+    const newRemainingBalance = remainingBalance - amountToApply;
+    let paymentStatus = 'unpaid';
+    if (newRemainingBalance <= 0) {
+      paymentStatus = 'paid';
+    } else if (amountToApply > 0) {
+      paymentStatus = 'partially_paid';
+    }
+    
+    await Purchase.findByIdAndUpdate(purchaseId, { paymentStatus });
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        supplier: {
+          id: supplier._id,
+          name: supplier.name
+        },
+        purchase: {
+          id: purchase._id,
+          invoiceNumber: purchase.invoiceNumber
+        },
+        amountApplied: amountToApply,
+        remainingAdvance: advanceBalance - amountToApply,
+        remainingBalance: newRemainingBalance,
+        paymentStatus,
+        payment: {
+          id: payment._id,
+          paymentNumber: payment.paymentNumber,
+          amount: payment.amount
+        },
+        message: `Applied ${amountToApply} from advance payment to purchase. Remaining advance balance: ${advanceBalance - amountToApply}`
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   createPayment,
   getPayments,
@@ -3018,5 +3684,11 @@ module.exports = {
   getPaymentSummary,
   getPaymentsByCustomer,
   createRefund,
-  getPaymentAnalytics
+  getPaymentAnalytics,
+  // Supplier payment functions
+  createSupplierPayment,
+  getPaymentsByPurchaseId,
+  getPaymentsBySupplier,
+  getSupplierAdvancePayments,
+  applyAdvancePaymentToPurchase
 }; 

@@ -11,18 +11,30 @@ const paymentSchema = new mongoose.Schema(
     paymentType: {
       type: String,
       required: true,
-      enum: ['sale_payment', 'advance_payment', 'refund', 'adjustment', 'other'],
+      enum: ['sale_payment', 'purchase_payment', 'advance_payment', 'refund', 'adjustment', 'other'],
       default: 'sale_payment',
     },
+    // For customer payments (sales)
     sale: {
       type: mongoose.Schema.Types.ObjectId,
-      required: false, // Changed from true to false to make it optional
+      required: false,
       ref: 'Sales',
     },
     customer: {
       type: mongoose.Schema.Types.ObjectId,
-      required: true, // Required field to ensure we know which customer made the payment
+      required: false, // Now optional since we can have supplier payments
       ref: 'Customer',
+    },
+    // For supplier payments (purchases)
+    purchase: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: false,
+      ref: 'Purchase',
+    },
+    supplier: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: false, // Optional since we can have customer payments
+      ref: 'Supplier',
     },
     amount: {
       type: Number,
@@ -162,6 +174,7 @@ paymentSchema.virtual('remainingBalance').get(function() {
 paymentSchema.virtual('paymentTypeDisplay').get(function() {
   const types = {
     'sale_payment': 'Sale Payment',
+    'purchase_payment': 'Purchase Payment',
     'advance_payment': 'Advance Payment',
     'refund': 'Refund',
     'adjustment': 'Adjustment',
@@ -172,6 +185,27 @@ paymentSchema.virtual('paymentTypeDisplay').get(function() {
 
 // Pre-save middleware to generate payment number and normalize payments
 paymentSchema.pre('save', async function(next) {
+  // Validate that either customer or supplier is provided
+  if (!this.customer && !this.supplier) {
+    return next(new Error('Either customer or supplier must be provided'));
+  }
+  
+  // Validate that either sale or purchase is provided (or it's an advance payment)
+  if (!this.sale && !this.purchase && !this.isAdvancePayment) {
+    return next(new Error('Either sale, purchase, or isAdvancePayment must be provided'));
+  }
+  
+  // Set paymentType based on context if not explicitly set
+  if (!this.paymentType || this.paymentType === 'sale_payment') {
+    if (this.purchase) {
+      this.paymentType = 'purchase_payment';
+    } else if (this.sale) {
+      this.paymentType = 'sale_payment';
+    } else if (this.isAdvancePayment) {
+      this.paymentType = 'advance_payment';
+    }
+  }
+  
   // Normalize payments array from single paymentMethod (backward compatibility)
   if (!this.payments || this.payments.length === 0) {
     if (this.paymentMethod) {
@@ -215,7 +249,9 @@ paymentSchema.pre('save', async function(next) {
 
 // Create compound indices for faster queries
 paymentSchema.index({ sale: 1, paymentDate: -1 });
+paymentSchema.index({ purchase: 1, paymentDate: -1 });
 paymentSchema.index({ customer: 1, paymentDate: -1 });
+paymentSchema.index({ supplier: 1, paymentDate: -1 });
 paymentSchema.index({ paymentType: 1, paymentDate: -1 });
 paymentSchema.index({ status: 1, paymentDate: -1 });
 paymentSchema.index({ paymentMethod: 1, paymentDate: -1 });
@@ -223,6 +259,8 @@ paymentSchema.index({ user: 1, paymentDate: -1 });
 paymentSchema.index({ paymentNumber: 1 }, { unique: true });
 paymentSchema.index({ transactionId: 1 });
 paymentSchema.index({ 'bankDetails.checkNumber': 1 });
+// Index for advance payments
+paymentSchema.index({ isAdvancePayment: 1, customer: 1, supplier: 1 });
 
 const Payment = mongoose.model('Payment', paymentSchema);
 

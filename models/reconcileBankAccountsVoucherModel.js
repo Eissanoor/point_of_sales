@@ -33,7 +33,7 @@ const reconciliationEntrySchema = new mongoose.Schema({
   },
   matchedTransactionModel: {
     type: String,
-    enum: ['BankPaymentVoucher', 'CashPaymentVoucher', 'JournalPaymentVoucher', 'Payment', 'SupplierPayment', null],
+    enum: ['BankPaymentVoucher', 'CashPaymentVoucher', 'JournalPaymentVoucher', 'Payment', null],
   },
   matchedTransactionNumber: {
     type: String,

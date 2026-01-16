@@ -4,7 +4,7 @@ const SupplierJourney = require('../models/supplierJourneyModel');
 const Product = require('../models/productModel');
 const Supplier = require('../models/supplierModel');
 const Purchase = require('../models/purchaseModel');
-const SupplierPayment = require('../models/supplierPaymentModel');
+const Payment = require('../models/paymentModel');
 
 // @desc    Get supplier journey by supplier ID
 // @route   GET /api/supplier-journey/:supplierId
@@ -72,7 +72,7 @@ const getSupplierJourney = asyncHandler(async (req, res) => {
   const soldAmount = products.reduce((sum, product) => sum + ((product.purchaseRate || 0) * (product.soldOutQuantity || 0)), 0);
 
   // Calculate total payments made to this supplier (exclude failed/refunded)
-  const paymentsAgg = await SupplierPayment.aggregate([
+  const paymentsAgg = await Payment.aggregate([
     { 
       $match: { 
         supplier: new mongoose.Types.ObjectId(supplierId), 
@@ -323,8 +323,8 @@ const getSupplierJourneySummary = asyncHandler(async (req, res) => {
     return sum + (product.purchaseRate * product.soldOutQuantity);
   }, 0);
 
-  // Get total payments from SupplierPayment (exclude failed/refunded)
-  const summaryPaymentsAgg = await SupplierPayment.aggregate([
+  // Get total payments from Payment (exclude failed/refunded)
+  const summaryPaymentsAgg = await Payment.aggregate([
     { 
       $match: { 
         supplier: new mongoose.Types.ObjectId(supplierId), 

@@ -106,7 +106,7 @@ const journalPaymentVoucherSchema = new mongoose.Schema(
     },
     relatedSupplierPayment: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'SupplierPayment',
+      ref: 'Payment', // Now references unified Payment model
     },
     relatedBankPaymentVoucher: {
       type: mongoose.Schema.Types.ObjectId,
