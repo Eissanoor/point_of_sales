@@ -9,6 +9,7 @@ const {
   deletePurchase,
   getPurchaseStats,
   getPurchasesByProduct,
+  getPurchasesBySupplier,
 } = require('../controllers/purchaseController');
 const { protect, admin } = require('../middlewares/authMiddleware');
 const { upload } = require('../middlewares/uploadMiddleware');
@@ -32,6 +33,11 @@ router.route('/stats').get(protect, getPurchaseStats);
 // @desc    Get purchases by product
 // @access  Private
 router.route('/product/:productId').get(protect, getPurchasesByProduct);
+
+// @route   GET /api/purchases/supplier/:supplierId
+// @desc    Get purchases by supplier
+// @access  Private
+router.route('/supplier/:supplierId').get(protect, getPurchasesBySupplier);
 
 // @route   GET /api/purchases/invoice/:purchaseId
 // @desc    Get purchase invoice data by purchase ID

@@ -1060,6 +1060,63 @@ const getPurchasesByProduct = async (req, res) => {
   }
 };
 
+// @desc    Get purchases by supplier
+// @route   GET /api/purchases/supplier/:supplierId
+// @access  Private
+const getPurchasesBySupplier = async (req, res) => {
+  try {
+    const { supplierId } = req.params;
+    const { page = 1, limit = 10 } = req.query;
+    
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    // Check if supplier exists
+    const supplier = await Supplier.findById(supplierId);
+    if (!supplier) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Supplier not found',
+      });
+    }
+    
+    // Count total documents for pagination info
+    const totalPurchases = await Purchase.countDocuments({ 
+      supplier: supplierId, 
+      isActive: true 
+    });
+    
+    // Get purchase records
+    const purchases = await Purchase.find({ 
+      supplier: supplierId, 
+      isActive: true 
+    })
+      .populate('items.product', 'name description')
+      .populate('supplier', 'name email phoneNumber')
+      .populate('warehouse', 'name code')
+      .populate('shop', 'name code')
+      .populate('currency', 'name code symbol')
+      .sort({ purchaseDate: -1 })
+      .skip(skip)
+      .limit(limitNum);
+      
+    res.json({
+      status: 'success',
+      results: purchases.length,
+      totalPages: Math.ceil(totalPurchases / limitNum),
+      currentPage: pageNum,
+      totalPurchases,
+      data: purchases,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   getPurchases,
   getPurchaseById,
@@ -1069,4 +1126,5 @@ module.exports = {
   deletePurchase,
   getPurchaseStats,
   getPurchasesByProduct,
+  getPurchasesBySupplier,
 };
