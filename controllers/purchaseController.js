@@ -1066,7 +1066,7 @@ const getPurchasesByProduct = async (req, res) => {
 const getPurchasesBySupplier = async (req, res) => {
   try {
     const { supplierId } = req.params;
-    const { page = 1, limit = 10 } = req.query;
+    const { page = 1, limit = 1000 } = req.query;
     
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
@@ -1087,16 +1087,14 @@ const getPurchasesBySupplier = async (req, res) => {
       isActive: true 
     });
     
-    // Get purchase records
+    // Get purchase records (excluding payment-related fields)
     const purchases = await Purchase.find({ 
       supplier: supplierId, 
       isActive: true 
     })
+      .select('-payments -paymentMethod -bankAccount -transactionRecipt')
       .populate('items.product', 'name description')
-      .populate('supplier', 'name email phoneNumber')
-      .populate('warehouse', 'name code')
-      .populate('shop', 'name code')
-      .populate('currency', 'name code symbol')
+    
       .sort({ purchaseDate: -1 })
       .skip(skip)
       .limit(limitNum);
