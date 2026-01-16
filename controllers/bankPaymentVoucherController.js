@@ -1,6 +1,11 @@
 const mongoose = require('mongoose');
 const BankPaymentVoucher = require('../models/bankPaymentVoucherModel');
 const BankAccount = require('../models/bankAccountModel');
+const SupplierPayment = require('../models/supplierPaymentModel');
+const Payment = require('../models/paymentModel');
+const SupplierJourney = require('../models/supplierJourneyModel');
+const PaymentJourney = require('../models/paymentJourneyModel');
+const Purchase = require('../models/purchaseModel');
 const APIFeatures = require('../utils/apiFeatures');
 const cloudinary = require('cloudinary').v2;
 
@@ -88,6 +93,166 @@ const getBankPaymentVoucherById = async (req, res) => {
       message: error.message,
     });
   }
+};
+
+// Helper function to create Payment or SupplierPayment transaction from voucher
+const createTransactionFromVoucher = async (voucher, userId) => {
+  // Map voucher paymentMethod to supplier/customer payment method
+  const mapPaymentMethod = (voucherMethod) => {
+    const methodMap = {
+      'bank_transfer': 'bank_transfer',
+      'check': 'check',
+      'online_payment': 'online_payment',
+      'wire_transfer': 'bank_transfer',
+      'dd': 'bank_transfer',
+      'other': 'other'
+    };
+    return methodMap[voucherMethod] || 'bank_transfer';
+  };
+
+  let createdSupplierPayment = null;
+  let createdPayment = null;
+
+  // Only create transactions if they don't already exist
+  if (voucher.payeeType === 'supplier' && voucher.payee && !voucher.relatedSupplierPayment) {
+    try {
+      // Generate payment number
+      const paymentCount = await SupplierPayment.countDocuments();
+      const paymentNumber = `SP-${paymentCount + 1}`;
+      
+      // Use voucher's transactionId or generate a new one
+      const paymentTransactionId = voucher.transactionId || `TRX-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+      
+      // Calculate supplier balances
+      const purchasesAgg = await Purchase.aggregate([
+        { $match: { supplier: new mongoose.Types.ObjectId(voucher.payee), isActive: true } },
+        { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+      ]);
+      const totalPurchasesAmount = purchasesAgg.length > 0 ? (purchasesAgg[0].total || 0) : 0;
+      
+      const paymentsAgg = await SupplierPayment.aggregate([
+        { $match: { supplier: new mongoose.Types.ObjectId(voucher.payee), status: { $nin: ['failed', 'refunded'] } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]);
+      const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
+      const remainingBefore = totalPurchasesAmount - paidSoFar;
+      
+      // Create SupplierPayment
+      createdSupplierPayment = await SupplierPayment.create({
+        paymentNumber,
+        supplier: voucher.payee,
+        amount: voucher.amount,
+        paymentMethod: mapPaymentMethod(voucher.paymentMethod || 'bank_transfer'),
+        paymentDate: voucher.voucherDate || new Date(),
+        transactionId: paymentTransactionId,
+        status: 'completed',
+        notes: voucher.notes || `Payment via bank payment voucher ${voucher.voucherNumber}`,
+        attachments: voucher.attachments || [],
+        user: userId,
+        isPartial: false,
+        currency: voucher.currency || null,
+        products: []
+      });
+
+      // Calculate new balances
+      const newPaidAmount = paidSoFar + voucher.amount;
+      const newRemainingBalance = remainingBefore - voucher.amount;
+      const isAdvancedPayment = newRemainingBalance < 0;
+      
+      // Create supplier journey entry
+      await SupplierJourney.create({
+        supplier: voucher.payee,
+        user: userId,
+        action: 'payment_made',
+        payment: {
+          amount: voucher.amount,
+          method: mapPaymentMethod(voucher.paymentMethod || 'bank_transfer'),
+          date: voucher.voucherDate || new Date(),
+          status: 'completed',
+          transactionId: paymentTransactionId
+        },
+        paidAmount: newPaidAmount,
+        remainingBalance: newRemainingBalance,
+        notes: `Payment of ${voucher.amount} made to supplier via bank payment voucher ${voucher.voucherNumber}. Transaction ID: ${paymentTransactionId}. ${isAdvancedPayment ? `Advanced payment: ${Math.abs(newRemainingBalance)}` : `Remaining balance: ${newRemainingBalance}`}. ${voucher.notes || ''}`
+      });
+
+      // Update voucher with created SupplierPayment reference
+      voucher.relatedSupplierPayment = createdSupplierPayment._id;
+      await voucher.save();
+
+      console.log('SupplierPayment created automatically:', createdSupplierPayment._id);
+    } catch (error) {
+      console.error('Error creating SupplierPayment automatically:', error);
+      // Continue without failing - voucher is already created
+    }
+  }
+
+  // Create Payment if customer is selected and no relatedPayment provided
+  if (voucher.payeeType === 'customer' && voucher.payee && !voucher.relatedPayment) {
+    try {
+      // Use voucher's transactionId or generate a new one
+      const paymentTransactionId = voucher.transactionId || `TRX-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+      
+      // Prepare payments array for Payment model
+      const paymentMethodMapped = mapPaymentMethod(voucher.paymentMethod || 'bank_transfer');
+      const paymentsArray = [{
+        method: paymentMethodMapped,
+        amount: voucher.amount,
+        bankAccount: (paymentMethodMapped === 'bank_transfer' || paymentMethodMapped === 'online_payment') ? voucher.bankAccount : null
+      }];
+
+      // Create Payment
+      createdPayment = await Payment.create({
+        customer: voucher.payee,
+        sale: voucher.relatedSale || null,
+        amount: voucher.amount,
+        payments: paymentsArray,
+        paymentDate: voucher.voucherDate || new Date(),
+        transactionId: paymentTransactionId,
+        status: 'completed',
+        notes: voucher.notes || `Payment via bank payment voucher ${voucher.voucherNumber}`,
+        attachments: voucher.attachments || [],
+        user: userId,
+        isPartial: false,
+        currency: voucher.currency || null,
+        paymentType: voucher.relatedSale ? 'sale_payment' : 'advance_payment'
+      });
+
+      // Create payment journey record
+      await PaymentJourney.create({
+        payment: createdPayment._id,
+        user: userId,
+        action: 'created',
+        changes: [],
+        notes: `Payment created via bank payment voucher ${voucher.voucherNumber}${voucher.relatedSale ? ` for sale ${voucher.relatedSale}` : ' as advance payment'}`
+      });
+
+      // Update sale payment status if sale exists
+      if (voucher.relatedSale) {
+        const Sales = require('../models/salesModel');
+        const saleRecord = await Sales.findById(voucher.relatedSale);
+        if (saleRecord) {
+          const remainingBalance = (saleRecord.grandTotal || 0) - (createdPayment.amount || 0);
+          if (remainingBalance <= 0) {
+            await Sales.findByIdAndUpdate(voucher.relatedSale, { paymentStatus: 'paid' });
+          } else {
+            await Sales.findByIdAndUpdate(voucher.relatedSale, { paymentStatus: 'partial' });
+          }
+        }
+      }
+
+      // Update voucher with created Payment reference
+      voucher.relatedPayment = createdPayment._id;
+      await voucher.save();
+
+      console.log('Payment created automatically:', createdPayment._id);
+    } catch (error) {
+      console.error('Error creating Payment automatically:', error);
+      // Continue without failing - voucher is already created
+    }
+  }
+
+  return { createdSupplierPayment, createdPayment };
 };
 
 // @desc    Create new bank payment voucher
@@ -351,12 +516,34 @@ const createBankPaymentVoucher = async (req, res) => {
 
     const voucher = await BankPaymentVoucher.create(voucherData);
 
+    // Automatically create Payment or SupplierPayment transaction if supplier/customer is selected
+    // Only create if status is 'completed' or 'approved' and relatedPayment/relatedSupplierPayment is not already provided
+    let createdTransaction = null;
+    if ((status === 'completed' || status === 'approved')) {
+      const transactionResult = await createTransactionFromVoucher(voucher, req.user._id);
+      if (transactionResult.createdSupplierPayment) {
+        createdTransaction = {
+          type: 'SupplierPayment',
+          id: transactionResult.createdSupplierPayment._id,
+          paymentNumber: transactionResult.createdSupplierPayment.paymentNumber
+        };
+      } else if (transactionResult.createdPayment) {
+        createdTransaction = {
+          type: 'Payment',
+          id: transactionResult.createdPayment._id,
+          paymentNumber: transactionResult.createdPayment.paymentNumber
+        };
+      }
+    }
+
     // Populate before sending response
     const populatedVoucher = await BankPaymentVoucher.findById(voucher._id)
       .populate('bankAccount', 'accountName accountNumber bankName')
       .populate('currency', 'name code symbol')
       .populate('payee', 'name')
       .populate('user', 'name email')
+      .populate('relatedPayment', 'paymentNumber amount')
+      .populate('relatedSupplierPayment', 'paymentNumber amount')
       .select('-__v');
 
     res.status(201).json({
@@ -364,6 +551,7 @@ const createBankPaymentVoucher = async (req, res) => {
       message: 'Bank payment voucher created successfully',
       data: {
         voucher: populatedVoucher,
+        createdTransaction: createdTransaction
       },
     });
   } catch (error) {
@@ -708,6 +896,9 @@ const approveBankPaymentVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
+    // Create transactions if supplier/customer is selected and not already created
+    await createTransactionFromVoucher(updatedVoucher, req.user._id);
+
     const populatedVoucher = await BankPaymentVoucher.findById(updatedVoucher._id)
       .populate('bankAccount', 'accountName accountNumber bankName')
       .populate('currency', 'name code symbol')
@@ -817,6 +1008,9 @@ const completeBankPaymentVoucher = async (req, res) => {
     voucher.status = 'completed';
 
     const updatedVoucher = await voucher.save();
+
+    // Create transactions if supplier/customer is selected and not already created
+    await createTransactionFromVoucher(updatedVoucher, req.user._id);
 
     const populatedVoucher = await BankPaymentVoucher.findById(updatedVoucher._id)
       .populate('bankAccount', 'accountName accountNumber bankName')
