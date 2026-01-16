@@ -7,7 +7,6 @@ const {
   createProduct,
   updateProduct,
   createProductReview,
-  getProductJourneyByProductId,
   convertProductPrice,
   getProductsByLocation,
   getUnitsHierarchy,
@@ -27,9 +26,6 @@ router.route('/:id')
 
 router.route('/:id/reviews')
   .post(protect, createProductReview);
-  
-router.route('/:id/journey')
-  .get(protect, admin, getProductJourneyByProductId);
 
 router.route('/:id/convert-price')
   .get(convertProductPrice);

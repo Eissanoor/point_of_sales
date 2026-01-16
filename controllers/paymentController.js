@@ -1,7 +1,6 @@
 const Sales = require('../models/salesModel');
 const Product = require('../models/productModel');
 const Payment = require('../models/paymentModel');
-const PaymentJourney = require('../models/paymentJourneyModel');
 const Customer = require('../models/customerModel');
 const Supplier = require('../models/supplierModel');
 const Purchase = require('../models/purchaseModel');
@@ -227,17 +226,6 @@ const createPayment = async (req, res) => {
       isPartial: isPartial || false,
       currency
     });
-
-    // Create payment journey record
-    await PaymentJourney.create({
-      payment: payment._id,
-      user: req.user._id,
-      action: 'created',
-      changes: [],
-      notes: saleRecord 
-        ? `Payment ${paymentNumber} created for invoice ${saleRecord.invoiceNumber}` 
-        : `Payment ${paymentNumber} created for customer`,
-    });
     
     // Update sale payment status to paid (if sale exists)
     if (saleRecord) {
@@ -278,15 +266,6 @@ const createPayment = async (req, res) => {
       // Update customer advance balance
       await Customer.findByIdAndUpdate(customerId, {
         $inc: { advanceBalance: excessAmount }
-      });
-      
-      // Create payment journey record for advance payment
-      await PaymentJourney.create({
-        payment: advancePayment._id,
-        user: req.user._id,
-        action: 'created',
-        changes: [],
-        notes: `Excess payment ${advancePaymentNumber} created for customer for future use`,
       });
     }
     
@@ -626,7 +605,7 @@ const updatePayment = async (req, res) => {
       uploadedAttachments = attachments;
     }
 
-    // Track changes for payment journey
+    // Track changes for payment update
     const changes = [];
     
     if (normalizedPayments) {
@@ -753,36 +732,25 @@ const updatePayment = async (req, res) => {
 
     const updatedPayment = await payment.save();
     
-    // Create payment journey record if there were changes
-    if (changes.length > 0) {
-      await PaymentJourney.create({
-        payment: payment._id,
-        user: req.user._id,
-        action: 'updated',
-        changes,
-        notes: `Payment ${payment.paymentNumber} updated`,
-      });
-      
-      // Update sale payment status (only if sale exists)
-      if (saleRecord) {
-        const allPayments = await Payment.find({ sale: payment.sale });
-        const totalPaidAmount = allPayments.reduce((sum, p) => sum + p.amount, 0);
-        let paymentStatus = 'unpaid';
-      
-        if (totalPaidAmount >= saleRecord.grandTotal) {
-          paymentStatus = 'paid';
-        } else if (totalPaidAmount > 0) {
-          paymentStatus = 'partially_paid';
-        }
-        
-        // Check if payment is overdue
-        const today = new Date();
-        if (saleRecord.dueDate && today > saleRecord.dueDate && totalPaidAmount < saleRecord.grandTotal) {
-          paymentStatus = 'overdue';
-        }
-        
-        await Sales.findByIdAndUpdate(saleRecord._id, { paymentStatus });
+    // Update sale payment status (only if sale exists)
+    if (saleRecord) {
+      const allPayments = await Payment.find({ sale: payment.sale });
+      const totalPaidAmount = allPayments.reduce((sum, p) => sum + p.amount, 0);
+      let paymentStatus = 'unpaid';
+    
+      if (totalPaidAmount >= saleRecord.grandTotal) {
+        paymentStatus = 'paid';
+      } else if (totalPaidAmount > 0) {
+        paymentStatus = 'partially_paid';
       }
+      
+      // Check if payment is overdue
+      const today = new Date();
+      if (saleRecord.dueDate && today > saleRecord.dueDate && totalPaidAmount < saleRecord.grandTotal) {
+        paymentStatus = 'overdue';
+      }
+      
+      await Sales.findByIdAndUpdate(saleRecord._id, { paymentStatus });
     }
 
     res.json({
@@ -814,15 +782,6 @@ const deletePayment = async (req, res) => {
           message: 'Associated sale not found',
         });
       }
-      
-      // Create payment journey record before deleting the payment
-      await PaymentJourney.create({
-        payment: payment._id,
-        user: req.user._id,
-        action: 'deleted',
-        changes: [],
-        notes: `Payment ${payment.paymentNumber} deleted`,
-      });
       
       // Delete the payment
       await Payment.deleteOne({ _id: req.params.id });
@@ -1017,40 +976,6 @@ const getPaymentStats = async (req, res) => {
           maxAmount: 0
         }
       }
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
-  }
-};
-
-// @desc    Get payment journey history for a payment
-// @route   GET /api/payments/:id/journey
-// @access  Private
-const getPaymentJourney = async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    // Check if payment exists
-    const payment = await Payment.findById(id);
-    if (!payment) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Payment not found',
-      });
-    }
-    
-    // Get payment journey history
-    const journeyHistory = await PaymentJourney.find({ payment: id })
-      .populate('user', 'name email')
-      .sort({ createdAt: 1 });
-    
-    res.json({
-      status: 'success',
-      results: journeyHistory.length,
-      data: journeyHistory,
     });
   } catch (error) {
     res.status(500).json({
@@ -1429,15 +1354,6 @@ const createCustomerPayment = async (req, res) => {
         $inc: { advanceBalance: amount }
       });
       
-      // Create payment journey record
-      await PaymentJourney.create({
-        payment: payment._id,
-        user: req.user._id,
-        action: 'created',
-        changes: [],
-        notes: `Advance payment ${paymentNumber} created for customer ${customer.name}`,
-      });
-      
       return res.status(201).json({
         status: 'success',
         data: {
@@ -1555,15 +1471,6 @@ const createCustomerPayment = async (req, res) => {
       
       payments.push(payment);
       
-      // Create payment journey record
-      await PaymentJourney.create({
-        payment: payment._id,
-        user: req.user._id,
-        action: 'created',
-        changes: [],
-        notes: `Payment ${payment.paymentNumber} created for invoice ${saleData.sale.invoiceNumber} as part of customer payment distribution`,
-      });
-      
       // Update sale payment status
       const newRemainingBalance = saleData.remainingBalance - paymentAmount;
       let paymentStatus = 'unpaid';
@@ -1620,14 +1527,6 @@ const createCustomerPayment = async (req, res) => {
       
       payments.push(excessPayment);
       
-      // Create payment journey record for excess payment
-      await PaymentJourney.create({
-        payment: excessPayment._id,
-        user: req.user._id,
-        action: 'created',
-        changes: [],
-        notes: `Excess payment ${excessPayment.paymentNumber} created for customer ${customer.name} for future use`,
-      });
     }
 
     res.status(201).json({
@@ -1733,230 +1632,6 @@ const getCustomerAdvancePayments = async (req, res) => {
           id: customer._id,
           name: customer.name
         }
-      }
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
-  }
-};
-
-// @desc    Get payment journey by customer ID
-// @route   GET /api/payments/customer/:customerId/journey
-// @access  Private
-const getPaymentJourneyByCustomerId = async (req, res) => {
-  try {
-    const { customerId } = req.params;
-    const { startDate, endDate } = req.query;
-    
-    // Verify the customer exists
-    const customer = await Customer.findById(customerId);
-    if (!customer) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Customer not found',
-      });
-    }
-    
-    // Build date filter if provided
-    let dateFilter = {};
-    if (startDate && endDate) {
-      dateFilter = {
-        paymentDate: {
-          $gte: new Date(startDate),
-          $lte: new Date(endDate),
-        }
-      };
-    }
-    
-    // Get all sales for this customer
-    const sales = await Sales.find({ customer: customerId })
-      .sort({ createdAt: -1 });
-    
-    // Get all payments for this customer (both regular and advance)
-    const payments = await Payment.find({
-      $or: [
-        { customer: customerId, isAdvancePayment: true },
-        { sale: { $in: sales.map(sale => sale._id) } }
-      ],
-      ...dateFilter
-    })
-    .populate('sale', 'invoiceNumber grandTotal dueDate createdAt items')
-    .populate('user', 'name email')
-    .populate('currency', 'name code symbol')
-    .sort({ paymentDate: 1 });
-    
-    // Get all payment journeys for these payments
-    const paymentIds = payments.map(payment => payment._id);
-    const paymentJourneys = await PaymentJourney.find({
-      payment: { $in: paymentIds }
-    })
-    .populate('user', 'name email')
-    .sort({ createdAt: 1 });
-    
-    // Group journeys by payment
-    const journeysByPayment = {};
-    paymentJourneys.forEach(journey => {
-      if (!journeysByPayment[journey.payment.toString()]) {
-        journeysByPayment[journey.payment.toString()] = [];
-      }
-      journeysByPayment[journey.payment.toString()].push(journey);
-    });
-    
-    // Calculate running balance over time
-    let runningBalance = 0;
-    const salesMap = {};
-    sales.forEach(sale => {
-      salesMap[sale._id.toString()] = sale;
-      runningBalance += sale.grandTotal;
-    });
-    
-    // Create timeline of all transactions
-    const timeline = [];
-    
-    // Add sales to timeline
-    sales.forEach(sale => {
-      timeline.push({
-        type: 'invoice',
-        date: sale.createdAt,
-        invoiceNumber: sale.invoiceNumber,
-        amount: sale.grandTotal,
-        dueDate: sale.dueDate,
-        saleId: sale._id,
-        items: sale.items,
-        balanceAfter: null, // Will calculate this after sorting
-        description: `Invoice created: ${sale.invoiceNumber}`
-      });
-    });
-    
-    // Add payments to timeline with enriched data
-    payments.forEach(payment => {
-      const journeys = journeysByPayment[payment._id.toString()] || [];
-      const creationJourney = journeys.find(j => j.action === 'created');
-      
-      timeline.push({
-        type: 'payment',
-        date: payment.paymentDate,
-        paymentNumber: payment.paymentNumber,
-        amount: payment.amount,
-        paymentMethod: payment.paymentMethod,
-        status: payment.status,
-        paymentId: payment._id,
-        isAdvancePayment: payment.isAdvancePayment || false,
-        sale: payment.sale ? {
-          id: payment.sale._id,
-          invoiceNumber: payment.sale.invoiceNumber,
-          total: payment.sale.grandTotal
-        } : null,
-        createdBy: creationJourney?.user?.name || payment.user?.name || 'System',
-        journeys: journeys.map(j => ({
-          action: j.action,
-          date: j.createdAt,
-          user: j.user?.name || 'System',
-          notes: j.notes,
-          changes: j.changes
-        })),
-        balanceAfter: null, // Will calculate this after sorting
-        description: payment.isAdvancePayment ? 
-          `Advance payment: ${payment.paymentNumber}` : 
-          `Payment: ${payment.paymentNumber} for invoice ${payment.sale?.invoiceNumber || 'N/A'}`
-      });
-    });
-    
-    // Sort timeline by date
-    timeline.sort((a, b) => new Date(a.date) - new Date(b.date));
-    
-    // Calculate running balance for each event
-    let currentBalance = 0;
-    timeline.forEach(event => {
-      if (event.type === 'invoice') {
-        currentBalance += event.amount;
-      } else if (event.type === 'payment') {
-        currentBalance -= event.amount;
-      }
-      event.balanceAfter = currentBalance;
-    });
-    
-    // Calculate payment statistics
-    const totalInvoiced = sales.reduce((sum, sale) => sum + sale.grandTotal, 0);
-    const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
-    const currentOutstandingBalance = currentBalance;
-    
-    // Calculate on-time vs late payments
-    const onTimePayments = [];
-    const latePayments = [];
-    
-    payments.forEach(payment => {
-      if (!payment.sale || !payment.sale.dueDate) return;
-      
-      const paymentDate = new Date(payment.paymentDate);
-      const dueDate = new Date(payment.sale.dueDate);
-      
-      if (paymentDate <= dueDate) {
-        onTimePayments.push(payment);
-      } else {
-        latePayments.push(payment);
-      }
-    });
-    
-    // Calculate average days to payment
-    const daysToPayment = [];
-    payments.forEach(payment => {
-      if (!payment.sale || !payment.sale.createdAt) return;
-      
-      const invoiceDate = new Date(payment.sale.createdAt);
-      const paymentDate = new Date(payment.paymentDate);
-      const days = Math.floor((paymentDate - invoiceDate) / (1000 * 60 * 60 * 24));
-      
-      daysToPayment.push(days);
-    });
-    
-    const avgDaysToPayment = daysToPayment.length > 0 ? 
-      daysToPayment.reduce((sum, days) => sum + days, 0) / daysToPayment.length : 0;
-    
-    // Calculate payment method breakdown
-    const paymentMethodBreakdown = {};
-    payments.forEach(payment => {
-      if (!paymentMethodBreakdown[payment.paymentMethod]) {
-        paymentMethodBreakdown[payment.paymentMethod] = {
-          count: 0,
-          amount: 0
-        };
-      }
-      paymentMethodBreakdown[payment.paymentMethod].count++;
-      paymentMethodBreakdown[payment.paymentMethod].amount += payment.amount;
-    });
-    
-    // Find advance payments
-    const advancePayments = payments.filter(payment => payment.isAdvancePayment);
-    const totalAdvanceAmount = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
-    
-    res.json({
-      status: 'success',
-      data: {
-        customer: {
-          _id: customer._id,
-          name: customer.name,
-          email: customer.email,
-          phoneNumber: customer.phoneNumber
-        },
-        summary: {
-          totalInvoiced,
-          totalPaid,
-          currentOutstandingBalance,
-          totalSales: sales.length,
-          totalPayments: payments.length,
-          totalAdvancePayments: advancePayments.length,
-          totalAdvanceAmount,
-          paymentCompletion: totalInvoiced > 0 ? ((totalPaid / totalInvoiced) * 100).toFixed(2) : 100,
-          onTimePayments: onTimePayments.length,
-          latePayments: latePayments.length,
-          avgDaysToPayment: avgDaysToPayment.toFixed(1),
-          paymentMethodBreakdown
-        },
-        timeline
       }
     });
   } catch (error) {
@@ -2549,15 +2224,6 @@ const applyAdvancePaymentToSale = async (req, res) => {
 
       payments.push(payment);
 
-      // Create payment journey record
-      await PaymentJourney.create({
-        payment: payment._id,
-        user: req.user._id,
-        action: 'created',
-        changes: [],
-        notes: `Payment ${paymentNumber} created from advance payment for invoice ${sale.invoiceNumber}`,
-      });
-
       // Update customer advance balance
       await Customer.findByIdAndUpdate(customerId, {
         $inc: { advanceBalance: -amountToApply }
@@ -2898,22 +2564,6 @@ const createRefund = async (req, res) => {
       status: newStatus
     });
     
-    // Create payment journey record
-    await PaymentJourney.create({
-      payment: refund._id,
-      user: req.user._id,
-      action: 'refund_created',
-      changes: [{
-        field: 'refund',
-        oldValue: null,
-        newValue: {
-          amount: refundAmount,
-          reason: reason
-        }
-      }],
-      notes: `Refund created for payment ${originalPayment.paymentNumber}`
-    });
-    
     res.status(201).json({
       status: 'success',
       data: refund
@@ -3239,17 +2889,6 @@ const createSupplierPayment = async (req, res) => {
       paymentType: 'purchase_payment'
     });
 
-    // Create payment journey record
-    await PaymentJourney.create({
-      payment: payment._id,
-      user: req.user._id,
-      action: 'created',
-      changes: [],
-      notes: purchaseRecord 
-        ? `Payment ${paymentNumber} created for purchase ${purchaseRecord.invoiceNumber}` 
-        : `Payment ${paymentNumber} created for supplier`,
-    });
-    
     // Update purchase payment status (if purchase exists)
     if (purchaseRecord) {
       const newRemainingBalance = remainingBalance - regularPaymentAmount;
@@ -3292,14 +2931,6 @@ const createSupplierPayment = async (req, res) => {
         $inc: { advanceBalance: excessAmount }
       });
       
-      // Create payment journey record for advance payment
-      await PaymentJourney.create({
-        payment: advancePayment._id,
-        user: req.user._id,
-        action: 'created',
-        changes: [],
-        notes: `Excess payment ${advancePaymentNumber} created for supplier for future use`,
-      });
     }
     
     res.status(201).json({
@@ -3609,15 +3240,6 @@ const applyAdvancePaymentToPurchase = async (req, res) => {
       paymentType: 'purchase_payment'
     });
 
-    // Create payment journey record
-    await PaymentJourney.create({
-      payment: payment._id,
-      user: req.user._id,
-      action: 'created',
-      changes: [],
-      notes: `Payment ${paymentNumber} created from advance payment for purchase ${purchase.invoiceNumber}`,
-    });
-
     // Update supplier advance balance
     await Supplier.findByIdAndUpdate(supplierId, {
       $inc: { advanceBalance: -amountToApply }
@@ -3673,12 +3295,10 @@ module.exports = {
   deletePayment,
   getPaymentsBySaleId,
   getPaymentStats,
-  getPaymentJourney,
   checkOverduePayments,
   getCustomerPaymentAnalytics,
   createCustomerPayment,
   getCustomerAdvancePayments,
-  getPaymentJourneyByCustomerId,
   getCustomerTransactionHistory,
   applyAdvancePaymentToSale,
   getPaymentSummary,

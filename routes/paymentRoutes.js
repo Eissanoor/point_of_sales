@@ -8,12 +8,10 @@ const {
   deletePayment, 
   getPaymentsBySaleId,
   getPaymentStats,
-  getPaymentJourney,
   checkOverduePayments,
   getCustomerPaymentAnalytics,
   createCustomerPayment,
   getCustomerAdvancePayments,
-  getPaymentJourneyByCustomerId,
   getCustomerTransactionHistory,
   applyAdvancePaymentToSale,
   getPaymentSummary,
@@ -65,9 +63,6 @@ router.route('/:id')
   .put(protect, uploadMultiple, updatePayment)
   .delete(protect, deletePayment);
 
-router.route('/:id/journey')
-  .get(protect, getPaymentJourney);
-
 router.route('/sale/:saleId')
   .get(protect, getPaymentsBySaleId);
 
@@ -88,10 +83,6 @@ router.route('/customer/:customerId/advance')
 
 router.route('/supplier/:supplierId/advance')
   .get(protect, getSupplierAdvancePayments);
-
-// Routes for customer payment journey
-router.route('/customer/:customerId/journey')
-  .get(protect, getPaymentJourneyByCustomerId);
 
 // Route for simplified customer transaction history
 router.route('/customer/:customerId/transactions')

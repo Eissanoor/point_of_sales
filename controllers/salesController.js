@@ -1,7 +1,6 @@
 const mongoose = require('mongoose');
 const Sales = require('../models/salesModel');
 const Product = require('../models/productModel');
-const SalesJourney = require('../models/salesJourneyModel');
 const StockTransfer = require('../models/stockTransferModel');
 const Warehouse = require('../models/warehouseModel');
 const Shop = require('../models/shopModel');
@@ -181,15 +180,6 @@ const createSale = async (req, res) => {
       
       await product.save();
     }
-
-    // Create sales journey record for the new sale
-    await SalesJourney.create({
-      sale: sale._id,
-      user: req.user._id,
-      action: 'created',
-      changes: [],
-      notes: 'Sale created',
-    });
 
     if (sale) {
       res.status(201).json({
@@ -639,7 +629,7 @@ const updateSale = async (req, res) => {
         }))
       : [];
 
-    // Collect changes for journey
+    // Track changes for update
     const changes = [];
 
     // Fields that may be updated directly on the sale
@@ -861,15 +851,6 @@ const updateSale = async (req, res) => {
     // Save updated sale
     const updatedSale = await sale.save();
 
-    // Record journey
-    await SalesJourney.create({
-      sale: sale._id,
-      user: req.user._id,
-      action: 'updated',
-      changes,
-      notes: 'Sale updated',
-    });
-
     res.json({
       status: 'success',
       data: updatedSale,
@@ -904,15 +885,6 @@ const deleteSale = async (req, res) => {
         
         await product.save();
       }
-
-      // Create sales journey record before deleting the sale
-      await SalesJourney.create({
-        sale: sale._id,
-        user: req.user._id,
-        action: 'deleted',
-        changes: [],
-        notes: `Sale with invoice ${sale.invoiceNumber} deleted`,
-      });
 
       await Sales.deleteOne({ _id: req.params.id });
       

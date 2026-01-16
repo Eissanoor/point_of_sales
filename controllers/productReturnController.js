@@ -1,9 +1,7 @@
 const ProductReturn = require('../models/productReturnModel');
 const Product = require('../models/productModel');
 const Sales = require('../models/salesModel');
-const SalesJourney = require('../models/salesJourneyModel');
 const Customer = require('../models/customerModel');
-const ProductJourney = require('../models/productJourneyModel');
 const Warehouse = require('../models/warehouseModel');
 const Shop = require('../models/shopModel');
 const Currency = require('../models/currencyModel');
@@ -526,36 +524,6 @@ const createProductReturn = async (req, res) => {
         }
         
         await product.save();
-
-        // Create product journey record
-        const journeyChanges = [
-          {
-            field: 'returnedQuantity',
-            oldValue: product.returnedQuantity - productReturn.quantity,
-            newValue: product.returnedQuantity,
-          },
-          {
-            field: 'soldOutQuantity',
-            oldValue: currentSoldOut,
-            newValue: product.soldOutQuantity,
-          },
-        ];
-        
-        if (productReturn.restockable) {
-          journeyChanges.push({
-            field: 'countInStock',
-            oldValue: product.countInStock - productReturn.quantity,
-            newValue: product.countInStock,
-          });
-        }
-        
-        await ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'return_processed',
-          changes: journeyChanges,
-          notes: `Return processed: ${productReturn.returnReason}`,
-        });
       }
     }
 
@@ -622,16 +590,6 @@ const createProductReturn = async (req, res) => {
       // Always save the sale if we made any modifications
       // (saleChanges will have at least item quantity changes if we processed returns)
       await linkedSale.save();
-      
-      if (saleChanges.length > 0) {
-        await SalesJourney.create({
-          sale: linkedSale._id,
-          user: req.user._id,
-          action: 'return_adjustment',
-          changes: saleChanges,
-          notes: `Return ${returnRecord.returnNumber || returnRecord._id} processed`,
-        });
-      }
     }
 
     // Populate the response
@@ -892,26 +850,6 @@ const updateProductReturn = async (req, res) => {
             }
             
             await product.save();
-
-            // Create product journey record
-            await ProductJourney.create({
-              product: product._id,
-              user: req.user._id,
-              action: 'return_updated_reversed',
-              changes: [
-                {
-                  field: 'returnedQuantity',
-                  oldValue: product.returnedQuantity + oldProductReturn.quantity,
-                  newValue: product.returnedQuantity,
-                },
-                ...(oldProductReturn.restockable ? [{
-                  field: 'countInStock',
-                  oldValue: product.countInStock + oldProductReturn.quantity,
-                  newValue: product.countInStock,
-                }] : []),
-              ],
-              notes: 'Return updated - old stock changes reversed',
-            });
           }
         }
       }
@@ -934,26 +872,6 @@ const updateProductReturn = async (req, res) => {
             }
             
             await product.save();
-
-            // Create product journey record
-            await ProductJourney.create({
-              product: product._id,
-              user: req.user._id,
-              action: 'return_updated_applied',
-              changes: [
-                {
-                  field: 'returnedQuantity',
-                  oldValue: product.returnedQuantity - productReturn.quantity,
-                  newValue: product.returnedQuantity,
-                },
-                ...(productReturn.restockable ? [{
-                  field: 'countInStock',
-                  oldValue: product.countInStock - productReturn.quantity,
-                  newValue: product.countInStock,
-                }] : []),
-              ],
-              notes: `Return updated: ${productReturn.returnReason}`,
-            });
           }
         }
       }
@@ -1127,26 +1045,6 @@ const deleteProductReturn = async (req, res) => {
           }
           
           await product.save();
-
-          // Create product journey record
-          await ProductJourney.create({
-            product: product._id,
-            user: req.user._id,
-            action: 'return_deleted',
-            changes: [
-              {
-                field: 'returnedQuantity',
-                oldValue: product.returnedQuantity + productReturn.quantity,
-                newValue: product.returnedQuantity,
-              },
-              ...(productReturn.restockable ? [{
-                field: 'countInStock',
-                oldValue: product.countInStock + productReturn.quantity,
-                newValue: product.countInStock,
-              }] : []),
-            ],
-            notes: 'Return record deleted - stock adjustments reversed',
-          });
         }
       }
 

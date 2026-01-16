@@ -1,6 +1,5 @@
 const ProductDamage = require('../models/productDamageModel');
 const Product = require('../models/productModel');
-const ProductJourney = require('../models/productJourneyModel');
 const Warehouse = require('../models/warehouseModel');
 const Shop = require('../models/shopModel');
 const Currency = require('../models/currencyModel');
@@ -281,26 +280,6 @@ const createProductDamage = async (req, res) => {
     productExists.countInStock = Math.max(0, productExists.countInStock - damageQuantity);
     await productExists.save();
 
-    // Create product journey record
-    await ProductJourney.create({
-      product: productExists._id,
-      user: req.user._id,
-      action: 'damage_processed',
-      changes: [
-        {
-          field: 'damagedQuantity',
-          oldValue: productExists.damagedQuantity - damageQuantity,
-          newValue: productExists.damagedQuantity,
-        },
-        {
-          field: 'countInStock',
-          oldValue: productExists.countInStock + damageQuantity,
-          newValue: productExists.countInStock,
-        },
-      ],
-      notes: `Product damage processed: ${damageReason}`,
-    });
-
     // Populate the response
     const populatedDamage = await ProductDamage.findById(damage._id)
       .populate('product', 'name countInStock')
@@ -385,26 +364,6 @@ const deleteProductDamage = async (req, res) => {
         product.countInStock += damage.quantity;
         product.damagedQuantity = Math.max(0, product.damagedQuantity - damage.quantity);
         await product.save();
-
-        // Create product journey record
-        await ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'damage_deleted',
-          changes: [
-            {
-              field: 'countInStock',
-              oldValue: product.countInStock - damage.quantity,
-              newValue: product.countInStock,
-            },
-            {
-              field: 'damagedQuantity',
-              oldValue: product.damagedQuantity + damage.quantity,
-              newValue: product.damagedQuantity,
-            },
-          ],
-          notes: 'Damage record deleted - stock restored',
-        });
       }
 
       await ProductDamage.deleteOne({ _id: req.params.id });

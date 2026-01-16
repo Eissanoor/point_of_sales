@@ -1,5 +1,4 @@
 const Product = require('../models/productModel');
-const ProductJourney = require('../models/productJourneyModel');
 const Category = require('../models/categoryModel');
 const Currency = require('../models/currencyModel');
 const QuantityUnit = require('../models/quantityUnitModel');
@@ -255,15 +254,6 @@ const deleteProduct = async (req, res) => {
       if (product.imagePublicId) {
         await cloudinary.uploader.destroy(product.imagePublicId);
       }
-      
-      // Create product journey record before deleting
-      await ProductJourney.create({
-        product: product._id,
-        user: req.user._id,
-        action: 'deleted',
-        changes: [],
-        notes: `Product ${product.name} deleted`,
-      });
       
       await Product.deleteOne({ _id: req.params.id });
       
@@ -530,15 +520,6 @@ const createProduct = async (req, res) => {
       }
     }
     
-    // Create product journey record
-    await ProductJourney.create({
-      product: product._id,
-      user: req.user._id,
-      action: 'created',
-      changes: [],
-      notes: 'Product created',
-    });
-    
     if (product) {
     res.status(201).json({
       status: 'success',
@@ -690,15 +671,6 @@ const updateProduct = async (req, res) => {
         product.imagePublicId = result.public_id;
       }
       
-      // Create product journey record
-        await ProductJourney.create({
-          product: product._id,
-          user: req.user._id,
-          action: 'updated',
-        changes,
-        notes: 'Product updated',
-      });
-      
       const updatedProduct = await product.save();
       
       res.json({
@@ -756,21 +728,6 @@ const createProductReview = async (req, res) => {
 
       await product.save();
       
-      // Create product journey record
-      await ProductJourney.create({
-        product: product._id,
-        user: req.user._id,
-        action: 'review_added',
-        changes: [
-          {
-            field: 'reviews',
-            oldValue: null,
-            newValue: review,
-          },
-        ],
-        notes: 'Review added',
-      });
-      
       res.status(201).json({
         status: 'success',
         message: 'Review added',
@@ -781,53 +738,6 @@ const createProductReview = async (req, res) => {
         message: 'Product not found',
       });
     }
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
-  }
-};
-
-// @desc    Get product journey by product ID
-// @route   GET /api/products/:id/journey
-// @access  Private/Admin
-const getProductJourneyByProductId = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { page = 1, limit = 10 } = req.query;
-    
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const skip = (pageNum - 1) * limitNum;
-    
-    // Check if product exists
-    const product = await Product.findById(id);
-    if (!product) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Product not found',
-      });
-    }
-    
-    // Count total documents for pagination info
-    const totalJourneys = await ProductJourney.countDocuments({ product: id });
-    
-    // Get journey records
-    const journeys = await ProductJourney.find({ product: id })
-      .populate('user', 'name email')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limitNum);
-      
-    res.json({
-      status: 'success',
-      results: journeys.length,
-      totalPages: Math.ceil(totalJourneys / limitNum),
-      currentPage: pageNum,
-      totalJourneys,
-      data: journeys,
-    });
   } catch (error) {
     res.status(500).json({
       status: 'error',
@@ -1239,7 +1149,6 @@ module.exports = {
   createProduct,
   updateProduct,
   createProductReview,
-  getProductJourneyByProductId,
   convertProductPrice,
   getProductsByLocation,
   getUnitsHierarchy,
