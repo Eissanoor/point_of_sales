@@ -97,6 +97,10 @@ const getBankPaymentVoucherById = async (req, res) => {
 
 // Helper function to create Payment or SupplierPayment transaction from voucher
 const createTransactionFromVoucher = async (voucher, userId) => {
+  console.log('=== createTransactionFromVoucher called ===');
+  console.log('Voucher ID:', voucher?._id);
+  console.log('User ID:', userId);
+  
   // Ensure voucher is a Mongoose document with all fields loaded
   if (!voucher || !voucher._id) {
     console.error('Invalid voucher passed to createTransactionFromVoucher');
@@ -109,6 +113,15 @@ const createTransactionFromVoucher = async (voucher, userId) => {
     console.error('Voucher not found in database');
     return { createdSupplierPayment: null, createdPayment: null };
   }
+  
+  console.log('Fresh voucher loaded:', {
+    payeeType: freshVoucher.payeeType,
+    payee: freshVoucher.payee,
+    relatedSupplierPayment: freshVoucher.relatedSupplierPayment,
+    relatedPayment: freshVoucher.relatedPayment,
+    amount: freshVoucher.amount,
+    status: freshVoucher.status
+  });
 
   // Map voucher paymentMethod to supplier/customer payment method
   const mapPaymentMethod = (voucherMethod) => {
@@ -128,6 +141,7 @@ const createTransactionFromVoucher = async (voucher, userId) => {
 
   // Only create transactions if they don't already exist
   if (freshVoucher.payeeType === 'supplier' && freshVoucher.payee && !freshVoucher.relatedSupplierPayment) {
+    console.log('Creating SupplierPayment for supplier:', freshVoucher.payee);
     try {
       // Generate payment number
       const paymentCount = await SupplierPayment.countDocuments();
@@ -207,6 +221,7 @@ const createTransactionFromVoucher = async (voucher, userId) => {
 
   // Create Payment if customer is selected and no relatedPayment provided
   if (freshVoucher.payeeType === 'customer' && freshVoucher.payee && !freshVoucher.relatedPayment) {
+    console.log('Creating Payment for customer:', freshVoucher.payee);
     try {
       // Use voucher's transactionId or generate a new one
       const paymentTransactionId = freshVoucher.transactionId || `TRX-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
@@ -476,6 +491,13 @@ const createBankPaymentVoucher = async (req, res) => {
     }
 
     // Create voucher (voucherNumber and voucherDate will be auto-generated if not provided)
+    // Auto-set status to 'completed' if supplier/customer is selected (for automatic transaction creation)
+    let finalStatus = status || 'draft';
+    if (!status && (payeeType === 'supplier' || payeeType === 'customer') && payee) {
+      finalStatus = 'completed';
+      console.log('Auto-setting status to "completed" because supplier/customer is selected');
+    }
+    
     const voucherData = {
       voucherType,
       bankAccount,
@@ -495,7 +517,7 @@ const createBankPaymentVoucher = async (req, res) => {
       relatedSupplierPayment,
       description,
       notes,
-      status: status || 'draft',
+      status: finalStatus,
       attachments: uploadedAttachments,
       user: req.user._id,
     };
@@ -536,8 +558,13 @@ const createBankPaymentVoucher = async (req, res) => {
 
     // Automatically create Payment or SupplierPayment transaction if supplier/customer is selected
     // Only create if status is 'completed' or 'approved' and relatedPayment/relatedSupplierPayment is not already provided
+    // Check voucher.status (after creation) to ensure we have the actual saved status
     let createdTransaction = null;
-    if ((status === 'completed' || status === 'approved')) {
+    const voucherStatus = voucher.status || voucherData.status || status;
+    console.log('Voucher created with status:', voucherStatus, 'Voucher ID:', voucher._id);
+    
+    if ((voucherStatus === 'completed' || voucherStatus === 'approved')) {
+      console.log('Creating transaction from voucher - status is completed/approved');
       const transactionResult = await createTransactionFromVoucher(voucher, req.user._id);
       if (transactionResult.createdSupplierPayment) {
         createdTransaction = {
@@ -545,13 +572,19 @@ const createBankPaymentVoucher = async (req, res) => {
           id: transactionResult.createdSupplierPayment._id,
           paymentNumber: transactionResult.createdSupplierPayment.paymentNumber
         };
+        console.log('Transaction created - SupplierPayment:', createdTransaction.id);
       } else if (transactionResult.createdPayment) {
         createdTransaction = {
           type: 'Payment',
           id: transactionResult.createdPayment._id,
           paymentNumber: transactionResult.createdPayment.paymentNumber
         };
+        console.log('Transaction created - Payment:', createdTransaction.id);
+      } else {
+        console.log('No transaction created - check if supplier/customer was selected and relatedPayment/relatedSupplierPayment was already set');
       }
+    } else {
+      console.log('Transaction NOT created - voucher status is:', voucherStatus, '(expected: completed or approved)');
     }
 
     // Populate before sending response
