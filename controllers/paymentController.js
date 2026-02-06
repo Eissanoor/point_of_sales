@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Sales = require('../models/salesModel');
 const Product = require('../models/productModel');
 const Payment = require('../models/paymentModel');
@@ -135,6 +136,33 @@ const createPayment = async (req, res) => {
     // Calculate total payment amount
     const totalPaymentAmount = normalizedPayments.reduce((sum, payment) => sum + payment.amount, 0);
 
+    // Generate transaction ID automatically if not provided (like supplier-payments)
+    let finalTransactionId = transactionId;
+    if (!finalTransactionId) {
+      const timestamp = new Date().getTime();
+      const randomPart = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+      finalTransactionId = `TRX-${timestamp}-${randomPart}`;
+    }
+    
+    // Set payment date to current date and time if not provided (like supplier-payments)
+    const finalPaymentDate = paymentDate ? new Date(paymentDate) : new Date();
+
+    // Compute current totals for validation and journey running balances (like supplier-payments)
+    // Calculate total sales amount for this customer (active sales only)
+    const salesAgg = await Sales.aggregate([
+      { $match: { customer: new mongoose.Types.ObjectId(customerId), isActive: true } },
+      { $group: { _id: null, total: { $sum: '$grandTotal' } } }
+    ]);
+    const totalSalesAmount = salesAgg.length > 0 ? (salesAgg[0].total || 0) : 0;
+    
+    // Calculate total payments already made for this customer (excluding failed/refunded)
+    const paymentsAgg = await Payment.aggregate([
+      { $match: { customer: new mongoose.Types.ObjectId(customerId), status: { $nin: ['failed', 'refunded'] } } },
+      { $group: { _id: null, total: { $sum: '$amount' } } }
+    ]);
+    const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
+    const remainingBefore = totalSalesAmount - paidSoFar;
+
     // Calculate total payments already made for this sale (if sale exists)
     let totalPaid = 0;
     let remainingBalance = 0;
@@ -176,7 +204,7 @@ const createPayment = async (req, res) => {
     }
 
     // Generate payment number
-    const date = new Date(paymentDate || Date.now());
+    const date = finalPaymentDate;
     const year = date.getFullYear().toString().slice(-2);
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
     const day = date.getDate().toString().padStart(2, '0');
@@ -216,8 +244,8 @@ const createPayment = async (req, res) => {
       customer: customerId,
       amount: regularPaymentAmount,
       payments: paymentsForDB,
-      paymentDate: paymentDate || Date.now(),
-      transactionId,
+      paymentDate: finalPaymentDate,
+      transactionId: finalTransactionId,
       status: status || 'completed',
       notes,
       attachments: uploadedAttachments,
@@ -226,15 +254,31 @@ const createPayment = async (req, res) => {
       currency
     });
 
-    // Create payment journey record
+    // Calculate new balances (like supplier-payments)
+    const newPaidAmount = paidSoFar + regularPaymentAmount;
+    const newRemainingBalance = remainingBefore - regularPaymentAmount;
+    const isAdvancedPayment = newRemainingBalance < 0;
+    
+    // Get payment method for journey entry (use first payment method)
+    const paymentMethodForJourney = normalizedPayments.length > 0 ? normalizedPayments[0].method : 'unknown';
+    
+    // Create payment journey record with balance info (like supplier-payments)
     await PaymentJourney.create({
       payment: payment._id,
+      customer: customerId,
       user: req.user._id,
-      action: 'created',
+      action: 'payment_made',
+      paymentDetails: {
+        amount: regularPaymentAmount,
+        method: paymentMethodForJourney,
+        date: finalPaymentDate,
+        status: status || 'completed',
+        transactionId: finalTransactionId
+      },
+      paidAmount: newPaidAmount,
+      remainingBalance: newRemainingBalance,
       changes: [],
-      notes: saleRecord 
-        ? `Payment ${paymentNumber} created for invoice ${saleRecord.invoiceNumber}` 
-        : `Payment ${paymentNumber} created for customer`,
+      notes: `Payment of ${regularPaymentAmount} received from customer via ${paymentMethodForJourney}. Transaction ID: ${finalTransactionId}. ${isAdvancedPayment ? `Advanced payment: ${Math.abs(newRemainingBalance)}` : `Remaining balance: ${newRemainingBalance}`}. ${notes || ''}`
     });
     
     // Update sale payment status to paid (if sale exists)
@@ -262,8 +306,8 @@ const createPayment = async (req, res) => {
         customer: customerId,
         amount: excessAmount,
         payments: excessPayments,
-        paymentDate: paymentDate || Date.now(),
-        transactionId: transactionId ? `${transactionId}-ADV` : undefined,
+        paymentDate: finalPaymentDate,
+        transactionId: finalTransactionId ? `${finalTransactionId}-ADV` : undefined,
         status: status || 'completed',
         notes: notes ? `${notes} (Excess payment - advance for future invoices)` : 'Excess payment - advance for future invoices',
         attachments: uploadedAttachments,
@@ -273,28 +317,39 @@ const createPayment = async (req, res) => {
         isAdvancePayment: true
       });
       
-      // Create payment journey record for advance payment
+      // Calculate balances for advance payment
+      const advancePaidAmount = newPaidAmount + excessAmount;
+      const advanceRemainingBalance = newRemainingBalance - excessAmount;
+      
+      // Create payment journey record for advance payment with balance info
       await PaymentJourney.create({
         payment: advancePayment._id,
+        customer: customerId,
         user: req.user._id,
-        action: 'created',
+        action: 'payment_made',
+        paymentDetails: {
+          amount: excessAmount,
+          method: paymentMethodForJourney,
+          date: finalPaymentDate,
+          status: status || 'completed',
+          transactionId: finalTransactionId ? `${finalTransactionId}-ADV` : undefined
+        },
+        paidAmount: advancePaidAmount,
+        remainingBalance: advanceRemainingBalance,
         changes: [],
-        notes: `Excess payment ${advancePaymentNumber} created for customer for future use`,
+        notes: `Excess payment ${advancePaymentNumber} created for customer for future use. Transaction ID: ${finalTransactionId ? `${finalTransactionId}-ADV` : 'N/A'}. Advanced payment: ${Math.abs(advanceRemainingBalance)}.`,
       });
     }
     
+    // Return payment with balance information (like supplier-payments)
     res.status(201).json({
-      status: 'success',
-      data: {
-        payment,
-        advancePayment,
-        excessAmount,
-        originalAmount: totalPaymentAmount,
-        invoiceAmount: saleRecord ? regularPaymentAmount : totalPaymentAmount,
-        remainingBalance: saleRecord ? (remainingBalance - regularPaymentAmount) : 0,
-        message: excessAmount > 0 ? 
-          `Payment of ${regularPaymentAmount} applied to invoice. Excess amount of ${excessAmount} recorded as advance payment.` : 
-          saleRecord ? `Payment of ${regularPaymentAmount} applied to invoice.` : `Payment of ${totalPaymentAmount} recorded.`
+      ...payment.toObject(),
+      balanceInfo: {
+        totalSalesAmount,
+        paidAmount: newPaidAmount,
+        remainingBalance: newRemainingBalance,
+        isAdvancedPayment: isAdvancedPayment,
+        advanceAmount: isAdvancedPayment ? Math.abs(newRemainingBalance) : 0
       }
     });
   } catch (error) {
@@ -305,99 +360,19 @@ const createPayment = async (req, res) => {
   }
 };
 
-// @desc    Get all payments with pagination and filtering
+// @desc    Get all payments (like supplier-payments)
 // @route   GET /api/payments
 // @access  Private
 const getPayments = async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 10, 
-      startDate, 
-      endDate, 
-      sale, 
-      paymentMethod,
-      status,
-      paymentNumber 
-    } = req.query;
-    
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const skip = (pageNum - 1) * limitNum;
-    
-    let query = {};
+    const payments = await Payment.find({})
+      .sort({ createdAt: -1 })
+      .populate('customer', 'name email phoneNumber')
+      .populate('user', 'name')
+      .populate('currency', 'name symbol')
+      .populate('sale', 'invoiceNumber grandTotal');
 
-    // Filter by date range
-    if (startDate && endDate) {
-      query.paymentDate = {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      };
-    }
-
-    // Filter by sale
-    if (sale) {
-      query.sale = sale;
-    }
-
-    // Filter by payment method
-    if (paymentMethod) {
-      query.paymentMethod = paymentMethod;
-    }
-
-    // Filter by status
-    if (status) {
-      query.status = status;
-    }
-
-    // Filter by payment number
-    if (paymentNumber) {
-      query.paymentNumber = { $regex: paymentNumber, $options: 'i' };
-    }
-
-    // Count total documents for pagination info
-    const totalPayments = await Payment.countDocuments(query);
-
-    // Find payments based on query with pagination
-    const payments = await Payment.find(query)
-      .populate('sale', 'invoiceNumber grandTotal')
-      .populate({
-        path: 'sale',
-        populate: {
-          path: 'customer',
-          select: 'name email phoneNumber'
-        }
-      })
-      .populate('user', 'name email')
-      .populate('currency', 'name code symbol')
-      .limit(limitNum)
-      .skip(skip)
-      .sort({ paymentDate: -1 });
-    
-    // Calculate remaining balance for each payment
-    const enhancedPayments = await Promise.all(payments.map(async (payment) => {
-      const salePayments = await Payment.find({ 
-        sale: payment.sale._id,
-        paymentDate: { $lte: payment.paymentDate }
-      });
-      
-      const totalPaid = salePayments.reduce((sum, p) => sum + p.amount, 0);
-      const remainingBalance = payment.sale.grandTotal - totalPaid;
-      
-      return {
-        ...payment._doc,
-        remainingBalance
-      };
-    }));
-    
-    res.json({
-      status: 'success',
-      results: payments.length,
-      totalPages: Math.ceil(totalPayments / limitNum),
-      currentPage: pageNum,
-      totalPayments,
-      data: enhancedPayments,
-    });
+    res.status(200).json(payments);
   } catch (error) {
     res.status(500).json({
       status: 'error',
@@ -1953,10 +1928,12 @@ const getPaymentJourneyByCustomerId = async (req, res) => {
 // @desc    Get simplified customer transaction history
 // @route   GET /api/payments/customer/:customerId/transactions
 // @access  Private
+// @desc    Get customer payment summary (like supplier-journey/:supplierId/payments)
+// @route   GET /api/payments/customer/:customerId/transactions
+// @access  Private
 const getCustomerTransactionHistory = async (req, res) => {
   try {
     const { customerId } = req.params;
-    const { startDate, endDate } = req.query;
     
     // Verify the customer exists
     const customer = await Customer.findById(customerId);
@@ -1966,446 +1943,47 @@ const getCustomerTransactionHistory = async (req, res) => {
         message: 'Customer not found',
       });
     }
-    
-    // Build date filter if provided
-    let dateFilter = {};
-    if (startDate && endDate) {
-      dateFilter = {
-        $or: [
-          { createdAt: { $gte: new Date(startDate), $lte: new Date(endDate) } }, // For sales
-          { paymentDate: { $gte: new Date(startDate), $lte: new Date(endDate) } } // For payments
-        ]
-      };
-    }
-    
-    // Get all sales for this customer
-    const sales = await Sales.find({ 
+
+    // Get all payment entries for this customer from PaymentJourney (like supplier-journey)
+    const paymentEntries = await PaymentJourney.find({ 
       customer: customerId,
-      ...dateFilter
-    }).select('invoiceNumber grandTotal createdAt dueDate notes paymentStatus');
-    
-    // Get all payments for this customer, sorted by date
-    const payments = await Payment.find({
-      $or: [
-        { customer: customerId, isAdvancePayment: true },
-        { customer: customerId, paymentMethod: 'advance' },
-        { customer: customerId, paymentMethod: 'advance_adjustment' },
-        { sale: { $in: sales.map(sale => sale._id) } }
-      ],
-      ...dateFilter
+      action: { $in: ['payment_made', 'payment_updated'] }
     })
-    .select('paymentNumber amount paymentDate paymentMethod notes sale isAdvancePayment isAdvanceUsed')
-    .populate('sale', 'invoiceNumber grandTotal')
-    .sort({ paymentDate: 1 }); // Sort by payment date ascending
-    
-    // Create transactions array for payment-related transactions only
-    const transactions = [];
-    
-    // Create a map of sales by ID for quick lookup
-    const salesMap = {};
-    sales.forEach(sale => {
-      salesMap[sale._id.toString()] = sale;
+    .sort({ 'paymentDetails.date': -1 })
+    .select('paymentDetails notes createdAt user paidAmount remainingBalance')
+    .populate('user', 'name');
+
+    // Calculate total payments
+    const totalPayments = paymentEntries.reduce((sum, entry) => {
+      return sum + (entry.paymentDetails?.amount || 0);
+    }, 0);
+
+    // Group payments by status
+    const paymentsByStatus = paymentEntries.reduce((acc, entry) => {
+      const status = entry.paymentDetails?.status || 'unknown';
+      if (!acc[status]) {
+        acc[status] = 0;
+      }
+      acc[status] += entry.paymentDetails?.amount || 0;
+      return acc;
+    }, {});
+
+    const enhancedEntries = paymentEntries.map(entry => {
+      const obj = entry.toObject();
+      const adv = (obj.remainingBalance || 0) < 0 ? Math.abs(obj.remainingBalance) : 0;
+      const normalizedRemaining = (obj.remainingBalance || 0) < 0 ? 0 : (obj.remainingBalance || 0);
+      return {
+        ...obj,
+        payment: obj.paymentDetails, // Map paymentDetails to payment for consistency
+        remainingBalance: normalizedRemaining,
+        advancePayment: adv
+      };
     });
-    
-    // Track running balances for each sale
-    const saleBalances = {};
-    sales.forEach(sale => {
-      saleBalances[sale._id.toString()] = sale.grandTotal;
-    });
-    
-    // Track available advance funds
-    let availableAdvance = 0;
-    
-    // First, calculate initial advance amount (from payments made before the date range)
-    if (startDate) {
-      const previousAdvancePayments = await Payment.find({
-        customer: customerId,
-        isAdvancePayment: true,
-        paymentDate: { $lt: new Date(startDate) }
-      });
-      
-      availableAdvance = previousAdvancePayments.reduce((sum, payment) => sum + payment.amount, 0);
-    }
-    
-    // Group payments by date and reference to combine related payments
-    const paymentGroups = {};
-    
-    // Process all payments in chronological order
-    for (const payment of payments) {
-      const paymentDate = payment.paymentDate.toISOString();
-      const saleId = payment.sale ? payment.sale._id.toString() : null;
-      const invoiceRef = payment.sale ? payment.sale.invoiceNumber : null;
-      
-      // Create a unique key for grouping related payments
-      const groupKey = `${paymentDate}_${invoiceRef || 'advance'}_${payment.paymentMethod}`;
-      
-      if (!paymentGroups[groupKey]) {
-        paymentGroups[groupKey] = {
-          payments: [],
-          totalAmount: 0,
-          date: payment.paymentDate,
-          paymentMethod: payment.paymentMethod,
-          invoiceReference: invoiceRef,
-          saleId: saleId
-        };
-      }
-      
-      paymentGroups[groupKey].payments.push(payment);
-      paymentGroups[groupKey].totalAmount += payment.amount;
-    }
-    
-    // First process advance payments to establish the initial advance balance
-    let advancePaymentsProcessed = [];
-    
-    // Process each group to create simplified transactions
-    for (const groupKey in paymentGroups) {
-      const group = paymentGroups[groupKey];
-      const firstPayment = group.payments[0];
-      
-      // Case 1: Pure advance payment (no sale)
-      if (!group.saleId && (firstPayment.isAdvancePayment || firstPayment.notes?.includes('advance'))) {
-        availableAdvance += group.totalAmount;
-        advancePaymentsProcessed.push(group);
-        
-        transactions.push({
-          type: 'payment',
-          date: group.date,
-          reference: firstPayment.paymentNumber,
-          amount: group.totalAmount,
-          transactedAmount: group.totalAmount,
-          notes: `Advance payment: ${availableAdvance} available`,
-          paymentMethod: group.paymentMethod,
-          remainingBalance: -availableAdvance, // Show cumulative advance as negative
-          balanceAfter: 0
-        });
-      }
-    }
-    
-    // Then process payments that use advance funds
-    for (const groupKey in paymentGroups) {
-      const group = paymentGroups[groupKey];
-      const firstPayment = group.payments[0];
-      
-      // Skip advance payments as they've already been processed
-      if (advancePaymentsProcessed.includes(group)) {
-        continue;
-      }
-      
-      // Case 2: Payment using advance funds
-      if (group.paymentMethod === 'advance') {
-        const relatedSale = group.saleId ? salesMap[group.saleId] : null;
-        
-        if (relatedSale) {
-          // Get current balance for this sale before this payment
-          const currentBalance = saleBalances[group.saleId] || 0;
-          
-          // Calculate how much to apply to the sale
-          const appliedAmount = Math.min(group.totalAmount, currentBalance);
-          
-          // Update the sale balance
-          saleBalances[group.saleId] = Math.max(0, currentBalance - appliedAmount);
-          
-          // When using advance payment, reduce the available advance
-          availableAdvance -= appliedAmount;
-          
-          // Create a single transaction for this payment
-          transactions.push({
-            type: 'payment',
-            date: group.date,
-            reference: firstPayment.paymentNumber,
-          amount: group.totalAmount,
-          transactedAmount: group.totalAmount,
-            notes: `Payment: ${saleBalances[group.saleId]} remaining on invoice, ${availableAdvance} advance remaining`,
-            paymentMethod: group.paymentMethod,
-            invoiceReference: group.invoiceReference,
-            remainingBalance: saleBalances[group.saleId],
-            balanceAfter: saleBalances[group.saleId],
-            advanceBalance: availableAdvance
-          });
-        }
-      }
-    }
-    
-    // Then process advance adjustments
-    for (const groupKey in paymentGroups) {
-      const group = paymentGroups[groupKey];
-      const firstPayment = group.payments[0];
-      
-      // Skip advance payments as they've already been processed
-      if (advancePaymentsProcessed.includes(group)) {
-        continue;
-      }
-      
-      // Case 3: Advance adjustment
-      if (group.paymentMethod === 'advance_adjustment') {
-        // For advance_adjustment, we don't need to modify the available advance again
-        // since it was already adjusted when processing the 'advance' payment method
-        
-        transactions.push({
-          type: 'payment',
-          date: group.date,
-          reference: firstPayment.paymentNumber,
-          amount: Math.abs(group.totalAmount), // Display the absolute value for better readability
-          transactedAmount: Math.abs(group.totalAmount),
-          notes: firstPayment.notes || `Advance payment used: ${availableAdvance} remaining`,
-          paymentMethod: group.paymentMethod,
-          remainingBalance: -availableAdvance, // This should reflect the actual remaining advance
-          balanceAfter: 0
-        });
-      }
-    }
-    
-    // Finally process regular payments
-    for (const groupKey in paymentGroups) {
-      const group = paymentGroups[groupKey];
-      const firstPayment = group.payments[0];
-      
-      // Skip advance payments and advance adjustments as they've already been processed
-      if (advancePaymentsProcessed.includes(group) || 
-          group.paymentMethod === 'advance' || 
-          group.paymentMethod === 'advance_adjustment') {
-        continue;
-      }
-      
-      // Case 4: Regular payment for a sale (merge any companion excess->advance created at the same time)
-      if (group.saleId) {
-        const relatedSale = salesMap[group.saleId];
-        
-        if (relatedSale) {
-          // Get current balance for this sale before this payment
-          const currentBalance = saleBalances[group.saleId] || 0;
-          
-          // Calculate how much to apply to the sale
-          const appliedAmount = Math.min(group.totalAmount, currentBalance);
-          
-          // Calculate excess amount if any (from this payment record)
-          let excessAmount = Math.max(0, group.totalAmount - currentBalance);
 
-          // Helper to normalize a payment number to its base reference
-          const normalizeRef = (ref) => {
-            if (!ref) return '';
-            // remove trailing -excess/-adv/-advance (case-insensitive)
-            let out = ref.replace(/[-_](excess|adv|advance).*$/i, '');
-            // remove trailing -<digits>
-            out = out.replace(/[-_][0-9]+$/i, '');
-            return out;
-          };
-
-          // Try to find a companion advance-only group generated for the same base payment
-          const baseRef = normalizeRef(firstPayment.paymentNumber || '');
-          let companionAdvanceAmount = 0;
-          let companionAdvanceGroupKey = null;
-          let companionAdvanceRef = null;
-
-          for (const otherKey in paymentGroups) {
-            const other = paymentGroups[otherKey];
-            if (other.saleId) continue; // advance-only groups have no saleId
-            const otherFirst = other.payments[0];
-            const otherRef = normalizeRef(otherFirst.paymentNumber || '');
-            const sameMoment = Math.abs(new Date(other.date).getTime() - new Date(group.date).getTime()) < 2000; // within 2s
-            if (sameMoment && otherRef && baseRef && otherRef === baseRef) {
-              companionAdvanceAmount += other.totalAmount;
-              companionAdvanceGroupKey = otherKey;
-              companionAdvanceRef = otherFirst.paymentNumber;
-              break;
-            }
-          }
-          
-          // If a companion was found, treat it as excess and mark it processed so it isn't added separately
-          if (companionAdvanceAmount > 0) {
-            excessAmount = Math.max(excessAmount, companionAdvanceAmount);
-            if (companionAdvanceGroupKey && paymentGroups[companionAdvanceGroupKey]) {
-              advancePaymentsProcessed.push(paymentGroups[companionAdvanceGroupKey]);
-            }
-            // Also remove the previously pushed advance-only transaction for the companion (if exists)
-            if (companionAdvanceRef) {
-              const idx = transactions.findIndex(t => t.reference === companionAdvanceRef);
-              if (idx !== -1) {
-                transactions.splice(idx, 1);
-              }
-            }
-          }
-          
-          // Update the sale balance
-          saleBalances[group.saleId] = Math.max(0, currentBalance - appliedAmount);
-          
-          // If there's excess, add it to available advance
-          if (excessAmount > 0) {
-            availableAdvance += excessAmount;
-          }
-          
-          // Create a single transaction for this payment
-          transactions.push({
-            type: 'payment',
-            date: group.date,
-            reference: firstPayment.paymentNumber,
-            // Show the total cash movement including the companion excess part, if any
-            amount: group.totalAmount + (companionAdvanceAmount > 0 ? companionAdvanceAmount : 0),
-          transactedAmount: group.totalAmount + (companionAdvanceAmount > 0 ? companionAdvanceAmount : 0),
-            notes: excessAmount > 0 
-              ? `Payment: ${appliedAmount} applied to invoice, ${excessAmount} added to advance (${availableAdvance} available)`
-              : `Payment: ${saleBalances[group.saleId]} remaining on invoice`,
-            paymentMethod: group.paymentMethod,
-            invoiceReference: group.invoiceReference,
-            remainingBalance: saleBalances[group.saleId],
-            balanceAfter: saleBalances[group.saleId],
-            advanceBalance: availableAdvance
-          });
-        }
-      }
-    }
-    
-    // Consolidate any split transactions (invoice + companion advance) into one
-    const normalizeRefBase = (ref) => {
-      if (!ref) return '';
-      let out = ref.replace(/[-_](excess|adv|advance).*$/i, '');
-      out = out.replace(/[-_][0-9]+$/i, '');
-      return out;
-    };
-    const consolidated = [];
-    const used = new Set();
-    for (let i = 0; i < transactions.length; i++) {
-      if (used.has(i)) continue;
-      const a = transactions[i];
-      const baseA = normalizeRefBase(a.reference);
-      let merged = false;
-      if (a.type === 'payment') {
-        for (let j = i + 1; j < transactions.length; j++) {
-          if (used.has(j)) continue;
-          const b = transactions[j];
-          if (b.type !== 'payment') continue;
-          const baseB = normalizeRefBase(b.reference);
-          const sameBase = baseA && baseB && baseA === baseB;
-          const sameMethod = a.paymentMethod === b.paymentMethod;
-          const dtA = new Date(a.date).getTime();
-          const dtB = new Date(b.date).getTime();
-          const closeInTime = Math.abs(dtA - dtB) < 5000; // 5 seconds window
-          // One has invoiceReference and the other doesn't (advance-only)
-          const invoiceVsAdvance = (!!a.invoiceReference) !== (!!b.invoiceReference);
-          if (sameBase && sameMethod && closeInTime && invoiceVsAdvance) {
-            const invoiceTx = a.invoiceReference ? a : b;
-            const advanceTx = a.invoiceReference ? b : a;
-            const addAmount = (advanceTx.transactedAmount ?? advanceTx.amount ?? 0);
-            // Increase transactedAmount on the invoice transaction
-            const mergedTx = {
-              ...invoiceTx,
-              transactedAmount: (invoiceTx.transactedAmount ?? invoiceTx.amount ?? 0) + addAmount,
-            };
-            // Keep advanceBalance from invoiceTx if present, else from advanceTx
-            if (advanceTx.advanceBalance !== undefined) {
-              mergedTx.advanceBalance = advanceTx.advanceBalance;
-            }
-            consolidated.push(mergedTx);
-            used.add(i);
-            used.add(j);
-            merged = true;
-            break;
-          }
-        }
-      }
-      if (!merged) {
-        consolidated.push(a);
-        used.add(i);
-      }
-    }
-    // Replace transactions with consolidated list
-    transactions.length = 0;
-    transactions.push(...consolidated);
-
-    // First sort transactions by date
-    transactions.sort((a, b) => new Date(a.date) - new Date(b.date));
-    
-    // Then re-sort transactions to show invoice payments first, then advance payments
-    // For transactions on the same date, prioritize invoice payments over advance payments
-    transactions.sort((a, b) => {
-      // First compare dates
-      const dateA = new Date(a.date);
-      const dateB = new Date(b.date);
-      const dateDiff = dateA - dateB;
-      
-      // If dates are different, maintain chronological order
-      if (Math.abs(dateDiff) > 1000) { // Allow 1 second difference
-        return dateDiff;
-      }
-      
-      // For same date, prioritize invoice payments (positive or zero remainingBalance) 
-      // over advance payments (negative remainingBalance)
-      const aIsAdvance = a.remainingBalance < 0;
-      const bIsAdvance = b.remainingBalance < 0;
-      
-      if (aIsAdvance && !bIsAdvance) return 1; // b comes first (invoice payment)
-      if (!aIsAdvance && bIsAdvance) return -1; // a comes first (invoice payment)
-      
-      // If both are the same type, maintain the original order
-      return 0;
-    });
-    
-    // Get the final values
-    let finalAdvanceBalance = availableAdvance;
-    let finalRemainingBalance = Object.values(saleBalances).reduce((sum, balance) => sum + balance, 0);
-    
-    // Calculate summary
-    const totalInvoiced = sales.reduce((sum, sale) => sum + sale.grandTotal, 0);
-    
-    // Calculate total paid differently - use the actual sales amounts and remaining balance
-    const effectiveTotalPaid = totalInvoiced - finalRemainingBalance;
-    
-    // Calculate additional financial insights
-    const paidPercentage = totalInvoiced > 0 ? ((effectiveTotalPaid / totalInvoiced) * 100).toFixed(2) : 0;
-    
-    // Calculate overdue amount
-    const today = new Date();
-    const overdueInvoices = sales.filter(sale => 
-      sale.dueDate && new Date(sale.dueDate) < today && 
-      ['unpaid', 'partially_paid', 'overdue'].includes(sale.paymentStatus)
-    );
-    
-    const totalOverdue = overdueInvoices.reduce((sum, sale) => sum + sale.grandTotal, 0);
-    
-    // Count invoices by payment status
-    const invoiceStatusCounts = {
-      paid: sales.filter(sale => sale.paymentStatus === 'paid').length,
-      partially_paid: sales.filter(sale => sale.paymentStatus === 'partially_paid').length,
-      unpaid: sales.filter(sale => sale.paymentStatus === 'unpaid').length,
-      overdue: sales.filter(sale => sale.paymentStatus === 'overdue').length
-    };
-    
-    // Get advance payments (only the positive ones)
-    const advancePayments = payments.filter(payment => 
-      (payment.isAdvancePayment || payment.notes?.includes('advance')) && 
-      payment.amount > 0
-    );
-    const totalAdvance = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
-    
-    // The actual current advance balance is what we've calculated through our transaction processing
-    const actualAdvanceBalance = availableAdvance;
-    
-    res.json({
-      status: 'success',
-      data: {
-        customer: {
-          id: customer._id,
-          name: customer.name,
-          email: customer.email,
-          phoneNumber: customer.phoneNumber
-        },
-        financialSummary: {
-          totalInvoiced,
-          totalPaid: totalInvoiced - finalRemainingBalance,
-          totalRemaining: finalRemainingBalance,
-          paidPercentage: totalInvoiced > 0 ? (((totalInvoiced - finalRemainingBalance) / totalInvoiced) * 100).toFixed(2) : 0,
-          totalOverdue,
-          totalAdvance,
-          currentAdvanceBalance: actualAdvanceBalance
-        },
-        transactionSummary: {
-          totalTransactions: transactions.length,
-          invoiceCount: sales.length,
-          paymentCount: payments.length,
-          invoiceStatusCounts
-        },
-        transactions: transactions
-      }
+    res.status(200).json({
+      totalPayments,
+      paymentsByStatus,
+      paymentEntries: enhancedEntries
     });
   } catch (error) {
     res.status(500).json({
