@@ -1733,11 +1733,13 @@ const getPaymentJourneyByCustomerId = async (req, res) => {
     const sales = await Sales.find({ customer: customerId })
       .sort({ createdAt: -1 });
     
-    // Get all payments for this customer (both regular and advance)
+    // Get all payments for this customer (including payments from bank vouchers)
+    // Include: payments with customer field set, or payments linked to customer's sales
+    const saleIds = sales.map(sale => sale._id);
     const payments = await Payment.find({
       $or: [
-        { customer: customerId, isAdvancePayment: true },
-        { sale: { $in: sales.map(sale => sale._id) } }
+        { customer: customerId }, // All payments for this customer (including from vouchers)
+        { sale: { $in: saleIds } } // Payments linked to customer's sales
       ],
       ...dateFilter
     })
@@ -1746,8 +1748,16 @@ const getPaymentJourneyByCustomerId = async (req, res) => {
     .populate('currency', 'name code symbol')
     .sort({ paymentDate: 1 });
     
+    // Remove duplicates (in case a payment matches both conditions)
+    const uniquePayments = payments.filter((payment, index, self) => 
+      index === self.findIndex(p => p._id.toString() === payment._id.toString())
+    );
+    
+    // Use unique payments
+    const paymentsToUse = uniquePayments;
+    
     // Get all payment journeys for these payments
-    const paymentIds = payments.map(payment => payment._id);
+    const paymentIds = paymentsToUse.map(payment => payment._id);
     const paymentJourneys = await PaymentJourney.find({
       payment: { $in: paymentIds }
     })
@@ -1790,16 +1800,21 @@ const getPaymentJourneyByCustomerId = async (req, res) => {
     });
     
     // Add payments to timeline with enriched data
-    payments.forEach(payment => {
+    paymentsToUse.forEach(payment => {
       const journeys = journeysByPayment[payment._id.toString()] || [];
-      const creationJourney = journeys.find(j => j.action === 'created');
+      
+      // Get payment method (support both old and new format)
+      const paymentMethod = payment.paymentMethod || (payment.payments && payment.payments[0]?.method) || 'unknown';
+      
+      // Get creation journey (prefer payment_made action for bank voucher payments)
+      const creationJourney = journeys.find(j => j.action === 'created' || j.action === 'payment_made') || journeys[0];
       
       timeline.push({
         type: 'payment',
         date: payment.paymentDate,
         paymentNumber: payment.paymentNumber,
         amount: payment.amount,
-        paymentMethod: payment.paymentMethod,
+        paymentMethod: paymentMethod,
         status: payment.status,
         paymentId: payment._id,
         isAdvancePayment: payment.isAdvancePayment || false,
@@ -1819,7 +1834,9 @@ const getPaymentJourneyByCustomerId = async (req, res) => {
         balanceAfter: null, // Will calculate this after sorting
         description: payment.isAdvancePayment ? 
           `Advance payment: ${payment.paymentNumber}` : 
-          `Payment: ${payment.paymentNumber} for invoice ${payment.sale?.invoiceNumber || 'N/A'}`
+          payment.sale ? 
+            `Payment: ${payment.paymentNumber} for invoice ${payment.sale.invoiceNumber}` :
+            `Payment: ${payment.paymentNumber}${payment.notes && payment.notes.includes('bank payment voucher') ? ' (via bank voucher)' : ''}`
       });
     });
     
@@ -1839,14 +1856,14 @@ const getPaymentJourneyByCustomerId = async (req, res) => {
     
     // Calculate payment statistics
     const totalInvoiced = sales.reduce((sum, sale) => sum + sale.grandTotal, 0);
-    const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
+    const totalPaid = paymentsToUse.reduce((sum, payment) => sum + payment.amount, 0);
     const currentOutstandingBalance = currentBalance;
     
     // Calculate on-time vs late payments
     const onTimePayments = [];
     const latePayments = [];
     
-    payments.forEach(payment => {
+    paymentsToUse.forEach(payment => {
       if (!payment.sale || !payment.sale.dueDate) return;
       
       const paymentDate = new Date(payment.paymentDate);
@@ -1861,7 +1878,7 @@ const getPaymentJourneyByCustomerId = async (req, res) => {
     
     // Calculate average days to payment
     const daysToPayment = [];
-    payments.forEach(payment => {
+    paymentsToUse.forEach(payment => {
       if (!payment.sale || !payment.sale.createdAt) return;
       
       const invoiceDate = new Date(payment.sale.createdAt);
@@ -1876,19 +1893,21 @@ const getPaymentJourneyByCustomerId = async (req, res) => {
     
     // Calculate payment method breakdown
     const paymentMethodBreakdown = {};
-    payments.forEach(payment => {
-      if (!paymentMethodBreakdown[payment.paymentMethod]) {
-        paymentMethodBreakdown[payment.paymentMethod] = {
+    paymentsToUse.forEach(payment => {
+      // Handle both old paymentMethod field and new payments array
+      const method = payment.paymentMethod || (payment.payments && payment.payments[0]?.method) || 'unknown';
+      if (!paymentMethodBreakdown[method]) {
+        paymentMethodBreakdown[method] = {
           count: 0,
           amount: 0
         };
       }
-      paymentMethodBreakdown[payment.paymentMethod].count++;
-      paymentMethodBreakdown[payment.paymentMethod].amount += payment.amount;
+      paymentMethodBreakdown[method].count++;
+      paymentMethodBreakdown[method].amount += payment.amount;
     });
     
     // Find advance payments
-    const advancePayments = payments.filter(payment => payment.isAdvancePayment);
+    const advancePayments = paymentsToUse.filter(payment => payment.isAdvancePayment);
     const totalAdvanceAmount = advancePayments.reduce((sum, payment) => sum + payment.amount, 0);
     
     res.json({
@@ -1905,7 +1924,7 @@ const getPaymentJourneyByCustomerId = async (req, res) => {
           totalPaid,
           currentOutstandingBalance,
           totalSales: sales.length,
-          totalPayments: payments.length,
+          totalPayments: paymentsToUse.length,
           totalAdvancePayments: advancePayments.length,
           totalAdvanceAmount,
           paymentCompletion: totalInvoiced > 0 ? ((totalPaid / totalInvoiced) * 100).toFixed(2) : 100,
