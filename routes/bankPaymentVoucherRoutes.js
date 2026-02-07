@@ -13,6 +13,8 @@ const {
   cancelBankPaymentVoucher,
   deleteBankPaymentVoucher,
   getVouchersByBankAccount,
+  createMissingTransaction,
+  createMissingTransactionsForAll,
 } = require('../controllers/bankPaymentVoucherController');
 
 // @route   GET /api/bank-payment-vouchers
@@ -66,6 +68,16 @@ router.route('/:id/complete').put(protect, completeBankPaymentVoucher);
 // @desc    Cancel bank payment voucher
 // @access  Private
 router.route('/:id/cancel').put(protect, cancelBankPaymentVoucher);
+
+// @route   POST /api/bank-payment-vouchers/:id/create-transaction
+// @desc    Create missing Payment/SupplierPayment transaction for a voucher
+// @access  Private
+router.route('/:id/create-transaction').post(protect, createMissingTransaction);
+
+// @route   POST /api/bank-payment-vouchers/create-missing-transactions
+// @desc    Create missing transactions for all vouchers without transactions
+// @access  Private/Admin
+router.route('/create-missing-transactions').post(protect, admin, createMissingTransactionsForAll);
 
 module.exports = router;
 

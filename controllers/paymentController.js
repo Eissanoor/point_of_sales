@@ -1944,14 +1944,76 @@ const getCustomerTransactionHistory = async (req, res) => {
       });
     }
 
+    // Convert customerId to ObjectId for consistent querying
+    const customerObjectId = typeof customerId === 'string' 
+      ? new mongoose.Types.ObjectId(customerId) 
+      : customerId;
+
+    console.log('Querying PaymentJourney for customer:', customerObjectId.toString());
+
     // Get all payment entries for this customer from PaymentJourney (like supplier-journey)
-    const paymentEntries = await PaymentJourney.find({ 
-      customer: customerId,
+    // First try querying by customer field
+    let paymentEntries = await PaymentJourney.find({ 
+      customer: customerObjectId,
       action: { $in: ['payment_made', 'payment_updated'] }
     })
     .sort({ 'paymentDetails.date': -1 })
-    .select('paymentDetails notes createdAt user paidAmount remainingBalance')
+    .select('paymentDetails notes createdAt user paidAmount remainingBalance customer')
     .populate('user', 'name');
+
+    console.log(`Found ${paymentEntries.length} PaymentJourney entries for customer ${customerObjectId.toString()} (by customer field)`);
+    
+    // Fallback: If no entries found by customer field, try finding via Payment records
+    if (paymentEntries.length === 0) {
+      console.log('No entries found by customer field, trying fallback query via Payment records...');
+      const customerPayments = await Payment.find({ customer: customerObjectId })
+        .select('_id')
+        .limit(100);
+      
+      const paymentIds = customerPayments.map(p => p._id);
+      console.log(`Found ${paymentIds.length} Payment records for customer, searching PaymentJourney...`);
+      
+      if (paymentIds.length > 0) {
+        paymentEntries = await PaymentJourney.find({
+          payment: { $in: paymentIds },
+          action: { $in: ['payment_made', 'payment_updated'] }
+        })
+        .sort({ 'paymentDetails.date': -1 })
+        .select('paymentDetails notes createdAt user paidAmount remainingBalance customer')
+        .populate('user', 'name');
+        
+        console.log(`Found ${paymentEntries.length} PaymentJourney entries via Payment records`);
+        
+        // Update PaymentJourney entries that don't have customer field set
+        if (paymentEntries.length > 0) {
+          console.log('Updating PaymentJourney entries to include customer field...');
+          await PaymentJourney.updateMany(
+            { 
+              payment: { $in: paymentIds },
+              customer: { $exists: false } 
+            },
+            { $set: { customer: customerObjectId } }
+          );
+        }
+      }
+    }
+    
+    // Debug: Log all PaymentJourney entries for this customer (including different actions)
+    const allEntries = await PaymentJourney.find({ 
+      $or: [
+        { customer: customerObjectId },
+        { payment: { $in: await Payment.find({ customer: customerObjectId }).distinct('_id') } }
+      ]
+    })
+      .select('action customer payment paymentDetails.date paymentDetails.amount')
+      .limit(20);
+    console.log('All PaymentJourney entries for customer (first 20):', JSON.stringify(allEntries.map(e => ({
+      action: e.action,
+      customer: e.customer?.toString(),
+      payment: e.payment?.toString(),
+      date: e.paymentDetails?.date,
+      amount: e.paymentDetails?.amount
+    })), null, 2));
 
     // Calculate total payments
     const totalPayments = paymentEntries.reduce((sum, entry) => {

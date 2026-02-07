@@ -138,6 +138,7 @@ const createTransactionFromVoucher = async (voucher, userId) => {
 
   let createdSupplierPayment = null;
   let createdPayment = null;
+  let errorDetails = null;
 
   // Only create transactions if they don't already exist
   if (freshVoucher.payeeType === 'supplier' && freshVoucher.payee && !freshVoucher.relatedSupplierPayment) {
@@ -220,11 +221,34 @@ const createTransactionFromVoucher = async (voucher, userId) => {
   }
 
   // Create Payment if customer is selected and no relatedPayment provided
+  console.log('Checking customer payment creation:', {
+    payeeType: freshVoucher.payeeType,
+    hasPayee: !!freshVoucher.payee,
+    payee: freshVoucher.payee,
+    hasRelatedPayment: !!freshVoucher.relatedPayment,
+    relatedPayment: freshVoucher.relatedPayment
+  });
+
   if (freshVoucher.payeeType === 'customer' && freshVoucher.payee && !freshVoucher.relatedPayment) {
-    console.log('Creating Payment for customer:', freshVoucher.payee);
+    console.log('✓ Condition met - Creating Payment for customer:', freshVoucher.payee);
     try {
       // Use voucher's transactionId or generate a new one
       const paymentTransactionId = freshVoucher.transactionId || `TRX-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+      
+      // Calculate customer balances (like supplier payments)
+      const Sales = require('../models/salesModel');
+      const salesAgg = await Sales.aggregate([
+        { $match: { customer: new mongoose.Types.ObjectId(freshVoucher.payee), isActive: true } },
+        { $group: { _id: null, total: { $sum: '$grandTotal' } } }
+      ]);
+      const totalSalesAmount = salesAgg.length > 0 ? (salesAgg[0].total || 0) : 0;
+      
+      const paymentsAgg = await Payment.aggregate([
+        { $match: { customer: new mongoose.Types.ObjectId(freshVoucher.payee), status: { $nin: ['failed', 'refunded'] } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]);
+      const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
+      const remainingBefore = totalSalesAmount - paidSoFar;
       
       // Prepare payments array for Payment model
       const paymentMethodMapped = mapPaymentMethod(freshVoucher.paymentMethod || 'bank_transfer');
@@ -234,13 +258,46 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         bankAccount: (paymentMethodMapped === 'bank_transfer' || paymentMethodMapped === 'online_payment') ? freshVoucher.bankAccount : null
       }];
 
+      // Use voucherDate or paymentDate for consistency
+      const paymentDate = freshVoucher.voucherDate || new Date();
+
+      // Ensure customer is an ObjectId for Payment creation
+      const customerIdForPayment = typeof freshVoucher.payee === 'string' 
+        ? new mongoose.Types.ObjectId(freshVoucher.payee) 
+        : freshVoucher.payee;
+
+      console.log('Creating Payment with customer ID:', customerIdForPayment.toString());
+
+      // Generate payment number (required field - must be set before creation)
+      const date = new Date(paymentDate);
+      const year = date.getFullYear().toString().slice(-2);
+      const month = (date.getMonth() + 1).toString().padStart(2, '0');
+      const day = date.getDate().toString().padStart(2, '0');
+      
+      // Get count of payments for today to generate sequential number
+      const startOfDay = new Date(date);
+      startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date(date);
+      endOfDay.setHours(23, 59, 59, 999);
+      
+      const paymentsCount = await Payment.countDocuments({
+        createdAt: {
+          $gte: startOfDay,
+          $lt: endOfDay,
+        },
+      });
+      
+      const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
+      console.log('Generated payment number:', paymentNumber);
+
       // Create Payment
       createdPayment = await Payment.create({
-        customer: freshVoucher.payee,
+        paymentNumber: paymentNumber,
+        customer: customerIdForPayment,
         sale: freshVoucher.relatedSale || null,
         amount: freshVoucher.amount,
         payments: paymentsArray,
-        paymentDate: freshVoucher.voucherDate || new Date(),
+        paymentDate: paymentDate,
         transactionId: paymentTransactionId,
         status: 'completed',
         notes: freshVoucher.notes || `Payment via bank payment voucher ${freshVoucher.voucherNumber}`,
@@ -251,21 +308,95 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         paymentType: freshVoucher.relatedSale ? 'sale_payment' : 'advance_payment'
       });
 
-      // Create payment journey record
-      await PaymentJourney.create({
+      console.log('Payment created successfully:', createdPayment._id, 'Payment Number:', createdPayment.paymentNumber);
+
+      // Calculate new balances (like supplier payments)
+      const newPaidAmount = paidSoFar + freshVoucher.amount;
+      const newRemainingBalance = remainingBefore - freshVoucher.amount;
+      const isAdvancedPayment = newRemainingBalance < 0;
+
+      // Get the actual payment status from the created payment
+      const actualPaymentStatus = createdPayment.status || 'completed';
+
+      // Ensure customer is an ObjectId
+      const customerId = typeof freshVoucher.payee === 'string' 
+        ? new mongoose.Types.ObjectId(freshVoucher.payee) 
+        : freshVoucher.payee;
+
+      console.log('Creating PaymentJourney with customer ID:', customerId.toString(), 'Type:', typeof customerId);
+
+      // Create payment journey record with balance info (like supplier payments)
+      const paymentJourneyData = {
         payment: createdPayment._id,
+        customer: customerId, // Ensure customer field is set as ObjectId
         user: userId,
-        action: 'created',
+        action: 'payment_made',
+        paymentDetails: {
+          amount: freshVoucher.amount,
+          method: paymentMethodMapped,
+          date: paymentDate,
+          status: actualPaymentStatus, // Use actual payment status
+          transactionId: paymentTransactionId
+        },
+        paidAmount: newPaidAmount,
+        remainingBalance: newRemainingBalance,
         changes: [],
-        notes: `Payment created via bank payment voucher ${freshVoucher.voucherNumber}${freshVoucher.relatedSale ? ` for sale ${freshVoucher.relatedSale}` : ' as advance payment'}`
+        notes: `Payment of ${freshVoucher.amount} received from customer via bank payment voucher ${freshVoucher.voucherNumber}. Transaction ID: ${paymentTransactionId}. ${isAdvancedPayment ? `Advanced payment: ${Math.abs(newRemainingBalance)}` : `Remaining balance: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`
+      };
+      
+      console.log('PaymentJourney data before creation:', {
+        customer: paymentJourneyData.customer?.toString(),
+        customerType: typeof paymentJourneyData.customer,
+        action: paymentJourneyData.action,
+        payment: paymentJourneyData.payment?.toString()
       });
+      
+      const paymentJourneyEntry = await PaymentJourney.create(paymentJourneyData);
+
+      console.log('PaymentJourney entry created successfully:', {
+        journeyId: paymentJourneyEntry._id,
+        customerId: paymentJourneyEntry.customer?.toString(),
+        paymentId: paymentJourneyEntry.payment?.toString(),
+        action: paymentJourneyEntry.action,
+        paymentDetails: paymentJourneyEntry.paymentDetails
+      });
+      
+      // Ensure customer field is set (in case it wasn't saved properly)
+      if (!paymentJourneyEntry.customer || paymentJourneyEntry.customer.toString() !== customerId.toString()) {
+        console.log('⚠️ Customer field missing or incorrect, updating PaymentJourney...');
+        paymentJourneyEntry.customer = customerId;
+        await paymentJourneyEntry.save();
+        console.log('✓ PaymentJourney customer field updated to:', customerId.toString());
+      }
+
+      // Verify PaymentJourney was created correctly by querying it back
+      const verifyJourney = await PaymentJourney.findById(paymentJourneyEntry._id);
+      if (verifyJourney) {
+        console.log('Verified PaymentJourney exists with customer:', verifyJourney.customer?.toString());
+        
+        // Also verify by querying PaymentJourney with customer filter (like the API does)
+        const apiQueryTest = await PaymentJourney.find({
+          customer: customerId,
+          action: 'payment_made'
+        }).limit(1);
+        console.log('API query test - found PaymentJourney entries:', apiQueryTest.length);
+        if (apiQueryTest.length > 0) {
+          console.log('✓ PaymentJourney will be found by customer transactions API');
+        } else {
+          console.error('✗ WARNING: PaymentJourney NOT found by customer transactions API query!');
+          console.error('Query used:', { customer: customerId.toString(), action: 'payment_made' });
+        }
+      } else {
+        console.error('ERROR: PaymentJourney not found after creation!');
+      }
 
       // Update sale payment status if sale exists
       if (freshVoucher.relatedSale) {
-        const Sales = require('../models/salesModel');
         const saleRecord = await Sales.findById(freshVoucher.relatedSale);
         if (saleRecord) {
-          const remainingBalance = (saleRecord.grandTotal || 0) - (createdPayment.amount || 0);
+          const salePayments = await Payment.find({ sale: freshVoucher.relatedSale });
+          const totalPaidForSale = salePayments.reduce((sum, p) => sum + p.amount, 0);
+          const remainingBalance = (saleRecord.grandTotal || 0) - totalPaidForSale;
           if (remainingBalance <= 0) {
             await Sales.findByIdAndUpdate(freshVoucher.relatedSale, { paymentStatus: 'paid' });
           } else {
@@ -276,16 +407,55 @@ const createTransactionFromVoucher = async (voucher, userId) => {
 
       // Update voucher with created Payment reference
       freshVoucher.relatedPayment = createdPayment._id;
-      await freshVoucher.save();
+      const savedVoucher = await freshVoucher.save();
+      
+      console.log('✓ Voucher updated with relatedPayment:', {
+        voucherId: savedVoucher._id,
+        relatedPayment: savedVoucher.relatedPayment?.toString(),
+        paymentId: createdPayment._id.toString()
+      });
+
+      // Verify the update persisted
+      const verifyVoucher = await BankPaymentVoucher.findById(freshVoucher._id);
+      console.log('✓ Verified voucher has relatedPayment:', verifyVoucher.relatedPayment?.toString());
 
       console.log('Payment created automatically:', createdPayment._id);
     } catch (error) {
-      console.error('Error creating Payment automatically:', error);
+      console.error('❌ ERROR creating Payment automatically:', error);
+      console.error('Error stack:', error.stack);
+      errorDetails = {
+        message: error.message,
+        name: error.name,
+        code: error.code,
+        errors: error.errors
+      };
+      console.error('Error details:', errorDetails);
+      
+      // Log the voucher details for debugging
+      console.error('Voucher details at error:', {
+        voucherId: freshVoucher._id,
+        payeeType: freshVoucher.payeeType,
+        payee: freshVoucher.payee,
+        amount: freshVoucher.amount,
+        status: freshVoucher.status
+      });
+      
+      // Don't fail the voucher creation, but log the error
       // Continue without failing - voucher is already created
     }
+  } else {
+    console.log('✗ Condition NOT met for customer payment creation:', {
+      payeeType: freshVoucher.payeeType,
+      hasPayee: !!freshVoucher.payee,
+      hasRelatedPayment: !!freshVoucher.relatedPayment
+    });
   }
 
-  return { createdSupplierPayment, createdPayment };
+  return { 
+    createdSupplierPayment, 
+    createdPayment,
+    error: errorDetails || null
+  };
 };
 
 // @desc    Create new bank payment voucher
@@ -554,18 +724,25 @@ const createBankPaymentVoucher = async (req, res) => {
     console.log('Final voucherData.attachments before save:', voucherData.attachments);
     console.log('Full voucherData before save:', JSON.stringify(voucherData, null, 2));
 
-    const voucher = await BankPaymentVoucher.create(voucherData);
+    let voucher = await BankPaymentVoucher.create(voucherData);
 
     // Automatically create Payment or SupplierPayment transaction if supplier/customer is selected
     // Only create if status is 'completed' or 'approved' and relatedPayment/relatedSupplierPayment is not already provided
     // Check voucher.status (after creation) to ensure we have the actual saved status
     let createdTransaction = null;
+    let transactionResult = null;
     const voucherStatus = voucher.status || voucherData.status || status;
     console.log('Voucher created with status:', voucherStatus, 'Voucher ID:', voucher._id);
     
     if ((voucherStatus === 'completed' || voucherStatus === 'approved')) {
       console.log('Creating transaction from voucher - status is completed/approved');
-      const transactionResult = await createTransactionFromVoucher(voucher, req.user._id);
+      transactionResult = await createTransactionFromVoucher(voucher, req.user._id);
+      console.log('Transaction result:', {
+        hasSupplierPayment: !!transactionResult.createdSupplierPayment,
+        hasPayment: !!transactionResult.createdPayment,
+        hasError: !!transactionResult.error,
+        error: transactionResult.error
+      });
       if (transactionResult.createdSupplierPayment) {
         createdTransaction = {
           type: 'SupplierPayment',
@@ -582,12 +759,23 @@ const createBankPaymentVoucher = async (req, res) => {
         console.log('Transaction created - Payment:', createdTransaction.id);
       } else {
         console.log('No transaction created - check if supplier/customer was selected and relatedPayment/relatedSupplierPayment was already set');
+        if (transactionResult.error) {
+          console.error('Transaction creation error:', transactionResult.error);
+        }
       }
+      
+      // Reload voucher after transaction creation to ensure we have the latest data
+      voucher = await BankPaymentVoucher.findById(voucher._id);
+      console.log('Voucher reloaded after transaction creation:', {
+        voucherId: voucher._id,
+        relatedPayment: voucher.relatedPayment?.toString(),
+        relatedSupplierPayment: voucher.relatedSupplierPayment?.toString()
+      });
     } else {
       console.log('Transaction NOT created - voucher status is:', voucherStatus, '(expected: completed or approved)');
     }
 
-    // Populate before sending response
+    // Populate before sending response - use the reloaded voucher
     const populatedVoucher = await BankPaymentVoucher.findById(voucher._id)
       .populate('bankAccount', 'accountName accountNumber bankName')
       .populate('currency', 'name code symbol')
@@ -602,7 +790,8 @@ const createBankPaymentVoucher = async (req, res) => {
       message: 'Bank payment voucher created successfully',
       data: {
         voucher: populatedVoucher,
-        createdTransaction: createdTransaction
+        createdTransaction: createdTransaction,
+        transactionError: createdTransaction === null && transactionResult?.error ? transactionResult.error : null
       },
     });
   } catch (error) {
@@ -1255,6 +1444,147 @@ const getVouchersByBankAccount = async (req, res) => {
   }
 };
 
+// @desc    Create missing Payment transactions for existing vouchers
+// @route   POST /api/bank-payment-vouchers/:id/create-transaction
+// @access  Private
+const createMissingTransaction = async (req, res) => {
+  try {
+    const voucher = await BankPaymentVoucher.findById(req.params.id);
+
+    if (!voucher) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Bank payment voucher not found',
+      });
+    }
+
+    // Check if transaction already exists
+    if (voucher.payeeType === 'supplier' && voucher.relatedSupplierPayment) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Supplier payment already exists for this voucher',
+      });
+    }
+
+    if (voucher.payeeType === 'customer' && voucher.relatedPayment) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Payment already exists for this voucher',
+      });
+    }
+
+    // Only create transaction if voucher is completed or approved
+    if (voucher.status !== 'completed' && voucher.status !== 'approved') {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Can only create transactions for completed or approved vouchers',
+      });
+    }
+
+    // Create the transaction
+    const transactionResult = await createTransactionFromVoucher(voucher, req.user._id);
+
+    // Reload voucher to get updated data
+    const updatedVoucher = await BankPaymentVoucher.findById(voucher._id)
+      .populate('bankAccount', 'accountName accountNumber bankName')
+      .populate('currency', 'name code symbol')
+      .populate('payee', 'name')
+      .populate('user', 'name email')
+      .populate('relatedPayment', 'paymentNumber amount')
+      .populate('relatedSupplierPayment', 'paymentNumber amount')
+      .select('-__v');
+
+    if (transactionResult.createdSupplierPayment || transactionResult.createdPayment) {
+      res.status(200).json({
+        status: 'success',
+        message: 'Transaction created successfully',
+        data: {
+          voucher: updatedVoucher,
+          createdTransaction: transactionResult.createdSupplierPayment 
+            ? { type: 'SupplierPayment', id: transactionResult.createdSupplierPayment._id }
+            : { type: 'Payment', id: transactionResult.createdPayment._id }
+        },
+      });
+    } else {
+      res.status(400).json({
+        status: 'fail',
+        message: 'Failed to create transaction. Check server logs for details.',
+        data: {
+          voucher: updatedVoucher
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error creating missing transaction:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Create missing Payment transactions for all vouchers without transactions
+// @route   POST /api/bank-payment-vouchers/create-missing-transactions
+// @access  Private/Admin
+const createMissingTransactionsForAll = async (req, res) => {
+  try {
+    // Find all completed/approved vouchers without transactions
+    const vouchersWithoutTransactions = await BankPaymentVoucher.find({
+      status: { $in: ['completed', 'approved'] },
+      $or: [
+        { payeeType: 'customer', relatedPayment: { $exists: false } },
+        { payeeType: 'customer', relatedPayment: null },
+        { payeeType: 'supplier', relatedSupplierPayment: { $exists: false } },
+        { payeeType: 'supplier', relatedSupplierPayment: null }
+      ]
+    }).limit(100); // Limit to 100 at a time to avoid timeout
+
+    const results = {
+      processed: 0,
+      succeeded: 0,
+      failed: 0,
+      errors: []
+    };
+
+    for (const voucher of vouchersWithoutTransactions) {
+      try {
+        results.processed++;
+        const transactionResult = await createTransactionFromVoucher(voucher, req.user._id);
+        
+        if (transactionResult.createdSupplierPayment || transactionResult.createdPayment) {
+          results.succeeded++;
+        } else {
+          results.failed++;
+          results.errors.push({
+            voucherId: voucher._id,
+            voucherNumber: voucher.voucherNumber,
+            error: 'Transaction creation returned null'
+          });
+        }
+      } catch (error) {
+        results.failed++;
+        results.errors.push({
+          voucherId: voucher._id,
+          voucherNumber: voucher.voucherNumber,
+          error: error.message
+        });
+      }
+    }
+
+    res.status(200).json({
+      status: 'success',
+      message: `Processed ${results.processed} vouchers`,
+      data: results
+    });
+  } catch (error) {
+    console.error('Error creating missing transactions:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   getBankPaymentVouchers,
   getBankPaymentVoucherById,
@@ -1266,5 +1596,7 @@ module.exports = {
   cancelBankPaymentVoucher,
   deleteBankPaymentVoucher,
   getVouchersByBankAccount,
+  createMissingTransaction,
+  createMissingTransactionsForAll,
 };
 
