@@ -7,29 +7,40 @@ const createCustomer = async (req, res) => {
   try {
     const { name, email, phoneNumber, cnicNumber, address, customerType, manager, country, state, city, deliveryAddress } = req.body;
 
-    // Check if customer already exists with the same email
-    const customerExists = await Customer.findOne({ name });
-    if (customerExists) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Customer with this name already exists',
+    // Check if customer already exists with the same email (only if email is provided and not null/empty)
+    // This prevents null/empty emails from being treated as duplicates
+    if (email && email !== null && email !== undefined && typeof email === 'string' && email.trim() !== '') {
+      const normalizedEmail = email.trim().toLowerCase();
+      const customerExists = await Customer.findOne({ 
+        email: normalizedEmail 
       });
+      if (customerExists) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Customer with this email already exists',
+        });
+      }
     }
 
+    // Prepare customer data - convert empty strings to null for all optional fields
+    const customerData = {
+      name: name && name.trim() !== '' ? name.trim() : null,
+      email: email && email !== null && email !== undefined && typeof email === 'string' && email.trim() !== '' 
+        ? email.trim().toLowerCase() 
+        : null,
+      phoneNumber: phoneNumber && phoneNumber.trim() !== '' ? phoneNumber.trim() : null,
+      cnicNumber: cnicNumber && cnicNumber.trim() !== '' ? cnicNumber.trim() : null,
+      address: address && address.trim() !== '' ? address.trim() : null,
+      customerType: customerType && customerType.trim() !== '' ? customerType.trim() : null,
+      manager: manager && manager.trim() !== '' ? manager.trim() : null,
+      country: country && country.trim() !== '' ? country.trim() : null,
+      state: state && state.trim() !== '' ? state.trim() : null,
+      city: city && city.trim() !== '' ? city.trim() : null,
+      deliveryAddress: deliveryAddress && deliveryAddress.trim() !== '' ? deliveryAddress.trim() : null,
+    };
+
     // Create new customer
-    const customer = await Customer.create({
-      name,
-      email: email || undefined,
-      phoneNumber,
-      cnicNumber,
-      address,
-      customerType,
-      manager,
-      country,
-      state,
-      city,
-      deliveryAddress,
-    });
+    const customer = await Customer.create(customerData);
 
     if (customer) {
       res.status(201).json({
@@ -136,17 +147,59 @@ const updateCustomer = async (req, res) => {
     const customer = await Customer.findById(req.params.id);
 
     if (customer) {
-      customer.name = req.body.name || customer.name;
-      customer.email = req.body.email !== undefined ? (req.body.email || null) : customer.email;
-      customer.phoneNumber = req.body.phoneNumber || customer.phoneNumber;
-      customer.cnicNumber = req.body.cnicNumber || customer.cnicNumber;
-      customer.address = req.body.address || customer.address;
-      customer.customerType = req.body.customerType || customer.customerType;
-      customer.manager = req.body.manager || customer.manager;
-      customer.country = req.body.country || customer.country;
-      customer.state = req.body.state || customer.state;
-      customer.city = req.body.city || customer.city;
-      customer.deliveryAddress = req.body.deliveryAddress || customer.deliveryAddress;
+      // Update email if provided - allow null/empty values
+      if (req.body.email !== undefined) {
+        // Check for duplicate email (only if email is provided and not null/empty)
+        if (req.body.email && req.body.email !== null && typeof req.body.email === 'string' && req.body.email.trim() !== '') {
+          const emailToCheck = req.body.email.trim().toLowerCase();
+          const existingCustomer = await Customer.findOne({ 
+            email: emailToCheck,
+            _id: { $ne: req.params.id } // Exclude current customer
+          });
+          if (existingCustomer) {
+            return res.status(400).json({
+              status: 'fail',
+              message: 'Customer with this email already exists',
+            });
+          }
+          customer.email = emailToCheck;
+        } else {
+          // Set email to null if empty or null
+          customer.email = null;
+        }
+      }
+
+      // Update optional fields - convert empty strings to null
+      if (req.body.name !== undefined) {
+        customer.name = req.body.name && req.body.name.trim() !== '' ? req.body.name.trim() : null;
+      }
+      if (req.body.phoneNumber !== undefined) {
+        customer.phoneNumber = req.body.phoneNumber && req.body.phoneNumber.trim() !== '' ? req.body.phoneNumber.trim() : null;
+      }
+      if (req.body.cnicNumber !== undefined) {
+        customer.cnicNumber = req.body.cnicNumber && req.body.cnicNumber.trim() !== '' ? req.body.cnicNumber.trim() : null;
+      }
+      if (req.body.address !== undefined) {
+        customer.address = req.body.address && req.body.address.trim() !== '' ? req.body.address.trim() : null;
+      }
+      if (req.body.customerType !== undefined) {
+        customer.customerType = req.body.customerType && req.body.customerType.trim() !== '' ? req.body.customerType.trim() : null;
+      }
+      if (req.body.manager !== undefined) {
+        customer.manager = req.body.manager && req.body.manager.trim() !== '' ? req.body.manager.trim() : null;
+      }
+      if (req.body.country !== undefined) {
+        customer.country = req.body.country && req.body.country.trim() !== '' ? req.body.country.trim() : null;
+      }
+      if (req.body.state !== undefined) {
+        customer.state = req.body.state && req.body.state.trim() !== '' ? req.body.state.trim() : null;
+      }
+      if (req.body.city !== undefined) {
+        customer.city = req.body.city && req.body.city.trim() !== '' ? req.body.city.trim() : null;
+      }
+      if (req.body.deliveryAddress !== undefined) {
+        customer.deliveryAddress = req.body.deliveryAddress && req.body.deliveryAddress.trim() !== '' ? req.body.deliveryAddress.trim() : null;
+      }
 
       const updatedCustomer = await customer.save();
 
