@@ -9,18 +9,17 @@ const employeeSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
-    phoneNumber: {
+    mobileNo: {
       type: String,
       trim: true,
     },
-    position: {
+    code: {
       type: String,
       trim: true,
     },
-    salary: {
-      type: Number,
-      min: 0,
-      default: 0,
+    description: {
+      type: String,
+      trim: true,
     },
     isActive: {
       type: Boolean,
@@ -53,6 +52,7 @@ employeeSchema.pre('save', async function (next) {
 });
 
 employeeSchema.index({ name: 1 });
+employeeSchema.index({ code: 1 });
 employeeSchema.index({ referCode: 1 }, { unique: true });
 
 const Employee = mongoose.model('Employee', employeeSchema);

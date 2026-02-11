@@ -4,26 +4,22 @@ const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const assetSchema = new mongoose.Schema(
   {
-    purchaseDate: {
-      type: Date,
-      required: true,
-      default: Date.now,
-    },
     name: {
       type: String,
       required: true,
       trim: true,
     },
-    assetType: {
+    mobileNo: {
       type: String,
-      required: true,
-      enum: ['fixed', 'current', 'intangible', 'other'],
-      default: 'fixed',
+      trim: true,
     },
-    value: {
-      type: Number,
-      required: true,
-      min: 0,
+    code: {
+      type: String,
+      trim: true,
+    },
+    description: {
+      type: String,
+      trim: true,
     },
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -51,16 +47,9 @@ assetSchema.plugin(autoIncrementPlugin);
 // Pre-save hook to generate referCode
 assetSchema.pre('save', async function (next) {
   try {
-    // Generate referCode if not provided
     if (!this.referCode) {
       this.referCode = await generateReferCode('Asset');
     }
-
-    // Set purchaseDate if not provided
-    if (!this.purchaseDate) {
-      this.purchaseDate = new Date();
-    }
-
     next();
   } catch (error) {
     return next(error);
@@ -68,8 +57,8 @@ assetSchema.pre('save', async function (next) {
 });
 
 // Create indices for better query performance
-assetSchema.index({ purchaseDate: -1 });
-assetSchema.index({ assetType: 1 });
+assetSchema.index({ name: 1 });
+assetSchema.index({ code: 1 });
 assetSchema.index({ user: 1 });
 assetSchema.index({ referCode: 1 }, { unique: true });
 

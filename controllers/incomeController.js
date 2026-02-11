@@ -6,7 +6,7 @@ const APIFeatures = require('../utils/apiFeatures');
 // @access  Private
 const createIncome = async (req, res) => {
   try {
-    const { date, description, amount, sourceType } = req.body;
+    const { name, mobileNo, code, description } = req.body;
 
     if (!req.user || !req.user._id) {
       return res.status(401).json({
@@ -16,10 +16,10 @@ const createIncome = async (req, res) => {
     }
 
     const income = await Income.create({
-      date: date || new Date(),
+      name,
+      mobileNo,
+      code,
       description,
-      amount: typeof amount === 'string' ? parseFloat(amount) : amount,
-      sourceType: sourceType || 'other',
       user: req.user._id,
     });
 
@@ -53,7 +53,7 @@ const getIncomes = async (req, res) => {
 
     const incomes = await features.query
       .populate('user', 'name email')
-      .sort({ date: -1 })
+      .sort({ createdAt: -1 })
       .select('-__v');
 
     const queryObj = { ...req.query };
@@ -121,20 +121,12 @@ const updateIncome = async (req, res) => {
       });
     }
 
-    const { date, description, amount, sourceType, isActive } = req.body;
+    const { name, mobileNo, code, description, isActive } = req.body;
 
-    if (date !== undefined) {
-      const parsedDate = new Date(date);
-      if (!isNaN(parsedDate.getTime())) {
-        income.date = parsedDate;
-      }
-    }
+    if (name !== undefined) income.name = name;
+    if (mobileNo !== undefined) income.mobileNo = mobileNo;
+    if (code !== undefined) income.code = code;
     if (description !== undefined) income.description = description;
-    if (amount !== undefined) {
-      income.amount =
-        typeof amount === 'string' ? parseFloat(amount) : amount;
-    }
-    if (sourceType !== undefined) income.sourceType = sourceType;
     if (isActive !== undefined) income.isActive = isActive;
 
     const updatedIncome = await income.save();

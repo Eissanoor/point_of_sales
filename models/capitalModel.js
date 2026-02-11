@@ -4,26 +4,22 @@ const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const capitalSchema = new mongoose.Schema(
   {
-    date: {
-      type: Date,
-      required: true,
-      default: Date.now,
-    },
-    description: {
+    name: {
       type: String,
       required: true,
       trim: true,
     },
-    amount: {
-      type: Number,
-      required: true,
-      min: 0,
-    },
-    type: {
+    mobileNo: {
       type: String,
-      required: true,
-      enum: ['investment', 'withdraw'],
-      default: 'investment',
+      trim: true,
+    },
+    code: {
+      type: String,
+      trim: true,
+    },
+    description: {
+      type: String,
+      trim: true,
     },
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -56,11 +52,6 @@ capitalSchema.pre('save', async function (next) {
       this.referCode = await generateReferCode('Capital');
     }
 
-    // Set date if not provided
-    if (!this.date) {
-      this.date = new Date();
-    }
-
     next();
   } catch (error) {
     return next(error);
@@ -68,8 +59,8 @@ capitalSchema.pre('save', async function (next) {
 });
 
 // Create indices for better query performance
-capitalSchema.index({ date: -1 });
-capitalSchema.index({ type: 1 });
+capitalSchema.index({ name: 1 });
+capitalSchema.index({ code: 1 });
 capitalSchema.index({ user: 1 });
 capitalSchema.index({ referCode: 1 }, { unique: true });
 

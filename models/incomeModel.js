@@ -4,25 +4,22 @@ const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const incomeSchema = new mongoose.Schema(
   {
-    date: {
-      type: Date,
-      required: true,
-      default: Date.now,
-    },
-    description: {
+    name: {
       type: String,
       required: true,
       trim: true,
     },
-    amount: {
-      type: Number,
-      required: true,
-      min: 0,
-    },
-    sourceType: {
+    mobileNo: {
       type: String,
-      enum: ['sale', 'service', 'investment', 'other'],
-      default: 'other',
+      trim: true,
+    },
+    code: {
+      type: String,
+      trim: true,
+    },
+    description: {
+      type: String,
+      trim: true,
     },
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -53,17 +50,14 @@ incomeSchema.pre('save', async function (next) {
     if (!this.referCode) {
       this.referCode = await generateReferCode('Income');
     }
-    if (!this.date) {
-      this.date = new Date();
-    }
     next();
   } catch (error) {
     return next(error);
   }
 });
 
-incomeSchema.index({ date: -1 });
-incomeSchema.index({ sourceType: 1 });
+incomeSchema.index({ name: 1 });
+incomeSchema.index({ code: 1 });
 incomeSchema.index({ user: 1 });
 incomeSchema.index({ referCode: 1 }, { unique: true });
 

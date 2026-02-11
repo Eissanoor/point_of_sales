@@ -4,25 +4,22 @@ const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const liabilitySchema = new mongoose.Schema(
   {
-    date: {
-      type: Date,
-      required: true,
-      default: Date.now,
-    },
-    description: {
+    name: {
       type: String,
       required: true,
       trim: true,
     },
-    amount: {
-      type: Number,
-      required: true,
-      min: 0,
-    },
-    liabilityType: {
+    mobileNo: {
       type: String,
-      enum: ['loan', 'payable', 'tax', 'other'],
-      default: 'other',
+      trim: true,
+    },
+    code: {
+      type: String,
+      trim: true,
+    },
+    description: {
+      type: String,
+      trim: true,
     },
     isActive: {
       type: Boolean,
@@ -48,17 +45,14 @@ liabilitySchema.pre('save', async function (next) {
     if (!this.referCode) {
       this.referCode = await generateReferCode('Liability');
     }
-    if (!this.date) {
-      this.date = new Date();
-    }
     next();
   } catch (error) {
     return next(error);
   }
 });
 
-liabilitySchema.index({ date: -1 });
-liabilitySchema.index({ liabilityType: 1 });
+liabilitySchema.index({ name: 1 });
+liabilitySchema.index({ code: 1 });
 liabilitySchema.index({ referCode: 1 }, { unique: true });
 
 const Liability = mongoose.model('Liability', liabilitySchema);

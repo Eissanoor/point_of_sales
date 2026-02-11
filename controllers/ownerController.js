@@ -6,12 +6,13 @@ const APIFeatures = require('../utils/apiFeatures');
 // @access  Private
 const createOwner = async (req, res) => {
   try {
-    const { name, phoneNumber, address } = req.body;
+    const { name, mobileNo, code, description } = req.body;
 
     const owner = await Owner.create({
       name,
-      phoneNumber,
-      address,
+      mobileNo,
+      code,
+      description,
     });
 
     res.status(201).json({
@@ -93,11 +94,12 @@ const updateOwner = async (req, res) => {
       });
     }
 
-    const { name, phoneNumber, address, isActive } = req.body;
+    const { name, mobileNo, code, description, isActive } = req.body;
 
     if (name !== undefined) owner.name = name;
-    if (phoneNumber !== undefined) owner.phoneNumber = phoneNumber;
-    if (address !== undefined) owner.address = address;
+    if (mobileNo !== undefined) owner.mobileNo = mobileNo;
+    if (code !== undefined) owner.code = code;
+    if (description !== undefined) owner.description = description;
     if (isActive !== undefined) owner.isActive = isActive;
 
     const updatedOwner = await owner.save();

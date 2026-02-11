@@ -4,26 +4,22 @@ const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const cashBookSchema = new mongoose.Schema(
   {
-    date: {
-      type: Date,
-      required: true,
-      default: Date.now,
-    },
-    description: {
+    name: {
       type: String,
       required: true,
       trim: true,
     },
-    amount: {
-      type: Number,
-      required: true,
-      min: 0,
-    },
-    type: {
+    mobileNo: {
       type: String,
-      required: true,
-      enum: ['debit', 'credit'],
-      default: 'debit',
+      trim: true,
+    },
+    code: {
+      type: String,
+      trim: true,
+    },
+    description: {
+      type: String,
+      trim: true,
     },
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -56,11 +52,6 @@ cashBookSchema.pre('save', async function(next) {
       this.referCode = await generateReferCode('CashBook');
     }
 
-    // Set date if not provided
-    if (!this.date) {
-      this.date = new Date();
-    }
-
     next();
   } catch (error) {
     return next(error);
@@ -68,8 +59,8 @@ cashBookSchema.pre('save', async function(next) {
 });
 
 // Create indices for better query performance
-cashBookSchema.index({ date: -1 });
-cashBookSchema.index({ type: 1 });
+cashBookSchema.index({ name: 1 });
+cashBookSchema.index({ code: 1 });
 cashBookSchema.index({ user: 1 });
 cashBookSchema.index({ referCode: 1 }, { unique: true });
 

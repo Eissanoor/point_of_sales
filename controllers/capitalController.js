@@ -6,7 +6,7 @@ const APIFeatures = require('../utils/apiFeatures');
 // @access  Private
 const createCapital = async (req, res) => {
   try {
-    const { date, description, amount, type } = req.body;
+    const { name, mobileNo, code, description } = req.body;
 
     // Validate user is authenticated
     if (!req.user || !req.user._id) {
@@ -17,10 +17,10 @@ const createCapital = async (req, res) => {
     }
 
     const capital = await Capital.create({
-      date: date || new Date(),
+      name,
+      mobileNo,
+      code,
       description,
-      amount: typeof amount === 'string' ? parseFloat(amount) : amount,
-      type: type || 'investment',
       user: req.user._id,
     });
 
@@ -81,7 +81,7 @@ const getCapitals = async (req, res) => {
 
     const capitals = await features.query
       .populate('user', 'name email')
-      .sort({ date: -1 })
+      .sort({ createdAt: -1 })
       .select('-__v');
 
     // Build filter query for count
@@ -154,20 +154,14 @@ const updateCapital = async (req, res) => {
       });
     }
 
-    const { date, description, amount, type } = req.body;
+    const { name, mobileNo, code, description, isActive } = req.body;
 
     // Update fields
-    if (date !== undefined) {
-      const parsedDate = new Date(date);
-      if (!isNaN(parsedDate.getTime())) {
-        capital.date = parsedDate;
-      }
-    }
+    if (name !== undefined) capital.name = name;
+    if (mobileNo !== undefined) capital.mobileNo = mobileNo;
+    if (code !== undefined) capital.code = code;
     if (description !== undefined) capital.description = description;
-    if (amount !== undefined)
-      capital.amount =
-        typeof amount === 'string' ? parseFloat(amount) : amount;
-    if (type !== undefined) capital.type = type;
+    if (isActive !== undefined) capital.isActive = isActive;
 
     const updatedCapital = await capital.save();
 

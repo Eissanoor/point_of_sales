@@ -6,13 +6,13 @@ const APIFeatures = require('../utils/apiFeatures');
 // @access  Private
 const createPropertyAccount = async (req, res) => {
   try {
-    const { propertyName, location, value, isRented } = req.body;
+    const { name, mobileNo, code, description } = req.body;
 
     const propertyAccount = await PropertyAccount.create({
-      propertyName,
-      location,
-      value: typeof value === 'string' ? parseFloat(value) : value,
-      isRented: typeof isRented === 'string' ? isRented === 'true' : !!isRented,
+      name,
+      mobileNo,
+      code,
+      description,
     });
 
     res.status(201).json({
@@ -96,18 +96,12 @@ const updatePropertyAccount = async (req, res) => {
       });
     }
 
-    const { propertyName, location, value, isRented, isActive } = req.body;
+    const { name, mobileNo, code, description, isActive } = req.body;
 
-    if (propertyName !== undefined) propertyAccount.propertyName = propertyName;
-    if (location !== undefined) propertyAccount.location = location;
-    if (value !== undefined) {
-      propertyAccount.value =
-        typeof value === 'string' ? parseFloat(value) : value;
-    }
-    if (isRented !== undefined) {
-      propertyAccount.isRented =
-        typeof isRented === 'string' ? isRented === 'true' : !!isRented;
-    }
+    if (name !== undefined) propertyAccount.name = name;
+    if (mobileNo !== undefined) propertyAccount.mobileNo = mobileNo;
+    if (code !== undefined) propertyAccount.code = code;
+    if (description !== undefined) propertyAccount.description = description;
     if (isActive !== undefined) propertyAccount.isActive = isActive;
 
     const updatedPropertyAccount = await propertyAccount.save();

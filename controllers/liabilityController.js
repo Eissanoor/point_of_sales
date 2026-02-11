@@ -6,13 +6,13 @@ const APIFeatures = require('../utils/apiFeatures');
 // @access  Private
 const createLiability = async (req, res) => {
   try {
-    const { date, description, amount, liabilityType } = req.body;
+    const { name, mobileNo, code, description } = req.body;
 
     const liability = await Liability.create({
-      date: date || new Date(),
+      name,
+      mobileNo,
+      code,
       description,
-      amount: typeof amount === 'string' ? parseFloat(amount) : amount,
-      liabilityType: liabilityType || 'other',
     });
 
     res.status(201).json({
@@ -94,20 +94,12 @@ const updateLiability = async (req, res) => {
       });
     }
 
-    const { date, description, amount, liabilityType, isActive } = req.body;
+    const { name, mobileNo, code, description, isActive } = req.body;
 
-    if (date !== undefined) {
-      const parsedDate = new Date(date);
-      if (!isNaN(parsedDate.getTime())) {
-        liability.date = parsedDate;
-      }
-    }
+    if (name !== undefined) liability.name = name;
+    if (mobileNo !== undefined) liability.mobileNo = mobileNo;
+    if (code !== undefined) liability.code = code;
     if (description !== undefined) liability.description = description;
-    if (amount !== undefined) {
-      liability.amount =
-        typeof amount === 'string' ? parseFloat(amount) : amount;
-    }
-    if (liabilityType !== undefined) liability.liabilityType = liabilityType;
     if (isActive !== undefined) liability.isActive = isActive;
 
     const updatedLiability = await liability.save();

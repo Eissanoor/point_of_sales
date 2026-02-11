@@ -4,23 +4,22 @@ const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const propertyAccountSchema = new mongoose.Schema(
   {
-    propertyName: {
+    name: {
       type: String,
       required: true,
       trim: true,
     },
-    location: {
+    mobileNo: {
       type: String,
       trim: true,
     },
-    value: {
-      type: Number,
-      min: 0,
-      default: 0,
+    code: {
+      type: String,
+      trim: true,
     },
-    isRented: {
-      type: Boolean,
-      default: false,
+    description: {
+      type: String,
+      trim: true,
     },
     isActive: {
       type: Boolean,
@@ -52,7 +51,8 @@ propertyAccountSchema.pre('save', async function (next) {
   }
 });
 
-propertyAccountSchema.index({ propertyName: 1 });
+propertyAccountSchema.index({ name: 1 });
+propertyAccountSchema.index({ code: 1 });
 propertyAccountSchema.index({ referCode: 1 }, { unique: true });
 
 const PropertyAccount = mongoose.model('PropertyAccount', propertyAccountSchema);

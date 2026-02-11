@@ -6,20 +6,13 @@ const APIFeatures = require('../utils/apiFeatures');
 // @access  Private
 const createPartnershipAccount = async (req, res) => {
   try {
-    const { partnerName, phoneNumber, sharePercentage, openingBalance } =
-      req.body;
+    const { name, mobileNo, code, description } = req.body;
 
     const partnershipAccount = await PartnershipAccount.create({
-      partnerName,
-      phoneNumber,
-      sharePercentage:
-        typeof sharePercentage === 'string'
-          ? parseFloat(sharePercentage)
-          : sharePercentage,
-      openingBalance:
-        typeof openingBalance === 'string'
-          ? parseFloat(openingBalance)
-          : openingBalance,
+      name,
+      mobileNo,
+      code,
+      description,
     });
 
     res.status(201).json({
@@ -105,23 +98,13 @@ const updatePartnershipAccount = async (req, res) => {
       });
     }
 
-    const { partnerName, phoneNumber, sharePercentage, openingBalance, isActive } =
-      req.body;
+    const { name, mobileNo, code, description, isActive } = req.body;
 
-    if (partnerName !== undefined) partnershipAccount.partnerName = partnerName;
-    if (phoneNumber !== undefined) partnershipAccount.phoneNumber = phoneNumber;
-    if (sharePercentage !== undefined) {
-      partnershipAccount.sharePercentage =
-        typeof sharePercentage === 'string'
-          ? parseFloat(sharePercentage)
-          : sharePercentage;
-    }
-    if (openingBalance !== undefined) {
-      partnershipAccount.openingBalance =
-        typeof openingBalance === 'string'
-          ? parseFloat(openingBalance)
-          : openingBalance;
-    }
+    if (name !== undefined) partnershipAccount.name = name;
+    if (mobileNo !== undefined) partnershipAccount.mobileNo = mobileNo;
+    if (code !== undefined) partnershipAccount.code = code;
+    if (description !== undefined)
+      partnershipAccount.description = description;
     if (isActive !== undefined) partnershipAccount.isActive = isActive;
 
     const updatedPartnershipAccount = await partnershipAccount.save();

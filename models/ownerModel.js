@@ -9,11 +9,15 @@ const ownerSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
-    phoneNumber: {
+    mobileNo: {
       type: String,
       trim: true,
     },
-    address: {
+    code: {
+      type: String,
+      trim: true,
+    },
+    description: {
       type: String,
       trim: true,
     },
@@ -48,6 +52,7 @@ ownerSchema.pre('save', async function (next) {
 });
 
 ownerSchema.index({ name: 1 });
+ownerSchema.index({ code: 1 });
 ownerSchema.index({ referCode: 1 }, { unique: true });
 
 const Owner = mongoose.model('Owner', ownerSchema);

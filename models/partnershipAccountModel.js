@@ -4,25 +4,22 @@ const { generateReferCode } = require('../utils/referCodeGenerator');
 
 const partnershipAccountSchema = new mongoose.Schema(
   {
-    partnerName: {
+    name: {
       type: String,
       required: true,
       trim: true,
     },
-    phoneNumber: {
+    mobileNo: {
       type: String,
       trim: true,
     },
-    sharePercentage: {
-      type: Number,
-      min: 0,
-      max: 100,
-      default: 0,
+    code: {
+      type: String,
+      trim: true,
     },
-    openingBalance: {
-      type: Number,
-      min: 0,
-      default: 0,
+    description: {
+      type: String,
+      trim: true,
     },
     isActive: {
       type: Boolean,
@@ -54,7 +51,8 @@ partnershipAccountSchema.pre('save', async function (next) {
   }
 });
 
-partnershipAccountSchema.index({ partnerName: 1 });
+partnershipAccountSchema.index({ name: 1 });
+partnershipAccountSchema.index({ code: 1 });
 partnershipAccountSchema.index({ referCode: 1 }, { unique: true });
 
 const PartnershipAccount = mongoose.model(

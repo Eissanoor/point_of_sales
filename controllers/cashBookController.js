@@ -6,7 +6,7 @@ const APIFeatures = require('../utils/apiFeatures');
 // @access  Private
 const createCashBook = async (req, res) => {
   try {
-    const { date, description, amount, type } = req.body;
+    const { name, mobileNo, code, description } = req.body;
 
     // Validate user is authenticated
     if (!req.user || !req.user._id) {
@@ -17,10 +17,10 @@ const createCashBook = async (req, res) => {
     }
 
     const cashBook = await CashBook.create({
-      date: date || new Date(),
+      name,
+      mobileNo,
+      code,
       description,
-      amount: typeof amount === 'string' ? parseFloat(amount) : amount,
-      type: type || 'debit',
       user: req.user._id,
     });
 
@@ -81,7 +81,7 @@ const getCashBooks = async (req, res) => {
 
     const cashBooks = await features.query
       .populate('user', 'name email')
-      .sort({ date: -1 })
+      .sort({ createdAt: -1 })
       .select('-__v');
 
     // Build filter query for count
@@ -154,18 +154,14 @@ const updateCashBook = async (req, res) => {
       });
     }
 
-    const { date, description, amount, type } = req.body;
+    const { name, mobileNo, code, description, isActive } = req.body;
 
     // Update fields
-    if (date !== undefined) {
-      const parsedDate = new Date(date);
-      if (!isNaN(parsedDate.getTime())) {
-        cashBook.date = parsedDate;
-      }
-    }
+    if (name !== undefined) cashBook.name = name;
+    if (mobileNo !== undefined) cashBook.mobileNo = mobileNo;
+    if (code !== undefined) cashBook.code = code;
     if (description !== undefined) cashBook.description = description;
-    if (amount !== undefined) cashBook.amount = typeof amount === 'string' ? parseFloat(amount) : amount;
-    if (type !== undefined) cashBook.type = type;
+    if (isActive !== undefined) cashBook.isActive = isActive;
 
     const updatedCashBook = await cashBook.save();
 

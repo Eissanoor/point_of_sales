@@ -6,13 +6,13 @@ const APIFeatures = require('../utils/apiFeatures');
 // @access  Private
 const createEmployee = async (req, res) => {
   try {
-    const { name, phoneNumber, position, salary } = req.body;
+    const { name, mobileNo, code, description } = req.body;
 
     const employee = await Employee.create({
       name,
-      phoneNumber,
-      position,
-      salary: typeof salary === 'string' ? parseFloat(salary) : salary,
+      mobileNo,
+      code,
+      description,
     });
 
     res.status(201).json({
@@ -94,15 +94,12 @@ const updateEmployee = async (req, res) => {
       });
     }
 
-    const { name, phoneNumber, position, salary, isActive } = req.body;
+    const { name, mobileNo, code, description, isActive } = req.body;
 
     if (name !== undefined) employee.name = name;
-    if (phoneNumber !== undefined) employee.phoneNumber = phoneNumber;
-    if (position !== undefined) employee.position = position;
-    if (salary !== undefined) {
-      employee.salary =
-        typeof salary === 'string' ? parseFloat(salary) : salary;
-    }
+    if (mobileNo !== undefined) employee.mobileNo = mobileNo;
+    if (code !== undefined) employee.code = code;
+    if (description !== undefined) employee.description = description;
     if (isActive !== undefined) employee.isActive = isActive;
 
     const updatedEmployee = await employee.save();

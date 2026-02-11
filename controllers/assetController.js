@@ -6,7 +6,7 @@ const APIFeatures = require('../utils/apiFeatures');
 // @access  Private
 const createAsset = async (req, res) => {
   try {
-    const { purchaseDate, name, assetType, value } = req.body;
+    const { name, mobileNo, code, description } = req.body;
 
     // Validate user is authenticated
     if (!req.user || !req.user._id) {
@@ -17,10 +17,10 @@ const createAsset = async (req, res) => {
     }
 
     const asset = await Asset.create({
-      purchaseDate: purchaseDate || new Date(),
       name,
-      assetType: assetType || 'fixed',
-      value: typeof value === 'string' ? parseFloat(value) : value,
+      mobileNo,
+      code,
+      description,
       user: req.user._id,
     });
 
@@ -81,7 +81,7 @@ const getAssets = async (req, res) => {
 
     const assets = await features.query
       .populate('user', 'name email')
-      .sort({ purchaseDate: -1 })
+      .sort({ createdAt: -1 })
       .select('-__v');
 
     // Build filter query for count
@@ -154,19 +154,14 @@ const updateAsset = async (req, res) => {
       });
     }
 
-    const { purchaseDate, name, assetType, value } = req.body;
+    const { name, mobileNo, code, description, isActive } = req.body;
 
     // Update fields
-    if (purchaseDate !== undefined) {
-      const parsedDate = new Date(purchaseDate);
-      if (!isNaN(parsedDate.getTime())) {
-        asset.purchaseDate = parsedDate;
-      }
-    }
     if (name !== undefined) asset.name = name;
-    if (assetType !== undefined) asset.assetType = assetType;
-    if (value !== undefined)
-      asset.value = typeof value === 'string' ? parseFloat(value) : value;
+    if (mobileNo !== undefined) asset.mobileNo = mobileNo;
+    if (code !== undefined) asset.code = code;
+    if (description !== undefined) asset.description = description;
+    if (isActive !== undefined) asset.isActive = isActive;
 
     const updatedAsset = await asset.save();
 
