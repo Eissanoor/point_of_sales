@@ -45,6 +45,27 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    // Optional link to financial entities (Asset, Income, etc.)
+    financialModel: {
+      type: String,
+      enum: [
+        'Asset',
+        'Income',
+        'Liability',
+        'PartnershipAccount',
+        'CashBook',
+        'Capital',
+        'Owner',
+        'Employee',
+        'PropertyAccount',
+        null,
+      ],
+      default: null,
+    },
+    financialId: {
+      type: mongoose.Schema.Types.ObjectId,
+      refPath: 'financialModel',
+    },
     amount: {
       type: Number,
       required: true,
@@ -94,6 +115,10 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
     relatedSupplierPayment: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'SupplierPayment',
+    },
+    relatedFinancialPayment: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'FinancialPayment',
     },
     description: {
       type: String,
@@ -289,6 +314,7 @@ bankPaymentVoucherSchema.index({ voucherNumber: 1 }, { unique: true });
 bankPaymentVoucherSchema.index({ voucherDate: -1 });
 bankPaymentVoucherSchema.index({ bankAccount: 1, voucherDate: -1 });
 bankPaymentVoucherSchema.index({ payeeType: 1, payee: 1 });
+bankPaymentVoucherSchema.index({ financialModel: 1, financialId: 1 });
 bankPaymentVoucherSchema.index({ status: 1 });
 bankPaymentVoucherSchema.index({ voucherType: 1 });
 

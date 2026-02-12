@@ -6,6 +6,7 @@ const Payment = require('../models/paymentModel');
 const SupplierJourney = require('../models/supplierJourneyModel');
 const PaymentJourney = require('../models/paymentJourneyModel');
 const Purchase = require('../models/purchaseModel');
+const FinancialPayment = require('../models/financialPaymentModel');
 const APIFeatures = require('../utils/apiFeatures');
 const cloudinary = require('cloudinary').v2;
 
@@ -72,6 +73,7 @@ const getBankPaymentVoucherById = async (req, res) => {
       .populate('relatedSale', 'invoiceNumber grandTotal')
       .populate('relatedPayment', 'paymentNumber amount')
       .populate('relatedSupplierPayment', 'paymentNumber amount')
+      .populate('relatedFinancialPayment', 'referCode amount paymentDate method relatedModel relatedId')
       .select('-__v');
 
     if (!voucher) {
@@ -138,6 +140,7 @@ const createTransactionFromVoucher = async (voucher, userId) => {
 
   let createdSupplierPayment = null;
   let createdPayment = null;
+  let createdFinancialPayment = null;
   let errorDetails = null;
 
   // Only create transactions if they don't already exist
@@ -451,9 +454,58 @@ const createTransactionFromVoucher = async (voucher, userId) => {
     });
   }
 
+  // Create FinancialPayment when voucher is linked to a financial entity (Asset, Income, etc.)
+  if (
+    freshVoucher.financialModel &&
+    freshVoucher.financialId &&
+    !freshVoucher.relatedFinancialPayment
+  ) {
+    try {
+      const methodMapForFinancial = {
+        bank_transfer: 'bank_transfer',
+        check: 'check',
+        online_payment: 'online',
+        wire_transfer: 'bank_transfer',
+        dd: 'bank_transfer',
+        other: 'other',
+      };
+
+      const mappedMethod =
+        methodMapForFinancial[freshVoucher.paymentMethod] || 'bank_transfer';
+
+      const paymentDate = freshVoucher.voucherDate || new Date();
+
+      createdFinancialPayment = await FinancialPayment.create({
+        name:
+          freshVoucher.payeeName ||
+          freshVoucher.description ||
+          `Financial payment for ${freshVoucher.financialModel}`,
+        mobileNo: null,
+        code: freshVoucher.referenceNumber || null,
+        description:
+          freshVoucher.description ||
+          `Payment via bank payment voucher ${freshVoucher.voucherNumber}`,
+        amount: freshVoucher.amount,
+        paymentDate,
+        method: mappedMethod,
+        relatedModel: freshVoucher.financialModel,
+        relatedId: freshVoucher.financialId,
+        user: userId,
+        isActive: freshVoucher.isActive,
+      });
+
+      freshVoucher.relatedFinancialPayment = createdFinancialPayment._id;
+      await freshVoucher.save();
+    } catch (error) {
+      console.error('Error creating FinancialPayment automatically:', error);
+      errorDetails = error;
+    }
+  }
+
   return { 
     createdSupplierPayment, 
     createdPayment,
+    createdFinancialPayment,
     error: errorDetails || null
   };
 };
@@ -485,6 +537,8 @@ const createBankPaymentVoucher = async (req, res) => {
       notes,
       status,
       attachments,
+      financialModel,
+      financialId,
     } = req.body;
     
     console.log('req.file:', req.file);
@@ -500,8 +554,14 @@ const createBankPaymentVoucher = async (req, res) => {
       });
     }
 
-    // Validate payee if provided
-    if (payee && payeeType !== 'other') {
+    // Normalize payee: treat empty string as undefined
+    const normalizedPayee =
+      payee && typeof payee === 'string' && payee.trim() === ''
+        ? undefined
+        : payee;
+
+    // Validate payee if provided and not "other"
+    if (normalizedPayee && payeeType !== 'other') {
       let PayeeModel;
       if (payeeType === 'supplier') {
         PayeeModel = require('../models/supplierModel');
@@ -512,7 +572,7 @@ const createBankPaymentVoucher = async (req, res) => {
       }
 
       if (PayeeModel) {
-        const payeeExists = await PayeeModel.findById(payee);
+        const payeeExists = await PayeeModel.findById(normalizedPayee);
         if (!payeeExists) {
           return res.status(404).json({
             status: 'fail',
@@ -672,11 +732,17 @@ const createBankPaymentVoucher = async (req, res) => {
       voucherType,
       bankAccount,
       payeeType,
-      payee,
+      // Only set payee when we actually have one and type is not "other"
+      payee:
+        normalizedPayee && payeeType !== 'other' ? normalizedPayee : undefined,
       payeeName,
       amount: typeof amount === 'string' ? parseFloat(amount) : amount,
       currency,
-      currencyExchangeRate: currencyExchangeRate ? (typeof currencyExchangeRate === 'string' ? parseFloat(currencyExchangeRate) : currencyExchangeRate) : 1,
+      currencyExchangeRate: currencyExchangeRate
+        ? typeof currencyExchangeRate === 'string'
+          ? parseFloat(currencyExchangeRate)
+          : currencyExchangeRate
+        : 1,
       paymentMethod,
       checkNumber,
       transactionId,
@@ -690,6 +756,12 @@ const createBankPaymentVoucher = async (req, res) => {
       status: finalStatus,
       attachments: uploadedAttachments,
       user: req.user._id,
+      // Financial link (Asset, Income, etc.)
+      financialModel: financialModel || null,
+      financialId:
+        financialId && typeof financialId === 'string' && financialId.trim() !== ''
+          ? financialId
+          : undefined,
     };
 
     // Only set voucherDate if explicitly provided, otherwise model default will handle it
@@ -1050,7 +1122,14 @@ const updateBankPaymentVoucher = async (req, res) => {
       voucher.bankAccount = bankAccount;
     }
     if (payeeType !== undefined) voucher.payeeType = payeeType;
-    if (payee !== undefined) voucher.payee = payee;
+    // Normalize payee on update: treat empty string as undefined
+    if (payee !== undefined) {
+      if (typeof payee === 'string' && payee.trim() === '') {
+        voucher.payee = undefined;
+      } else {
+        voucher.payee = payee;
+      }
+    }
     if (payeeName !== undefined) voucher.payeeName = payeeName;
     if (amount !== undefined) voucher.amount = amount;
     if (currency !== undefined) voucher.currency = currency;
