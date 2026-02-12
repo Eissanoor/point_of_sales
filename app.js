@@ -60,6 +60,7 @@ const incomeRoutes = require('./routes/incomeRoutes');
 const propertyAccountRoutes = require('./routes/propertyAccountRoutes');
 const employeeRoutes = require('./routes/employeeRoutes');
 const liabilityRoutes = require('./routes/liabilityRoutes');
+const financialPaymentRoutes = require('./routes/financialPaymentRoutes');
 
 // Initialize express app
 const app = express();
@@ -94,6 +95,7 @@ app.use('/api/supplier-payments', supplierPaymentRoutes);
 app.use('/api/customer-journey', customerJourneyRoutes);
 app.use('/api/currencies', currencyRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/financial-payments', financialPaymentRoutes);
 app.use('/api/warehouses', warehouseRoutes);
 app.use('/api/stock-transfers', stockTransferRoutes);
 app.use('/api/shops', shopRoutes);

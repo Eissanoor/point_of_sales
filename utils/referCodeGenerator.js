@@ -38,7 +38,8 @@ const REFER_CODE_PREFIXES = {
   'Income': 'IN',
   'PropertyAccount': 'PROP',
   'Employee': 'EMP',
-  'Liability': 'LB'
+  'Liability': 'LB',
+  'FinancialPayment': 'FP'
 };
 
 /**
