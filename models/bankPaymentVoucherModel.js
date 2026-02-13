@@ -28,7 +28,21 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
     payeeType: {
       type: String,
       required: true,
-      enum: ['supplier', 'customer', 'employee', 'other'],
+      enum: [
+        'supplier',
+        'customer',
+        'employee',
+        'Asset',
+        'Income',
+        'Liability',
+        'PartnershipAccount',
+        'CashBook',
+        'Capital',
+        'Owner',
+        'Employee',
+        'PropertyAccount',
+        'other',
+      ],
       default: 'other',
     },
     payee: {
@@ -39,7 +53,21 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
     payeeModel: {
       type: String,
       required: false,
-      enum: ['Supplier', 'Customer', 'User', null],
+      enum: [
+        'Supplier',
+        'Customer',
+        'User',
+        'Asset',
+        'Income',
+        'Liability',
+        'PartnershipAccount',
+        'CashBook',
+        'Capital',
+        'Owner',
+        'Employee',
+        'PropertyAccount',
+        null,
+      ],
     },
     payeeName: {
       type: String,
@@ -301,6 +329,24 @@ bankPaymentVoucherSchema.pre('save', async function(next) {
       this.payeeModel = 'Customer';
     } else if (this.payeeType === 'employee') {
       this.payeeModel = 'User'; // Employee uses User model
+    }
+
+    // Auto-set financialModel, financialId, and payeeModel when payeeType is a financial model
+    const financialModels = [
+      'Asset',
+      'Income',
+      'Liability',
+      'PartnershipAccount',
+      'CashBook',
+      'Capital',
+      'Owner',
+      'Employee',
+      'PropertyAccount',
+    ];
+    if (financialModels.includes(this.payeeType) && this.payee) {
+      this.payeeModel = this.payeeType; // Set payeeModel for refPath to work
+      this.financialModel = this.payeeType;
+      this.financialId = this.payee;
     }
 
     next();

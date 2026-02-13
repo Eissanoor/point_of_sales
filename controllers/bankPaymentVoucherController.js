@@ -455,11 +455,30 @@ const createTransactionFromVoucher = async (voucher, userId) => {
   }
 
   // Create FinancialPayment when voucher is linked to a financial entity (Asset, Income, etc.)
-  if (
-    freshVoucher.financialModel &&
-    freshVoucher.financialId &&
-    !freshVoucher.relatedFinancialPayment
-  ) {
+  // Check both financialModel/financialId fields AND payeeType for financial models
+  const financialModels = [
+    'Asset',
+    'Income',
+    'Liability',
+    'PartnershipAccount',
+    'CashBook',
+    'Capital',
+    'Owner',
+    'Employee',
+    'PropertyAccount',
+  ];
+  const isFinancialModel =
+    (freshVoucher.financialModel &&
+      freshVoucher.financialId &&
+      !freshVoucher.relatedFinancialPayment) ||
+    (financialModels.includes(freshVoucher.payeeType) &&
+      freshVoucher.payee &&
+      !freshVoucher.relatedFinancialPayment);
+
+  if (isFinancialModel) {
+    // Use financialModel/financialId if set, otherwise derive from payeeType/payee
+    const targetFinancialModel = freshVoucher.financialModel || freshVoucher.payeeType;
+    const targetFinancialId = freshVoucher.financialId || freshVoucher.payee;
     try {
       const methodMapForFinancial = {
         bank_transfer: 'bank_transfer',
@@ -488,8 +507,8 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         amount: freshVoucher.amount,
         paymentDate,
         method: mappedMethod,
-        relatedModel: freshVoucher.financialModel,
-        relatedId: freshVoucher.financialId,
+        relatedModel: targetFinancialModel,
+        relatedId: targetFinancialId,
         user: userId,
         isActive: freshVoucher.isActive,
       });
@@ -537,8 +556,6 @@ const createBankPaymentVoucher = async (req, res) => {
       notes,
       status,
       attachments,
-      financialModel,
-      financialId,
     } = req.body;
     
     console.log('req.file:', req.file);
@@ -569,6 +586,24 @@ const createBankPaymentVoucher = async (req, res) => {
         PayeeModel = require('../models/customerModel');
       } else if (payeeType === 'employee') {
         PayeeModel = require('../models/userModel'); // Assuming Employee uses User model
+      } else if (payeeType === 'Asset') {
+        PayeeModel = require('../models/assetModel');
+      } else if (payeeType === 'Income') {
+        PayeeModel = require('../models/incomeModel');
+      } else if (payeeType === 'Liability') {
+        PayeeModel = require('../models/liabilityModel');
+      } else if (payeeType === 'PartnershipAccount') {
+        PayeeModel = require('../models/partnershipAccountModel');
+      } else if (payeeType === 'CashBook') {
+        PayeeModel = require('../models/cashBookModel');
+      } else if (payeeType === 'Capital') {
+        PayeeModel = require('../models/capitalModel');
+      } else if (payeeType === 'Owner') {
+        PayeeModel = require('../models/ownerModel');
+      } else if (payeeType === 'Employee') {
+        PayeeModel = require('../models/employeeModel');
+      } else if (payeeType === 'PropertyAccount') {
+        PayeeModel = require('../models/propertyAccountModel');
       }
 
       if (PayeeModel) {
@@ -721,11 +756,29 @@ const createBankPaymentVoucher = async (req, res) => {
     }
 
     // Create voucher (voucherNumber and voucherDate will be auto-generated if not provided)
-    // Auto-set status to 'completed' if supplier/customer is selected (for automatic transaction creation)
+    // Auto-set status to 'completed' in cases where we want automatic transaction creation
+    const financialModels = [
+      'Asset',
+      'Income',
+      'Liability',
+      'PartnershipAccount',
+      'CashBook',
+      'Capital',
+      'Owner',
+      'Employee',
+      'PropertyAccount',
+    ];
     let finalStatus = status || 'draft';
     if (!status && (payeeType === 'supplier' || payeeType === 'customer') && payee) {
       finalStatus = 'completed';
       console.log('Auto-setting status to "completed" because supplier/customer is selected');
+    }
+    // Also auto-complete when payeeType is a financial model (Asset, Income, etc.)
+    if (!status && financialModels.includes(payeeType) && normalizedPayee) {
+      finalStatus = 'completed';
+      console.log(
+        `Auto-setting status to "completed" because payeeType "${payeeType}" is a financial model`
+      );
     }
     
     const voucherData = {
@@ -756,12 +809,8 @@ const createBankPaymentVoucher = async (req, res) => {
       status: finalStatus,
       attachments: uploadedAttachments,
       user: req.user._id,
-      // Financial link (Asset, Income, etc.)
-      financialModel: financialModel || null,
-      financialId:
-        financialId && typeof financialId === 'string' && financialId.trim() !== ''
-          ? financialId
-          : undefined,
+      // Note: financialModel and financialId will be auto-set in pre-save hook
+      // when payeeType is a financial model
     };
 
     // Only set voucherDate if explicitly provided, otherwise model default will handle it
@@ -812,6 +861,7 @@ const createBankPaymentVoucher = async (req, res) => {
       console.log('Transaction result:', {
         hasSupplierPayment: !!transactionResult.createdSupplierPayment,
         hasPayment: !!transactionResult.createdPayment,
+        hasFinancialPayment: !!transactionResult.createdFinancialPayment,
         hasError: !!transactionResult.error,
         error: transactionResult.error
       });
@@ -829,6 +879,13 @@ const createBankPaymentVoucher = async (req, res) => {
           paymentNumber: transactionResult.createdPayment.paymentNumber
         };
         console.log('Transaction created - Payment:', createdTransaction.id);
+      } else if (transactionResult.createdFinancialPayment) {
+        createdTransaction = {
+          type: 'FinancialPayment',
+          id: transactionResult.createdFinancialPayment._id,
+          referCode: transactionResult.createdFinancialPayment.referCode
+        };
+        console.log('Transaction created - FinancialPayment:', createdTransaction.id);
       } else {
         console.log('No transaction created - check if supplier/customer was selected and relatedPayment/relatedSupplierPayment was already set');
         if (transactionResult.error) {
@@ -1127,7 +1184,50 @@ const updateBankPaymentVoucher = async (req, res) => {
       if (typeof payee === 'string' && payee.trim() === '') {
         voucher.payee = undefined;
       } else {
-        voucher.payee = payee;
+        // Validate payee if provided and payeeType is not "other"
+        const finalPayeeType = payeeType !== undefined ? payeeType : voucher.payeeType;
+        const finalPayee = typeof payee === 'string' && payee.trim() === '' ? undefined : payee;
+        
+        if (finalPayee && finalPayeeType !== 'other') {
+          let PayeeModel;
+          if (finalPayeeType === 'supplier') {
+            PayeeModel = require('../models/supplierModel');
+          } else if (finalPayeeType === 'customer') {
+            PayeeModel = require('../models/customerModel');
+          } else if (finalPayeeType === 'employee') {
+            PayeeModel = require('../models/userModel');
+          } else if (finalPayeeType === 'Asset') {
+            PayeeModel = require('../models/assetModel');
+          } else if (finalPayeeType === 'Income') {
+            PayeeModel = require('../models/incomeModel');
+          } else if (finalPayeeType === 'Liability') {
+            PayeeModel = require('../models/liabilityModel');
+          } else if (finalPayeeType === 'PartnershipAccount') {
+            PayeeModel = require('../models/partnershipAccountModel');
+          } else if (finalPayeeType === 'CashBook') {
+            PayeeModel = require('../models/cashBookModel');
+          } else if (finalPayeeType === 'Capital') {
+            PayeeModel = require('../models/capitalModel');
+          } else if (finalPayeeType === 'Owner') {
+            PayeeModel = require('../models/ownerModel');
+          } else if (finalPayeeType === 'Employee') {
+            PayeeModel = require('../models/employeeModel');
+          } else if (finalPayeeType === 'PropertyAccount') {
+            PayeeModel = require('../models/propertyAccountModel');
+          }
+
+          if (PayeeModel) {
+            const payeeExists = await PayeeModel.findById(finalPayee);
+            if (!payeeExists) {
+              return res.status(404).json({
+                status: 'fail',
+                message: `${finalPayeeType} not found`,
+              });
+            }
+          }
+        }
+        
+        voucher.payee = finalPayee;
       }
     }
     if (payeeName !== undefined) voucher.payeeName = payeeName;
