@@ -45,7 +45,21 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     payeeType: {
       type: String,
       required: true,
-      enum: ['supplier', 'customer', 'employee', 'other'],
+      enum: [
+        'supplier',
+        'customer',
+        'employee',
+        'Asset',
+        'Income',
+        'Liability',
+        'PartnershipAccount',
+        'CashBook',
+        'Capital',
+        'Owner',
+        'Employee',
+        'PropertyAccount',
+        'other',
+      ],
       default: 'other',
     },
     payee: {
@@ -56,7 +70,21 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     payeeModel: {
       type: String,
       required: false,
-      enum: ['Supplier', 'Customer', 'User', null],
+      enum: [
+        'Supplier',
+        'Customer',
+        'User',
+        'Asset',
+        'Income',
+        'Liability',
+        'PartnershipAccount',
+        'CashBook',
+        'Capital',
+        'Owner',
+        'Employee',
+        'PropertyAccount',
+        null,
+      ],
     },
     payeeName: {
       type: String,
@@ -107,6 +135,31 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     relatedSupplierPayment: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'SupplierPayment',
+    },
+    // Optional link to financial entities (Asset, Income, etc.)
+    financialModel: {
+      type: String,
+      enum: [
+        'Asset',
+        'Income',
+        'Liability',
+        'PartnershipAccount',
+        'CashBook',
+        'Capital',
+        'Owner',
+        'Employee',
+        'PropertyAccount',
+        null,
+      ],
+      default: null,
+    },
+    financialId: {
+      type: mongoose.Schema.Types.ObjectId,
+      refPath: 'financialModel',
+    },
+    relatedFinancialPayment: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'FinancialPayment',
     },
     description: {
       type: String,
@@ -290,6 +343,24 @@ cashPaymentVoucherSchema.pre('save', async function(next) {
       this.payeeModel = 'User'; // Employee uses User model
     }
 
+    // Auto-set financialModel, financialId, and payeeModel when payeeType is a financial model
+    const financialModels = [
+      'Asset',
+      'Income',
+      'Liability',
+      'PartnershipAccount',
+      'CashBook',
+      'Capital',
+      'Owner',
+      'Employee',
+      'PropertyAccount',
+    ];
+    if (financialModels.includes(this.payeeType) && this.payee) {
+      this.payeeModel = this.payeeType; // Set payeeModel for refPath to work
+      this.financialModel = this.payeeType;
+      this.financialId = this.payee;
+    }
+
     next();
   } catch (error) {
     return next(error);
@@ -301,6 +372,7 @@ cashPaymentVoucherSchema.index({ voucherNumber: 1 }, { unique: true });
 cashPaymentVoucherSchema.index({ voucherDate: -1 });
 cashPaymentVoucherSchema.index({ cashAccount: 1, voucherDate: -1 });
 cashPaymentVoucherSchema.index({ payeeType: 1, payee: 1 });
+cashPaymentVoucherSchema.index({ financialModel: 1, financialId: 1 });
 cashPaymentVoucherSchema.index({ status: 1 });
 cashPaymentVoucherSchema.index({ voucherType: 1 });
 cashPaymentVoucherSchema.index({ shop: 1 });

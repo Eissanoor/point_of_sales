@@ -2,6 +2,12 @@ const mongoose = require('mongoose');
 const CashPaymentVoucher = require('../models/cashPaymentVoucherModel');
 const Shop = require('../models/shopModel');
 const Warehouse = require('../models/warehouseModel');
+const SupplierPayment = require('../models/supplierPaymentModel');
+const Payment = require('../models/paymentModel');
+const SupplierJourney = require('../models/supplierJourneyModel');
+const PaymentJourney = require('../models/paymentJourneyModel');
+const Purchase = require('../models/purchaseModel');
+const FinancialPayment = require('../models/financialPaymentModel');
 const APIFeatures = require('../utils/apiFeatures');
 const cloudinary = require('cloudinary').v2;
 
@@ -70,6 +76,7 @@ const getCashPaymentVoucherById = async (req, res) => {
       .populate('relatedSale', 'invoiceNumber grandTotal')
       .populate('relatedPayment', 'paymentNumber amount')
       .populate('relatedSupplierPayment', 'paymentNumber amount')
+      .populate('relatedFinancialPayment', 'referCode amount paymentDate method relatedModel relatedId')
       .select('-__v');
 
     if (!voucher) {
@@ -91,6 +98,315 @@ const getCashPaymentVoucherById = async (req, res) => {
       message: error.message,
     });
   }
+};
+
+// Helper function to create Payment or SupplierPayment transaction from voucher
+const createTransactionFromVoucher = async (voucher, userId) => {
+  console.log('=== createTransactionFromVoucher called (CashPaymentVoucher) ===');
+  console.log('Voucher ID:', voucher?._id);
+  console.log('User ID:', userId);
+  
+  // Ensure voucher is a Mongoose document with all fields loaded
+  if (!voucher || !voucher._id) {
+    console.error('Invalid voucher passed to createTransactionFromVoucher');
+    return { createdSupplierPayment: null, createdPayment: null, createdFinancialPayment: null };
+  }
+
+  // Refresh voucher from database to ensure we have all fields
+  const freshVoucher = await CashPaymentVoucher.findById(voucher._id);
+  if (!freshVoucher) {
+    console.error('Voucher not found in database');
+    return { createdSupplierPayment: null, createdPayment: null, createdFinancialPayment: null };
+  }
+  
+  console.log('Fresh voucher loaded:', {
+    payeeType: freshVoucher.payeeType,
+    payee: freshVoucher.payee,
+    relatedSupplierPayment: freshVoucher.relatedSupplierPayment,
+    relatedPayment: freshVoucher.relatedPayment,
+    amount: freshVoucher.amount,
+    status: freshVoucher.status
+  });
+
+  // Map voucher paymentMethod to supplier/customer payment method
+  const mapPaymentMethod = (voucherMethod) => {
+    const methodMap = {
+      'cash': 'cash',
+      'petty_cash': 'cash',
+      'cash_register': 'cash',
+      'other': 'cash'
+    };
+    return methodMap[voucherMethod] || 'cash';
+  };
+
+  let createdSupplierPayment = null;
+  let createdPayment = null;
+  let createdFinancialPayment = null;
+  let errorDetails = null;
+
+  // Only create transactions if they don't already exist
+  if (freshVoucher.payeeType === 'supplier' && freshVoucher.payee && !freshVoucher.relatedSupplierPayment) {
+    console.log('Creating SupplierPayment for supplier:', freshVoucher.payee);
+    try {
+      // Generate payment number
+      const paymentCount = await SupplierPayment.countDocuments();
+      const paymentNumber = `SP-${paymentCount + 1}`;
+      
+      // Use voucher's transactionId or generate a new one
+      const paymentTransactionId = voucher.transactionId || `TRX-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+      
+      // Calculate supplier balances
+      const purchasesAgg = await Purchase.aggregate([
+        { $match: { supplier: new mongoose.Types.ObjectId(freshVoucher.payee), isActive: true } },
+        { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+      ]);
+      const totalPurchasesAmount = purchasesAgg.length > 0 ? (purchasesAgg[0].total || 0) : 0;
+      
+      const paymentsAgg = await SupplierPayment.aggregate([
+        { $match: { supplier: new mongoose.Types.ObjectId(freshVoucher.payee), status: { $nin: ['failed', 'refunded'] } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]);
+      const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
+      const remainingBefore = totalPurchasesAmount - paidSoFar;
+      
+      // Create SupplierPayment
+      createdSupplierPayment = await SupplierPayment.create({
+        paymentNumber,
+        supplier: freshVoucher.payee,
+        amount: freshVoucher.amount,
+        paymentMethod: mapPaymentMethod(freshVoucher.paymentMethod || 'cash'),
+        paymentDate: freshVoucher.voucherDate || new Date(),
+        transactionId: paymentTransactionId,
+        status: 'completed',
+        notes: freshVoucher.notes || `Payment via cash payment voucher ${freshVoucher.voucherNumber}`,
+        attachments: freshVoucher.attachments || [],
+        user: userId,
+        isPartial: false,
+        currency: freshVoucher.currency || null,
+        products: []
+      });
+
+      // Calculate new balances
+      const newPaidAmount = paidSoFar + freshVoucher.amount;
+      const newRemainingBalance = remainingBefore - freshVoucher.amount;
+      const isAdvancedPayment = newRemainingBalance < 0;
+      
+      // Use voucherDate or paymentDate for consistency
+      const paymentDate = freshVoucher.voucherDate || createdSupplierPayment.paymentDate || new Date();
+      
+      // Create supplier journey entry
+      const journeyEntry = await SupplierJourney.create({
+        supplier: freshVoucher.payee,
+        user: userId,
+        action: 'payment_made',
+        payment: {
+          amount: freshVoucher.amount,
+          method: mapPaymentMethod(freshVoucher.paymentMethod || 'cash'),
+          date: paymentDate,
+          status: 'completed',
+          transactionId: paymentTransactionId
+        },
+        paidAmount: newPaidAmount,
+        remainingBalance: newRemainingBalance,
+        notes: `Payment of ${freshVoucher.amount} made to supplier via cash payment voucher ${freshVoucher.voucherNumber}. Transaction ID: ${paymentTransactionId}. ${isAdvancedPayment ? `Advanced payment: ${Math.abs(newRemainingBalance)}` : `Remaining balance: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`
+      });
+
+      console.log('SupplierJourney entry created:', journeyEntry._id, 'for supplier:', freshVoucher.payee);
+
+      // Update voucher with created SupplierPayment reference
+      freshVoucher.relatedSupplierPayment = createdSupplierPayment._id;
+      await freshVoucher.save();
+
+      console.log('SupplierPayment created automatically:', createdSupplierPayment._id);
+    } catch (error) {
+      console.error('Error creating SupplierPayment automatically:', error);
+      errorDetails = error;
+    }
+  }
+
+  // Create Payment if customer is selected and no relatedPayment provided
+  if (freshVoucher.payeeType === 'customer' && freshVoucher.payee && !freshVoucher.relatedPayment) {
+    console.log('Creating Payment for customer:', freshVoucher.payee);
+    try {
+      const paymentTransactionId = freshVoucher.transactionId || `TRX-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+      
+      const Sales = require('../models/salesModel');
+      const salesAgg = await Sales.aggregate([
+        { $match: { customer: new mongoose.Types.ObjectId(freshVoucher.payee), isActive: true } },
+        { $group: { _id: null, total: { $sum: '$grandTotal' } } }
+      ]);
+      const totalSalesAmount = salesAgg.length > 0 ? (salesAgg[0].total || 0) : 0;
+      
+      const paymentsAgg = await Payment.aggregate([
+        { $match: { customer: new mongoose.Types.ObjectId(freshVoucher.payee), status: { $nin: ['failed', 'refunded'] } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]);
+      const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
+      const remainingBefore = totalSalesAmount - paidSoFar;
+      
+      const paymentMethodMapped = mapPaymentMethod(freshVoucher.paymentMethod || 'cash');
+      const paymentsArray = [{
+        method: paymentMethodMapped,
+        amount: freshVoucher.amount,
+        bankAccount: null // Cash payments don't have bank accounts
+      }];
+
+      const paymentDate = freshVoucher.voucherDate || new Date();
+      const customerIdForPayment = typeof freshVoucher.payee === 'string' 
+        ? new mongoose.Types.ObjectId(freshVoucher.payee) 
+        : freshVoucher.payee;
+
+      const date = new Date(paymentDate);
+      const year = date.getFullYear().toString().slice(-2);
+      const month = (date.getMonth() + 1).toString().padStart(2, '0');
+      const day = date.getDate().toString().padStart(2, '0');
+      
+      const startOfDay = new Date(date);
+      startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date(date);
+      endOfDay.setHours(23, 59, 59, 999);
+      
+      const paymentsCount = await Payment.countDocuments({
+        createdAt: {
+          $gte: startOfDay,
+          $lt: endOfDay,
+        },
+      });
+      
+      const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
+
+      createdPayment = await Payment.create({
+        paymentNumber: paymentNumber,
+        customer: customerIdForPayment,
+        sale: freshVoucher.relatedSale || null,
+        amount: freshVoucher.amount,
+        payments: paymentsArray,
+        paymentDate: paymentDate,
+        transactionId: paymentTransactionId,
+        status: 'completed',
+        notes: freshVoucher.notes || `Payment via cash payment voucher ${freshVoucher.voucherNumber}`,
+        attachments: freshVoucher.attachments || [],
+        user: userId,
+        isPartial: false,
+        currency: freshVoucher.currency || null,
+        paymentType: freshVoucher.relatedSale ? 'sale_payment' : 'advance_payment'
+      });
+
+      const newPaidAmount = paidSoFar + freshVoucher.amount;
+      const newRemainingBalance = remainingBefore - freshVoucher.amount;
+      const isAdvancedPayment = newRemainingBalance < 0;
+
+      const paymentJourneyData = {
+        payment: createdPayment._id,
+        customer: customerIdForPayment,
+        user: userId,
+        action: 'payment_made',
+        paymentDetails: {
+          amount: freshVoucher.amount,
+          method: paymentMethodMapped,
+          date: paymentDate,
+          status: 'completed',
+          transactionId: paymentTransactionId
+        },
+        paidAmount: newPaidAmount,
+        remainingBalance: newRemainingBalance,
+        changes: [],
+        notes: `Payment of ${freshVoucher.amount} received from customer via cash payment voucher ${freshVoucher.voucherNumber}. Transaction ID: ${paymentTransactionId}. ${isAdvancedPayment ? `Advanced payment: ${Math.abs(newRemainingBalance)}` : `Remaining balance: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`
+      };
+      
+      const paymentJourneyEntry = await PaymentJourney.create(paymentJourneyData);
+
+      if (freshVoucher.relatedSale) {
+        const saleRecord = await Sales.findById(freshVoucher.relatedSale);
+        if (saleRecord) {
+          const salePayments = await Payment.find({ sale: freshVoucher.relatedSale });
+          const totalPaidForSale = salePayments.reduce((sum, p) => sum + p.amount, 0);
+          const remainingBalance = (saleRecord.grandTotal || 0) - totalPaidForSale;
+          if (remainingBalance <= 0) {
+            await Sales.findByIdAndUpdate(freshVoucher.relatedSale, { paymentStatus: 'paid' });
+          } else {
+            await Sales.findByIdAndUpdate(freshVoucher.relatedSale, { paymentStatus: 'partial' });
+          }
+        }
+      }
+
+      freshVoucher.relatedPayment = createdPayment._id;
+      await freshVoucher.save();
+
+      console.log('Payment created automatically:', createdPayment._id);
+    } catch (error) {
+      console.error('Error creating Payment automatically:', error);
+      errorDetails = error;
+    }
+  }
+
+  // Create FinancialPayment when voucher is linked to a financial entity (Asset, Income, etc.)
+  const financialModels = [
+    'Asset',
+    'Income',
+    'Liability',
+    'PartnershipAccount',
+    'CashBook',
+    'Capital',
+    'Owner',
+    'Employee',
+    'PropertyAccount',
+  ];
+  const isFinancialModel =
+    (freshVoucher.financialModel &&
+      freshVoucher.financialId &&
+      !freshVoucher.relatedFinancialPayment) ||
+    (financialModels.includes(freshVoucher.payeeType) &&
+      freshVoucher.payee &&
+      !freshVoucher.relatedFinancialPayment);
+
+  if (isFinancialModel) {
+    const targetFinancialModel = freshVoucher.financialModel || freshVoucher.payeeType;
+    const targetFinancialId = freshVoucher.financialId || freshVoucher.payee;
+    try {
+      const methodMapForFinancial = {
+        cash: 'cash',
+        petty_cash: 'cash',
+        cash_register: 'cash',
+        other: 'cash',
+      };
+
+      const mappedMethod = methodMapForFinancial[freshVoucher.paymentMethod] || 'cash';
+      const paymentDate = freshVoucher.voucherDate || new Date();
+
+      createdFinancialPayment = await FinancialPayment.create({
+        name:
+          freshVoucher.payeeName ||
+          freshVoucher.description ||
+          `Financial payment for ${targetFinancialModel}`,
+        mobileNo: null,
+        code: freshVoucher.referenceNumber || null,
+        description:
+          freshVoucher.description ||
+          `Payment via cash payment voucher ${freshVoucher.voucherNumber}`,
+        amount: freshVoucher.amount,
+        paymentDate,
+        method: mappedMethod,
+        relatedModel: targetFinancialModel,
+        relatedId: targetFinancialId,
+        user: userId,
+        isActive: freshVoucher.isActive,
+      });
+
+      freshVoucher.relatedFinancialPayment = createdFinancialPayment._id;
+      await freshVoucher.save();
+    } catch (error) {
+      console.error('Error creating FinancialPayment automatically:', error);
+      errorDetails = error;
+    }
+  }
+
+  return { 
+    createdSupplierPayment, 
+    createdPayment,
+    createdFinancialPayment,
+    error: errorDetails || null
+  };
 };
 
 // @desc    Create new cash payment voucher
@@ -150,8 +466,14 @@ const createCashPaymentVoucher = async (req, res) => {
       }
     }
 
-    // Validate payee if provided
-    if (payee && payeeType !== 'other') {
+    // Normalize payee: treat empty string as undefined
+    const normalizedPayee =
+      payee && typeof payee === 'string' && payee.trim() === ''
+        ? undefined
+        : payee;
+
+    // Validate payee if provided and not "other"
+    if (normalizedPayee && payeeType !== 'other') {
       let PayeeModel;
       if (payeeType === 'supplier') {
         PayeeModel = require('../models/supplierModel');
@@ -159,10 +481,28 @@ const createCashPaymentVoucher = async (req, res) => {
         PayeeModel = require('../models/customerModel');
       } else if (payeeType === 'employee') {
         PayeeModel = require('../models/userModel');
+      } else if (payeeType === 'Asset') {
+        PayeeModel = require('../models/assetModel');
+      } else if (payeeType === 'Income') {
+        PayeeModel = require('../models/incomeModel');
+      } else if (payeeType === 'Liability') {
+        PayeeModel = require('../models/liabilityModel');
+      } else if (payeeType === 'PartnershipAccount') {
+        PayeeModel = require('../models/partnershipAccountModel');
+      } else if (payeeType === 'CashBook') {
+        PayeeModel = require('../models/cashBookModel');
+      } else if (payeeType === 'Capital') {
+        PayeeModel = require('../models/capitalModel');
+      } else if (payeeType === 'Owner') {
+        PayeeModel = require('../models/ownerModel');
+      } else if (payeeType === 'Employee') {
+        PayeeModel = require('../models/employeeModel');
+      } else if (payeeType === 'PropertyAccount') {
+        PayeeModel = require('../models/propertyAccountModel');
       }
 
       if (PayeeModel) {
-        const payeeExists = await PayeeModel.findById(payee);
+        const payeeExists = await PayeeModel.findById(normalizedPayee);
         if (!payeeExists) {
           return res.status(404).json({
             status: 'fail',
@@ -311,6 +651,31 @@ const createCashPaymentVoucher = async (req, res) => {
     }
 
     // Create voucher (voucherNumber and voucherDate will be auto-generated if not provided)
+    // Auto-set status to 'completed' in cases where we want automatic transaction creation
+    const financialModels = [
+      'Asset',
+      'Income',
+      'Liability',
+      'PartnershipAccount',
+      'CashBook',
+      'Capital',
+      'Owner',
+      'Employee',
+      'PropertyAccount',
+    ];
+    let finalStatus = status || 'draft';
+    if (!status && (payeeType === 'supplier' || payeeType === 'customer') && normalizedPayee) {
+      finalStatus = 'completed';
+      console.log('Auto-setting status to "completed" because supplier/customer is selected');
+    }
+    // Also auto-complete when payeeType is a financial model (Asset, Income, etc.)
+    if (!status && financialModels.includes(payeeType) && normalizedPayee) {
+      finalStatus = 'completed';
+      console.log(
+        `Auto-setting status to "completed" because payeeType "${payeeType}" is a financial model`
+      );
+    }
+    
     const voucherData = {
       voucherType,
       cashAccount,
@@ -318,7 +683,9 @@ const createCashPaymentVoucher = async (req, res) => {
       shop,
       warehouse,
       payeeType,
-      payee,
+      // Only set payee when we actually have one and type is not "other"
+      payee:
+        normalizedPayee && payeeType !== 'other' ? normalizedPayee : undefined,
       payeeName,
       amount: typeof amount === 'string' ? parseFloat(amount) : amount,
       currency,
@@ -332,9 +699,11 @@ const createCashPaymentVoucher = async (req, res) => {
       relatedSupplierPayment,
       description,
       notes,
-      status: status || 'draft',
+      status: finalStatus,
       attachments: uploadedAttachments,
       user: req.user._id,
+      // Note: financialModel and financialId will be auto-set in pre-save hook
+      // when payeeType is a financial model
     };
 
     // Only set voucherDate if explicitly provided, otherwise model default will handle it
@@ -369,7 +738,56 @@ const createCashPaymentVoucher = async (req, res) => {
     console.log('Final voucherData.attachments before save:', voucherData.attachments);
     console.log('Full voucherData before save:', JSON.stringify(voucherData, null, 2));
 
-    const voucher = await CashPaymentVoucher.create(voucherData);
+    let voucher = await CashPaymentVoucher.create(voucherData);
+
+    // Automatically create Payment or SupplierPayment transaction if supplier/customer is selected
+    // Only create if status is 'completed' or 'approved' and relatedPayment/relatedSupplierPayment is not already provided
+    let createdTransaction = null;
+    let transactionResult = null;
+    const voucherStatus = voucher.status || voucherData.status || status;
+    console.log('Voucher created with status:', voucherStatus, 'Voucher ID:', voucher._id);
+    
+    if ((voucherStatus === 'completed' || voucherStatus === 'approved')) {
+      console.log('Creating transaction from voucher - status is completed/approved');
+      transactionResult = await createTransactionFromVoucher(voucher, req.user._id);
+      console.log('Transaction result:', {
+        hasSupplierPayment: !!transactionResult.createdSupplierPayment,
+        hasPayment: !!transactionResult.createdPayment,
+        hasFinancialPayment: !!transactionResult.createdFinancialPayment,
+        hasError: !!transactionResult.error,
+        error: transactionResult.error
+      });
+      if (transactionResult.createdSupplierPayment) {
+        createdTransaction = {
+          type: 'SupplierPayment',
+          id: transactionResult.createdSupplierPayment._id,
+          paymentNumber: transactionResult.createdSupplierPayment.paymentNumber
+        };
+        console.log('Transaction created - SupplierPayment:', createdTransaction.id);
+      } else if (transactionResult.createdPayment) {
+        createdTransaction = {
+          type: 'Payment',
+          id: transactionResult.createdPayment._id,
+          paymentNumber: transactionResult.createdPayment.paymentNumber
+        };
+        console.log('Transaction created - Payment:', createdTransaction.id);
+      } else if (transactionResult.createdFinancialPayment) {
+        createdTransaction = {
+          type: 'FinancialPayment',
+          id: transactionResult.createdFinancialPayment._id,
+          referCode: transactionResult.createdFinancialPayment.referCode
+        };
+        console.log('Transaction created - FinancialPayment:', createdTransaction.id);
+      } else {
+        console.log('No transaction created - check if supplier/customer/financial model was selected and relatedPayment/relatedSupplierPayment/relatedFinancialPayment was already set');
+        if (transactionResult.error) {
+          console.error('Transaction creation error:', transactionResult.error);
+        }
+      }
+      
+      // Refresh voucher to get updated relatedPayment/relatedSupplierPayment/relatedFinancialPayment
+      voucher = await CashPaymentVoucher.findById(voucher._id);
+    }
 
     // Populate before sending response
     const populatedVoucher = await CashPaymentVoucher.findById(voucher._id)
@@ -378,6 +796,7 @@ const createCashPaymentVoucher = async (req, res) => {
       .populate('warehouse', 'name address')
       .populate('payee', 'name')
       .populate('user', 'name email')
+      .populate('relatedFinancialPayment', 'referCode amount paymentDate method relatedModel relatedId')
       .select('-__v');
 
     res.status(201).json({
@@ -385,6 +804,8 @@ const createCashPaymentVoucher = async (req, res) => {
       message: 'Cash payment voucher created successfully',
       data: {
         voucher: populatedVoucher,
+        createdTransaction,
+        transactionError: transactionResult?.error || null,
       },
     });
   } catch (error) {
@@ -670,7 +1091,57 @@ const updateCashPaymentVoucher = async (req, res) => {
     if (cashAccount !== undefined) voucher.cashAccount = cashAccount;
     if (cashAccountType !== undefined) voucher.cashAccountType = cashAccountType;
     if (payeeType !== undefined) voucher.payeeType = payeeType;
-    if (payee !== undefined) voucher.payee = payee;
+    // Normalize payee on update: treat empty string as undefined
+    if (payee !== undefined) {
+      if (typeof payee === 'string' && payee.trim() === '') {
+        voucher.payee = undefined;
+      } else {
+        // Validate payee if provided and payeeType is not "other"
+        const finalPayeeType = payeeType !== undefined ? payeeType : voucher.payeeType;
+        const finalPayee = typeof payee === 'string' && payee.trim() === '' ? undefined : payee;
+        
+        if (finalPayee && finalPayeeType !== 'other') {
+          let PayeeModel;
+          if (finalPayeeType === 'supplier') {
+            PayeeModel = require('../models/supplierModel');
+          } else if (finalPayeeType === 'customer') {
+            PayeeModel = require('../models/customerModel');
+          } else if (finalPayeeType === 'employee') {
+            PayeeModel = require('../models/userModel');
+          } else if (finalPayeeType === 'Asset') {
+            PayeeModel = require('../models/assetModel');
+          } else if (finalPayeeType === 'Income') {
+            PayeeModel = require('../models/incomeModel');
+          } else if (finalPayeeType === 'Liability') {
+            PayeeModel = require('../models/liabilityModel');
+          } else if (finalPayeeType === 'PartnershipAccount') {
+            PayeeModel = require('../models/partnershipAccountModel');
+          } else if (finalPayeeType === 'CashBook') {
+            PayeeModel = require('../models/cashBookModel');
+          } else if (finalPayeeType === 'Capital') {
+            PayeeModel = require('../models/capitalModel');
+          } else if (finalPayeeType === 'Owner') {
+            PayeeModel = require('../models/ownerModel');
+          } else if (finalPayeeType === 'Employee') {
+            PayeeModel = require('../models/employeeModel');
+          } else if (finalPayeeType === 'PropertyAccount') {
+            PayeeModel = require('../models/propertyAccountModel');
+          }
+
+          if (PayeeModel) {
+            const payeeExists = await PayeeModel.findById(finalPayee);
+            if (!payeeExists) {
+              return res.status(404).json({
+                status: 'fail',
+                message: `${finalPayeeType} not found`,
+              });
+            }
+          }
+        }
+        
+        voucher.payee = finalPayee;
+      }
+    }
     if (payeeName !== undefined) voucher.payeeName = payeeName;
     if (amount !== undefined) voucher.amount = typeof amount === 'string' ? parseFloat(amount) : amount;
     if (currency !== undefined) voucher.currency = currency;
