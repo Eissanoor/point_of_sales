@@ -799,14 +799,20 @@ const createCashPaymentVoucher = async (req, res) => {
       .populate('relatedFinancialPayment', 'referCode amount paymentDate method relatedModel relatedId')
       .select('-__v');
 
+    // Build response data and only include transactionError when there is an actual error
+    const responseData = {
+      voucher: populatedVoucher,
+      createdTransaction,
+    };
+
+    if (transactionResult && transactionResult.error) {
+      responseData.transactionError = transactionResult.error;
+    }
+
     res.status(201).json({
       status: 'success',
       message: 'Cash payment voucher created successfully',
-      data: {
-        voucher: populatedVoucher,
-        createdTransaction,
-        transactionError: transactionResult?.error || null,
-      },
+      data: responseData,
     });
   } catch (error) {
     console.error('Error creating cash payment voucher:', error);

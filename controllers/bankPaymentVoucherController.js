@@ -914,14 +914,20 @@ const createBankPaymentVoucher = async (req, res) => {
       .populate('relatedSupplierPayment', 'paymentNumber amount')
       .select('-__v');
 
+    // Build response data and only include transactionError when there is an actual error
+    const responseData = {
+      voucher: populatedVoucher,
+      createdTransaction: createdTransaction,
+    };
+
+    if (transactionResult && transactionResult.error) {
+      responseData.transactionError = transactionResult.error;
+    }
+
     res.status(201).json({
       status: 'success',
       message: 'Bank payment voucher created successfully',
-      data: {
-        voucher: populatedVoucher,
-        createdTransaction: createdTransaction,
-        transactionError: createdTransaction === null && transactionResult?.error ? transactionResult.error : null
-      },
+      data: responseData,
     });
   } catch (error) {
     console.error('Error creating bank payment voucher:', error);
