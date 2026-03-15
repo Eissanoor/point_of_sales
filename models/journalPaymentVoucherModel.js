@@ -127,8 +127,8 @@ const journalPaymentVoucherSchema = new mongoose.Schema(
     status: {
       type: String,
       required: true,
-      enum: ['draft', 'pending', 'approved', 'posted', 'cancelled', 'rejected'],
-      default: 'draft',
+      enum: ['draft', 'pending', 'approved', 'completed', 'posted', 'cancelled', 'rejected'],
+      default: 'completed',
     },
     approvalStatus: {
       approvedBy: {

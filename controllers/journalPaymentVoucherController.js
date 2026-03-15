@@ -1,6 +1,11 @@
 const mongoose = require('mongoose');
 const JournalPaymentVoucher = require('../models/journalPaymentVoucherModel');
 const BankAccount = require('../models/bankAccountModel');
+const SupplierPayment = require('../models/supplierPaymentModel');
+const Payment = require('../models/paymentModel');
+const SupplierJourney = require('../models/supplierJourneyModel');
+const PaymentJourney = require('../models/paymentJourneyModel');
+const Purchase = require('../models/purchaseModel');
 const APIFeatures = require('../utils/apiFeatures');
 const cloudinary = require('cloudinary').v2;
 
@@ -94,6 +99,164 @@ const getJournalPaymentVoucherById = async (req, res) => {
       message: error.message,
     });
   }
+};
+
+/**
+ * Create Payment (customer debit) and SupplierPayment (supplier credit) from journal entries.
+ * Debit to Customer = customer paid us → create Payment (subtract from receivable).
+ * Credit to Supplier = we paid supplier → create SupplierPayment (subtract from payable).
+ */
+const createTransactionsFromJournalEntries = async (voucher, userId) => {
+  if (!voucher || !voucher._id || !voucher.entries || !Array.isArray(voucher.entries)) {
+    return { createdPayment: null, createdSupplierPayment: null, error: null };
+  }
+
+  const freshVoucher = await JournalPaymentVoucher.findById(voucher._id);
+  if (!freshVoucher) return { createdPayment: null, createdSupplierPayment: null, error: null };
+
+  let createdPayment = null;
+  let createdSupplierPayment = null;
+  let errorDetails = null;
+  const paymentMethodForPayment = 'other';
+  const paymentMethodForSupplier = 'bank_transfer';
+
+  const transactionId = freshVoucher.transactionId || `TRX-JV-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+  const paymentDate = freshVoucher.voucherDate || new Date();
+
+  for (const entry of freshVoucher.entries) {
+    const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
+    const credit = typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
+    const model = (entry.accountModel || '').trim();
+    const normalizedModel = model.toLowerCase() === 'customer' ? 'Customer' : model.toLowerCase() === 'supplier' ? 'Supplier' : model;
+
+    // Customer debit → Payment (customer paid us / we receive → subtract from receivable)
+    if (normalizedModel === 'Customer' && debit > 0 && !freshVoucher.relatedPayment) {
+      try {
+        const Sales = require('../models/salesModel');
+        const customerId = entry.account;
+        const amount = debit;
+
+        const salesAgg = await Sales.aggregate([
+          { $match: { customer: new mongoose.Types.ObjectId(customerId), isActive: true } },
+          { $group: { _id: null, total: { $sum: '$grandTotal' } } }
+        ]);
+        const totalSalesAmount = salesAgg.length > 0 ? (salesAgg[0].total || 0) : 0;
+        const paymentsAgg = await Payment.aggregate([
+          { $match: { customer: new mongoose.Types.ObjectId(customerId), status: { $nin: ['failed', 'refunded'] } } },
+          { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
+        const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
+        const remainingBefore = totalSalesAmount - paidSoFar;
+        const newPaidAmount = paidSoFar + amount;
+        const newRemainingBalance = remainingBefore - amount;
+        const isAdvancedPayment = newRemainingBalance < 0;
+
+        const date = new Date(paymentDate);
+        const year = date.getFullYear().toString().slice(-2);
+        const month = (date.getMonth() + 1).toString().padStart(2, '0');
+        const day = date.getDate().toString().padStart(2, '0');
+        const startOfDay = new Date(date); startOfDay.setHours(0, 0, 0, 0);
+        const endOfDay = new Date(date); endOfDay.setHours(23, 59, 59, 999);
+        const paymentsCount = await Payment.countDocuments({ createdAt: { $gte: startOfDay, $lt: endOfDay } });
+        const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
+
+        createdPayment = await Payment.create({
+          paymentNumber,
+          customer: customerId,
+          sale: freshVoucher.relatedSale || null,
+          amount,
+          payments: [{ method: paymentMethodForPayment, amount, bankAccount: null }],
+          paymentDate,
+          transactionId,
+          status: 'completed',
+          notes: freshVoucher.notes || `Payment via journal voucher ${freshVoucher.voucherNumber}`,
+          attachments: freshVoucher.attachments || [],
+          user: userId,
+          isPartial: false,
+          currency: freshVoucher.currency || null,
+          paymentType: freshVoucher.relatedSale ? 'sale_payment' : 'advance_payment'
+        });
+
+        await PaymentJourney.create({
+          payment: createdPayment._id,
+          customer: customerId,
+          user: userId,
+          action: 'payment_made',
+          paymentDetails: { amount, method: paymentMethodForPayment, date: paymentDate, status: 'completed', transactionId },
+          paidAmount: newPaidAmount,
+          remainingBalance: newRemainingBalance,
+          changes: [],
+          notes: `Payment of ${amount} received via journal voucher ${freshVoucher.voucherNumber}. ${isAdvancedPayment ? `Advanced: ${Math.abs(newRemainingBalance)}` : `Remaining: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`
+        });
+
+        freshVoucher.relatedPayment = createdPayment._id;
+        await freshVoucher.save();
+      } catch (err) {
+        console.error('Error creating Payment from journal entry:', err);
+        errorDetails = err;
+      }
+    }
+
+    // Supplier credit → SupplierPayment (we paid supplier → subtract from payable)
+    if (normalizedModel === 'Supplier' && credit > 0 && !freshVoucher.relatedSupplierPayment) {
+      try {
+        const amount = credit;
+        const supplierId = entry.account;
+
+        const purchasesAgg = await Purchase.aggregate([
+          { $match: { supplier: new mongoose.Types.ObjectId(supplierId), isActive: true } },
+          { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+        ]);
+        const totalPurchasesAmount = purchasesAgg.length > 0 ? (purchasesAgg[0].total || 0) : 0;
+        const paymentsAgg = await SupplierPayment.aggregate([
+          { $match: { supplier: new mongoose.Types.ObjectId(supplierId), status: { $nin: ['failed', 'refunded'] } } },
+          { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]);
+        const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
+        const remainingBefore = totalPurchasesAmount - paidSoFar;
+        const newPaidAmount = paidSoFar + amount;
+        const newRemainingBalance = remainingBefore - amount;
+        const isAdvancedPayment = newRemainingBalance < 0;
+
+        const paymentCount = await SupplierPayment.countDocuments();
+        const paymentNumber = `SP-${paymentCount + 1}`;
+
+        createdSupplierPayment = await SupplierPayment.create({
+          paymentNumber,
+          supplier: supplierId,
+          amount,
+          paymentMethod: paymentMethodForSupplier,
+          paymentDate,
+          transactionId,
+          status: 'completed',
+          notes: freshVoucher.notes || `Payment via journal voucher ${freshVoucher.voucherNumber}`,
+          attachments: freshVoucher.attachments || [],
+          user: userId,
+          isPartial: false,
+          currency: freshVoucher.currency || null,
+          products: []
+        });
+
+        await SupplierJourney.create({
+          supplier: supplierId,
+          user: userId,
+          action: 'payment_made',
+          payment: { amount, method: paymentMethodForSupplier, date: paymentDate, status: 'completed', transactionId },
+          paidAmount: newPaidAmount,
+          remainingBalance: newRemainingBalance,
+          notes: `Payment of ${amount} to supplier via journal voucher ${freshVoucher.voucherNumber}. ${isAdvancedPayment ? `Advanced: ${Math.abs(newRemainingBalance)}` : `Remaining: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`
+        });
+
+        freshVoucher.relatedSupplierPayment = createdSupplierPayment._id;
+        await freshVoucher.save();
+      } catch (err) {
+        console.error('Error creating SupplierPayment from journal entry:', err);
+        errorDetails = err;
+      }
+    }
+  }
+
+  return { createdPayment, createdSupplierPayment, error: errorDetails };
 };
 
 // @desc    Create new journal payment voucher
@@ -483,7 +646,7 @@ const createJournalPaymentVoucher = async (req, res) => {
       relatedCashPaymentVoucher,
       description,
       notes,
-      status: status || 'draft',
+      status: status || 'completed',
       attachments: uploadedAttachments,
       user: req.user._id,
     };
@@ -521,19 +684,41 @@ const createJournalPaymentVoucher = async (req, res) => {
 
     const voucher = await JournalPaymentVoucher.create(voucherData);
 
-    // Populate before sending response
+    // Create Payment (customer debit) and SupplierPayment (supplier credit) when status is completed
+    let transactionResult = null;
+    let createdTransactions = null;
+    const voucherStatus = voucher.status || voucherData.status || status;
+    if (voucherStatus === 'completed' || voucherStatus === 'posted') {
+      transactionResult = await createTransactionsFromJournalEntries(voucher, req.user._id);
+      if (transactionResult.createdPayment || transactionResult.createdSupplierPayment) {
+        createdTransactions = {
+          ...(transactionResult.createdPayment && {
+            payment: { type: 'Payment', id: transactionResult.createdPayment._id, paymentNumber: transactionResult.createdPayment.paymentNumber }
+          }),
+          ...(transactionResult.createdSupplierPayment && {
+            supplierPayment: { type: 'SupplierPayment', id: transactionResult.createdSupplierPayment._id, paymentNumber: transactionResult.createdSupplierPayment.paymentNumber }
+          }),
+        };
+      }
+    }
+
+    // Populate before sending response (voucher may have been updated with relatedPayment/relatedSupplierPayment)
     const populatedVoucher = await JournalPaymentVoucher.findById(voucher._id)
       .populate('currency', 'name code symbol')
       .populate('entries.account')
       .populate('user', 'name email')
+      .populate('relatedPayment', 'paymentNumber amount')
+      .populate('relatedSupplierPayment', 'paymentNumber amount')
       .select('-__v');
+
+    const responseData = { voucher: populatedVoucher };
+    if (createdTransactions) responseData.createdTransactions = createdTransactions;
+    if (transactionResult && transactionResult.error) responseData.transactionError = transactionResult.error;
 
     res.status(201).json({
       status: 'success',
       message: 'Journal payment voucher created successfully',
-      data: {
-        voucher: populatedVoucher,
-      },
+      data: responseData,
     });
   } catch (error) {
     console.error('Error creating journal payment voucher:', error);
@@ -587,11 +772,11 @@ const updateJournalPaymentVoucher = async (req, res) => {
       });
     }
 
-    // Prevent updates if status is posted or cancelled
-    if (voucher.status === 'posted' || voucher.status === 'cancelled') {
+    // Prevent updates if status is completed, posted or cancelled
+    if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot update posted or cancelled voucher',
+        message: 'Cannot update completed, posted or cancelled voucher',
       });
     }
 
@@ -891,10 +1076,10 @@ const approveJournalPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (voucher.status === 'posted' || voucher.status === 'cancelled') {
+    if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot approve posted or cancelled voucher',
+        message: 'Cannot approve completed, posted or cancelled voucher',
       });
     }
 
@@ -944,10 +1129,10 @@ const rejectJournalPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (voucher.status === 'posted' || voucher.status === 'cancelled') {
+    if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot reject posted or cancelled voucher',
+        message: 'Cannot reject completed, posted or cancelled voucher',
       });
     }
 
@@ -1016,11 +1201,16 @@ const postJournalPaymentVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
+    // Create Payment/SupplierPayment from entries if not already created (e.g. when posting a draft)
+    await createTransactionsFromJournalEntries(updatedVoucher, req.user._id);
+
     const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
       .populate('entries.account')
       .populate('user', 'name email')
       .populate('postedBy', 'name email')
+      .populate('relatedPayment', 'paymentNumber amount')
+      .populate('relatedSupplierPayment', 'paymentNumber amount')
       .select('-__v');
 
     res.status(200).json({
@@ -1052,10 +1242,10 @@ const cancelJournalPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (voucher.status === 'posted') {
+    if (voucher.status === 'posted' || voucher.status === 'completed') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot cancel posted voucher',
+        message: 'Cannot cancel completed or posted voucher',
       });
     }
 
@@ -1105,11 +1295,11 @@ const deleteJournalPaymentVoucher = async (req, res) => {
       });
     }
 
-    // Prevent deletion if status is posted
-    if (voucher.status === 'posted') {
+    // Prevent deletion if status is completed or posted
+    if (voucher.status === 'posted' || voucher.status === 'completed') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot delete posted voucher',
+        message: 'Cannot delete completed or posted voucher',
       });
     }
 
