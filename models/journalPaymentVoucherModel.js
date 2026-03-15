@@ -49,7 +49,7 @@ const journalPaymentVoucherSchema = new mongoose.Schema(
     voucherType: {
       type: String,
       required: true,
-      enum: ['journal_entry', 'adjustment', 'reversal', 'opening_balance', 'closing_entry', 'other'],
+      enum: ['journal_entry', 'payment', 'adjustment', 'reversal', 'opening_balance', 'closing_entry', 'other'],
       default: 'journal_entry',
     },
     // Journal entries (debit and credit sides)
@@ -275,7 +275,8 @@ journalPaymentVoucherSchema.pre('save', async function(next) {
         voucherType: this.voucherType,
       });
       
-      const prefix = this.voucherType === 'journal_entry' ? 'JV' : 
+      const prefix = this.voucherType === 'journal_entry' ? 'JV' :
+                     this.voucherType === 'payment' ? 'JPV' :
                      this.voucherType === 'adjustment' ? 'JA' :
                      this.voucherType === 'reversal' ? 'JR' :
                      this.voucherType === 'opening_balance' ? 'JO' :
@@ -287,7 +288,8 @@ journalPaymentVoucherSchema.pre('save', async function(next) {
     if (!this.transactionId) {
       const timestamp = Date.now();
       const randomPart = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-      const prefix = this.voucherType === 'journal_entry' ? 'JV' : 
+      const prefix = this.voucherType === 'journal_entry' ? 'JV' :
+                     this.voucherType === 'payment' ? 'JPV' :
                      this.voucherType === 'adjustment' ? 'JA' :
                      this.voucherType === 'reversal' ? 'JR' :
                      this.voucherType === 'opening_balance' ? 'JO' :
