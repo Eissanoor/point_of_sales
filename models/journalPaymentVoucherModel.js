@@ -132,6 +132,10 @@ const journalPaymentVoucherSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'CashPaymentVoucher',
     },
+    relatedFinancialPayments: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'FinancialPayment' }],
+      default: [],
+    },
     description: {
       type: String,
       trim: true,

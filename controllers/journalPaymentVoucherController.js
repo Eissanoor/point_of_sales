@@ -6,6 +6,7 @@ const Payment = require('../models/paymentModel');
 const SupplierJourney = require('../models/supplierJourneyModel');
 const PaymentJourney = require('../models/paymentJourneyModel');
 const Purchase = require('../models/purchaseModel');
+const FinancialPayment = require('../models/financialPaymentModel');
 const APIFeatures = require('../utils/apiFeatures');
 const cloudinary = require('cloudinary').v2;
 
@@ -32,6 +33,7 @@ const getJournalPaymentVouchers = async (req, res) => {
       .populate('relatedSupplierPayment', 'paymentNumber amount')
       .populate('relatedBankPaymentVoucher', 'voucherNumber amount')
       .populate('relatedCashPaymentVoucher', 'voucherNumber amount')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .sort({ voucherDate: -1 })
       .select('-__v');
 
@@ -78,6 +80,7 @@ const getJournalPaymentVoucherById = async (req, res) => {
       .populate('relatedSupplierPayment', 'paymentNumber amount')
       .populate('relatedBankPaymentVoucher', 'voucherNumber amount')
       .populate('relatedCashPaymentVoucher', 'voucherNumber amount')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     if (!voucher) {
@@ -101,21 +104,37 @@ const getJournalPaymentVoucherById = async (req, res) => {
   }
 };
 
+// Account models that create FinancialPayment (must match FinancialPayment.relatedModel enum)
+const FINANCIAL_ACCOUNT_MODELS = [
+  'Asset',
+  'Income',
+  'Liability',
+  'PartnershipAccount',
+  'CashBook',
+  'Capital',
+  'Owner',
+  'Employee',
+  'PropertyAccount',
+];
+
 /**
- * Create Payment (customer debit) and SupplierPayment (supplier credit) from journal entries.
- * Debit to Customer = customer paid us → create Payment (subtract from receivable).
- * Credit to Supplier = we paid supplier → create SupplierPayment (subtract from payable).
+ * Create Payment (customer debit), SupplierPayment (supplier credit), and FinancialPayment
+ * (Asset/Income/Liability/etc.) from journal entries.
+ * - Customer debit → Payment (subtract from receivable).
+ * - Supplier credit → SupplierPayment (subtract from payable).
+ * - Asset/Income/Liability/etc. debit or credit → FinancialPayment (transaction recorded for adding/subtracting).
  */
 const createTransactionsFromJournalEntries = async (voucher, userId) => {
   if (!voucher || !voucher._id || !voucher.entries || !Array.isArray(voucher.entries)) {
-    return { createdPayment: null, createdSupplierPayment: null, error: null };
+    return { createdPayment: null, createdSupplierPayment: null, createdFinancialPayments: [], error: null };
   }
 
   const freshVoucher = await JournalPaymentVoucher.findById(voucher._id);
-  if (!freshVoucher) return { createdPayment: null, createdSupplierPayment: null, error: null };
+  if (!freshVoucher) return { createdPayment: null, createdSupplierPayment: null, createdFinancialPayments: [], error: null };
 
   let createdPayment = null;
   let createdSupplierPayment = null;
+  const createdFinancialPayments = [];
   let errorDetails = null;
   const paymentMethodForPayment = 'other';
   const paymentMethodForSupplier = 'bank_transfer';
@@ -123,11 +142,21 @@ const createTransactionsFromJournalEntries = async (voucher, userId) => {
   const transactionId = freshVoucher.transactionId || `TRX-JV-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
   const paymentDate = freshVoucher.voucherDate || new Date();
 
+  const normalizeAccountModel = (m) => {
+    const s = (m || '').trim().toLowerCase();
+    const map = {
+      customer: 'Customer', supplier: 'Supplier', bankaccount: 'BankAccount', cashaccount: 'CashAccount',
+      expense: 'Expense', income: 'Income', asset: 'Asset', liability: 'Liability', equity: 'Equity',
+      partnershipaccount: 'PartnershipAccount', cashbook: 'CashBook', capital: 'Capital',
+      owner: 'Owner', employee: 'Employee', propertyaccount: 'PropertyAccount',
+    };
+    return map[s] || (m && m.trim() ? m.trim() : '');
+  };
+
   for (const entry of freshVoucher.entries) {
     const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
     const credit = typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
-    const model = (entry.accountModel || '').trim();
-    const normalizedModel = model.toLowerCase() === 'customer' ? 'Customer' : model.toLowerCase() === 'supplier' ? 'Supplier' : model;
+    const normalizedModel = normalizeAccountModel(entry.accountModel);
 
     // Customer debit → Payment (customer paid us / we receive → subtract from receivable)
     if (normalizedModel === 'Customer' && debit > 0 && !freshVoucher.relatedPayment) {
@@ -254,9 +283,39 @@ const createTransactionsFromJournalEntries = async (voucher, userId) => {
         errorDetails = err;
       }
     }
+
+    // Asset, Income, Liability, Capital, Owner, Employee, etc. → FinancialPayment (debit = add, credit = subtract)
+    const amount = debit > 0 ? debit : credit;
+    const isDebit = debit > 0;
+    if (amount > 0 && FINANCIAL_ACCOUNT_MODELS.includes(normalizedModel)) {
+      try {
+        const fp = await FinancialPayment.create({
+          name: entry.accountName || `${normalizedModel} journal entry`,
+          mobileNo: null,
+          code: freshVoucher.referenceNumber || freshVoucher.voucherNumber || null,
+          description: freshVoucher.description || `Journal voucher ${freshVoucher.voucherNumber}: ${isDebit ? 'Debit' : 'Credit'} ${amount} to ${entry.accountName || normalizedModel}. ${freshVoucher.notes || ''}`.trim(),
+          amount,
+          paymentDate,
+          method: 'other',
+          relatedModel: normalizedModel,
+          relatedId: entry.account,
+          user: userId,
+          isActive: true,
+        });
+        createdFinancialPayments.push(fp);
+        if (!freshVoucher.relatedFinancialPayments || !Array.isArray(freshVoucher.relatedFinancialPayments)) {
+          freshVoucher.relatedFinancialPayments = [];
+        }
+        freshVoucher.relatedFinancialPayments.push(fp._id);
+        await freshVoucher.save();
+      } catch (err) {
+        console.error('Error creating FinancialPayment from journal entry:', err);
+        errorDetails = err;
+      }
+    }
   }
 
-  return { createdPayment, createdSupplierPayment, error: errorDetails };
+  return { createdPayment, createdSupplierPayment, createdFinancialPayments, error: errorDetails };
 };
 
 // @desc    Create new journal payment voucher
@@ -702,13 +761,16 @@ const createJournalPaymentVoucher = async (req, res) => {
     const voucherStatus = voucher.status || voucherData.status || status;
     if (voucherStatus === 'completed' || voucherStatus === 'posted') {
       transactionResult = await createTransactionsFromJournalEntries(voucher, req.user._id);
-      if (transactionResult.createdPayment || transactionResult.createdSupplierPayment) {
+      if (transactionResult.createdPayment || transactionResult.createdSupplierPayment || (transactionResult.createdFinancialPayments && transactionResult.createdFinancialPayments.length > 0)) {
         createdTransactions = {
           ...(transactionResult.createdPayment && {
             payment: { type: 'Payment', id: transactionResult.createdPayment._id, paymentNumber: transactionResult.createdPayment.paymentNumber }
           }),
           ...(transactionResult.createdSupplierPayment && {
             supplierPayment: { type: 'SupplierPayment', id: transactionResult.createdSupplierPayment._id, paymentNumber: transactionResult.createdSupplierPayment.paymentNumber }
+          }),
+          ...(transactionResult.createdFinancialPayments && transactionResult.createdFinancialPayments.length > 0 && {
+            financialPayments: transactionResult.createdFinancialPayments.map(fp => ({ type: 'FinancialPayment', id: fp._id, referCode: fp.referCode, amount: fp.amount, relatedModel: fp.relatedModel }))
           }),
         };
       }
@@ -721,6 +783,7 @@ const createJournalPaymentVoucher = async (req, res) => {
       .populate('user', 'name email')
       .populate('relatedPayment', 'paymentNumber amount')
       .populate('relatedSupplierPayment', 'paymentNumber amount')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     const responseData = { voucher: populatedVoucher };
@@ -1223,6 +1286,7 @@ const postJournalPaymentVoucher = async (req, res) => {
       .populate('postedBy', 'name email')
       .populate('relatedPayment', 'paymentNumber amount')
       .populate('relatedSupplierPayment', 'paymentNumber amount')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({
