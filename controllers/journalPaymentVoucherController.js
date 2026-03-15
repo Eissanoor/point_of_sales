@@ -429,7 +429,7 @@ const createJournalPaymentVoucher = async (req, res) => {
             debit: 5000,
             credit: 0
           },
-          validAccountModels: ["BankAccount", "CashAccount", "Supplier", "Customer", "Expense", "Income", "Asset", "Liability", "Equity"]
+          validAccountModels: ["BankAccount", "CashAccount", "Supplier", "Customer", "Expense", "Income", "Asset", "Liability", "Equity", "PartnershipAccount", "CashBook", "Capital", "Owner", "Employee", "PropertyAccount"]
         });
       }
       
@@ -446,11 +446,17 @@ const createJournalPaymentVoucher = async (req, res) => {
           'income': 'Income',
           'asset': 'Asset',
           'liability': 'Liability',
-          'equity': 'Equity'
+          'equity': 'Equity',
+          'partnershipaccount': 'PartnershipAccount',
+          'cashbook': 'CashBook',
+          'capital': 'Capital',
+          'owner': 'Owner',
+          'employee': 'Employee',
+          'propertyaccount': 'PropertyAccount',
         };
         accountModel = accountModelMap[accountModel.toLowerCase()] || accountModel;
       }
-      
+
       // Store normalized accountModel back to entry for later use
       entry.accountModel = accountModel;
       const debit = typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0);
@@ -615,7 +621,13 @@ const createJournalPaymentVoucher = async (req, res) => {
           'income': 'Income',
           'asset': 'Asset',
           'liability': 'Liability',
-          'equity': 'Equity'
+          'equity': 'Equity',
+          'partnershipaccount': 'PartnershipAccount',
+          'cashbook': 'CashBook',
+          'capital': 'Capital',
+          'owner': 'Owner',
+          'employee': 'Employee',
+          'propertyaccount': 'PropertyAccount',
         };
         accountModel = accountModelMap[accountModel.toLowerCase()] || accountModel;
       }
