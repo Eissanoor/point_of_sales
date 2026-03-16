@@ -22,7 +22,7 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     },
     cashAccount: {
       type: String,
-      required: true,
+      required: false,
       trim: true,
       // Can be a cash register name, shop name, or warehouse name
     },
