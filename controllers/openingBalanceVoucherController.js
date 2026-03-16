@@ -16,7 +16,7 @@ const getOpeningBalanceVouchers = async (req, res) => {
 
     const vouchers = await features.query
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
+      .populate('account')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name')
       .populate('postedBy', 'name email')
@@ -56,7 +56,7 @@ const getOpeningBalanceVoucherById = async (req, res) => {
   try {
     const voucher = await OpeningBalanceVoucher.findById(req.params.id)
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
+      .populate('account')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
       .populate('postedBy', 'name email')
@@ -93,7 +93,11 @@ const createOpeningBalanceVoucher = async (req, res) => {
       financialYear,
       periodStartDate,
       periodEndDate,
-      entries,
+      account,
+      accountModel,
+      accountName,
+      voucherType,
+      amount,
       currency,
       currencyExchangeRate,
       referenceNumber,
@@ -107,149 +111,6 @@ const createOpeningBalanceVoucher = async (req, res) => {
     console.log('req.file:', req.file);
     console.log('attachments from req.body:', attachments);
     console.log('attachments type:', typeof attachments);
-    console.log('entries from req.body:', entries);
-    console.log('entries type:', typeof entries);
-    
-    // Parse entries if it comes as a string (from form-data)
-    let parsedEntries = entries;
-    
-    if (typeof entries === 'string') {
-      try {
-        let cleanString = entries.trim();
-        if ((cleanString.startsWith('"') && cleanString.endsWith('"')) || 
-            (cleanString.startsWith("'") && cleanString.endsWith("'"))) {
-          cleanString = cleanString.slice(1, -1);
-        }
-        cleanString = cleanString
-          .replace(/\\n/g, '')
-          .replace(/\\r/g, '')
-          .replace(/\\t/g, '')
-          .replace(/\\'/g, "'")
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, '\\');
-        
-        const parsed = JSON.parse(cleanString);
-        if (Array.isArray(parsed)) {
-          parsedEntries = parsed;
-        }
-      } catch (parseError) {
-        console.error('Error parsing entries string:', parseError);
-        return res.status(400).json({
-          status: 'fail',
-          message: 'Invalid entries format. Entries must be a valid JSON array.',
-        });
-      }
-    }
-    
-    // Handle form-data array notation
-    if (!Array.isArray(parsedEntries) && typeof parsedEntries === 'object' && parsedEntries !== null) {
-      const keys = Object.keys(parsedEntries);
-      const numericKeys = keys.filter(key => /^\d+$/.test(key));
-      if (numericKeys.length > 0) {
-        parsedEntries = numericKeys
-          .sort((a, b) => parseInt(a) - parseInt(b))
-          .map(key => {
-            const entryValue = parsedEntries[key];
-            if (typeof entryValue === 'string') {
-              try {
-                return JSON.parse(entryValue);
-              } catch (e) {
-                return entryValue;
-              }
-            }
-            return entryValue;
-          });
-      }
-    }
-    
-    // Validate entries
-    if (!parsedEntries || !Array.isArray(parsedEntries) || parsedEntries.length < 1) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Opening balance voucher must have at least 1 entry. Please provide entries as a JSON array.',
-        receivedEntries: entries,
-        parsedEntries: parsedEntries,
-      });
-    }
-
-    // Validate each entry
-    for (let i = 0; i < parsedEntries.length; i++) {
-      const entry = parsedEntries[i];
-      
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Entry ${i} is invalid. Each entry must be an object with account, accountModel, debit/credit fields.`,
-          receivedEntry: entry,
-        });
-      }
-      
-      if (!entry.account) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Entry ${i} is missing the 'account' field.`,
-          receivedEntry: entry,
-        });
-      }
-      
-      // Handle accountModel
-      let accountModel = entry.accountModel;
-      if (Array.isArray(accountModel)) {
-        accountModel = accountModel[0];
-      }
-      
-      if (!accountModel || (typeof accountModel !== 'string' && !Array.isArray(entry.accountModel))) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Entry ${i} is missing the 'accountModel' field.`,
-          receivedEntry: entry,
-          validAccountModels: ["BankAccount", "CashAccount", "Supplier", "Customer", "Expense", "Income", "Asset", "Liability", "Equity"]
-        });
-      }
-      
-      // Normalize accountModel
-      if (typeof accountModel === 'string') {
-        accountModel = accountModel.trim();
-        const accountModelMap = {
-          'bankaccount': 'BankAccount',
-          'cashaccount': 'CashAccount',
-          'supplier': 'Supplier',
-          'customer': 'Customer',
-          'expense': 'Expense',
-          'income': 'Income',
-          'asset': 'Asset',
-          'liability': 'Liability',
-          'equity': 'Equity'
-        };
-        accountModel = accountModelMap[accountModel.toLowerCase()] || accountModel;
-      }
-      
-      entry.accountModel = accountModel;
-      
-      const debit = typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0);
-      const credit = typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0);
-      
-      if (debit < 0 || credit < 0) {
-        return res.status(400).json({
-          status: 'fail',
-          message: 'Debit and credit amounts cannot be negative',
-        });
-      }
-      
-      if (debit > 0 && credit > 0) {
-        return res.status(400).json({
-          status: 'fail',
-          message: 'An entry cannot have both debit and credit amounts',
-        });
-      }
-      
-      if (debit === 0 && credit === 0) {
-        return res.status(400).json({
-          status: 'fail',
-          message: 'An entry must have either a debit or credit amount',
-        });
-      }
-    }
 
     // Handle file uploads for attachments
     let uploadedAttachments = [];
@@ -346,44 +207,69 @@ const createOpeningBalanceVoucher = async (req, res) => {
       });
     }
 
-    // Normalize entries
-    const normalizedEntries = parsedEntries.map(entry => {
-      let accountModel = entry.accountModel;
-      if (Array.isArray(accountModel)) {
-        accountModel = accountModel[0];
-      }
-      if (typeof accountModel === 'string') {
-        accountModel = accountModel.trim();
-        const accountModelMap = {
-          'bankaccount': 'BankAccount',
-          'cashaccount': 'CashAccount',
-          'supplier': 'Supplier',
-          'customer': 'Customer',
-          'expense': 'Expense',
-          'income': 'Income',
-          'asset': 'Asset',
-          'liability': 'Liability',
-          'equity': 'Equity'
-        };
-        accountModel = accountModelMap[accountModel.toLowerCase()] || accountModel;
-      }
-      
-      return {
-        account: entry.account,
-        accountModel: accountModel,
-        accountName: entry.accountName || '',
-        debit: typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0),
-        credit: typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0),
-        description: entry.description || '',
+    // Validate required single-account opening balance fields
+    if (!account) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Opening balance voucher must have an account',
+      });
+    }
+
+    if (!accountModel) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Opening balance voucher must have an accountModel',
+        validAccountModels: ["BankAccount", "CashAccount", "Supplier", "Customer", "Expense", "Income", "Asset", "Liability", "Equity"],
+      });
+    }
+
+    if (!voucherType || !['start', 'end'].includes(String(voucherType).toLowerCase())) {
+      return res.status(400).json({
+        status: 'fail',
+        message: "Opening balance voucher must have a valid voucherType of 'start' or 'end'",
+      });
+    }
+
+    let normalizedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
+    if (isNaN(normalizedAmount) || normalizedAmount <= 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Opening balance voucher must have a positive amount',
+      });
+    }
+
+    // Normalize accountModel
+    let normalizedAccountModel = accountModel;
+    if (Array.isArray(normalizedAccountModel)) {
+      normalizedAccountModel = normalizedAccountModel[0];
+    }
+    if (typeof normalizedAccountModel === 'string') {
+      normalizedAccountModel = normalizedAccountModel.trim();
+      const accountModelMap = {
+        bankaccount: 'BankAccount',
+        cashaccount: 'CashAccount',
+        supplier: 'Supplier',
+        customer: 'Customer',
+        expense: 'Expense',
+        income: 'Income',
+        asset: 'Asset',
+        liability: 'Liability',
+        equity: 'Equity',
       };
-    });
+      normalizedAccountModel =
+        accountModelMap[normalizedAccountModel.toLowerCase()] || normalizedAccountModel;
+    }
 
     // Create voucher
     const voucherData = {
       financialYear: financialYear || new Date().getFullYear().toString(),
       periodStartDate: periodStartDate ? new Date(periodStartDate) : new Date(),
       periodEndDate: periodEndDate ? new Date(periodEndDate) : undefined,
-      entries: normalizedEntries,
+      account,
+      accountModel: normalizedAccountModel,
+      accountName: accountName || '',
+      voucherType: String(voucherType).toLowerCase(),
+      amount: normalizedAmount,
       currency,
       currencyExchangeRate: currencyExchangeRate ? (typeof currencyExchangeRate === 'string' ? parseFloat(currencyExchangeRate) : currencyExchangeRate) : 1,
       referenceNumber,
@@ -422,7 +308,7 @@ const createOpeningBalanceVoucher = async (req, res) => {
 
     const populatedVoucher = await OpeningBalanceVoucher.findById(voucher._id)
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
+      .populate('account')
       .populate('user', 'name email')
       .select('-__v');
 
@@ -496,7 +382,11 @@ const updateOpeningBalanceVoucher = async (req, res) => {
       financialYear,
       periodStartDate,
       periodEndDate,
-      entries,
+      account,
+      accountModel,
+      accountName,
+      voucherType,
+      amount,
       currency,
       currencyExchangeRate,
       referenceNumber,
@@ -507,97 +397,59 @@ const updateOpeningBalanceVoucher = async (req, res) => {
       attachments,
     } = req.body;
 
-    // Handle entries if provided (similar to create)
-    if (entries !== undefined) {
-      let parsedEntries = entries;
-      
-      if (typeof entries === 'string') {
-        try {
-          let cleanString = entries.trim();
-          if ((cleanString.startsWith('"') && cleanString.endsWith('"')) || 
-              (cleanString.startsWith("'") && cleanString.endsWith("'"))) {
-            cleanString = cleanString.slice(1, -1);
-          }
-          cleanString = cleanString
-            .replace(/\\n/g, '')
-            .replace(/\\r/g, '')
-            .replace(/\\t/g, '')
-            .replace(/\\'/g, "'")
-            .replace(/\\"/g, '"')
-            .replace(/\\\\/g, '\\');
-          
-          const parsed = JSON.parse(cleanString);
-          if (Array.isArray(parsed)) {
-            parsedEntries = parsed;
-          }
-        } catch (parseError) {
-          return res.status(400).json({
-            status: 'fail',
-            message: 'Invalid entries format.',
-          });
-        }
+    // Update single-account opening balance fields if provided
+    if (account !== undefined) {
+      voucher.account = account;
+    }
+
+    if (accountModel !== undefined) {
+      let normalizedAccountModel = accountModel;
+      if (Array.isArray(normalizedAccountModel)) {
+        normalizedAccountModel = normalizedAccountModel[0];
       }
-      
-      if (!Array.isArray(parsedEntries) && typeof parsedEntries === 'object' && parsedEntries !== null) {
-        const keys = Object.keys(parsedEntries);
-        const numericKeys = keys.filter(key => /^\d+$/.test(key));
-        if (numericKeys.length > 0) {
-          parsedEntries = numericKeys
-            .sort((a, b) => parseInt(a) - parseInt(b))
-            .map(key => {
-              const entryValue = parsedEntries[key];
-              if (typeof entryValue === 'string') {
-                try {
-                  return JSON.parse(entryValue);
-                } catch (e) {
-                  return entryValue;
-                }
-              }
-              return entryValue;
-            });
-        }
+      if (typeof normalizedAccountModel === 'string') {
+        normalizedAccountModel = normalizedAccountModel.trim();
+        const accountModelMap = {
+          bankaccount: 'BankAccount',
+          cashaccount: 'CashAccount',
+          supplier: 'Supplier',
+          customer: 'Customer',
+          expense: 'Expense',
+          income: 'Income',
+          asset: 'Asset',
+          liability: 'Liability',
+          equity: 'Equity',
+        };
+        normalizedAccountModel =
+          accountModelMap[normalizedAccountModel.toLowerCase()] || normalizedAccountModel;
       }
-      
-      if (!Array.isArray(parsedEntries) || parsedEntries.length < 1) {
+      voucher.accountModel = normalizedAccountModel;
+    }
+
+    if (accountName !== undefined) {
+      voucher.accountName = accountName;
+    }
+
+    if (voucherType !== undefined) {
+      const normalizedType = String(voucherType).toLowerCase();
+      if (!['start', 'end'].includes(normalizedType)) {
         return res.status(400).json({
           status: 'fail',
-          message: 'Opening balance voucher must have at least 1 entry',
+          message: "voucherType must be either 'start' or 'end'",
         });
       }
+      voucher.voucherType = normalizedType;
+    }
 
-      // Normalize entries
-      const normalizedEntries = parsedEntries.map(entry => {
-        let accountModel = entry.accountModel;
-        if (Array.isArray(accountModel)) {
-          accountModel = accountModel[0];
-        }
-        if (typeof accountModel === 'string') {
-          accountModel = accountModel.trim();
-          const accountModelMap = {
-            'bankaccount': 'BankAccount',
-            'cashaccount': 'CashAccount',
-            'supplier': 'Supplier',
-            'customer': 'Customer',
-            'expense': 'Expense',
-            'income': 'Income',
-            'asset': 'Asset',
-            'liability': 'Liability',
-            'equity': 'Equity'
-          };
-          accountModel = accountModelMap[accountModel.toLowerCase()] || accountModel;
-        }
-        
-        return {
-          account: entry.account,
-          accountModel: accountModel,
-          accountName: entry.accountName || '',
-          debit: typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0),
-          credit: typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0),
-          description: entry.description || '',
-        };
-      });
-
-      voucher.entries = normalizedEntries;
+    if (amount !== undefined) {
+      const normalizedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
+      if (isNaN(normalizedAmount) || normalizedAmount <= 0) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'amount must be a positive number',
+        });
+      }
+      voucher.amount = normalizedAmount;
     }
 
     // Handle attachments (similar to create)
@@ -705,7 +557,7 @@ const updateOpeningBalanceVoucher = async (req, res) => {
 
     const populatedVoucher = await OpeningBalanceVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
+      .populate('account')
       .populate('user', 'name email')
       .select('-__v');
 
@@ -755,7 +607,7 @@ const approveOpeningBalanceVoucher = async (req, res) => {
 
     const populatedVoucher = await OpeningBalanceVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
+      .populate('account')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
       .select('-__v');
@@ -809,7 +661,7 @@ const rejectOpeningBalanceVoucher = async (req, res) => {
 
     const populatedVoucher = await OpeningBalanceVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
+      .populate('account')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
       .select('-__v');

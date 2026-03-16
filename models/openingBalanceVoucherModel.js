@@ -2,39 +2,6 @@ const mongoose = require('mongoose');
 const autoIncrementPlugin = require('./autoIncrementPlugin');
 const { generateReferCode } = require('../utils/referCodeGenerator');
 
-// Opening Balance Entry Schema
-const openingBalanceEntrySchema = new mongoose.Schema({
-  account: {
-    type: mongoose.Schema.Types.ObjectId,
-    required: true,
-    refPath: 'accountModel',
-  },
-  accountModel: {
-    type: String,
-    required: true,
-    enum: ['BankAccount', 'CashAccount', 'Supplier', 'Customer', 'Expense', 'Income', 'Asset', 'Liability', 'Equity'],
-  },
-  accountName: {
-    type: String,
-    trim: true,
-  },
-  // Opening balance can be debit or credit
-  debit: {
-    type: Number,
-    default: 0,
-    min: 0,
-  },
-  credit: {
-    type: Number,
-    default: 0,
-    min: 0,
-  },
-  description: {
-    type: String,
-    trim: true,
-  },
-}, { _id: true });
-
 const openingBalanceVoucherSchema = new mongoose.Schema(
   {
     voucherNumber: {
@@ -61,28 +28,32 @@ const openingBalanceVoucherSchema = new mongoose.Schema(
       type: Date,
       required: false,
     },
-    // Opening balance entries
-    entries: {
-      type: [openingBalanceEntrySchema],
+    // Single account for this opening balance voucher
+    account: {
+      type: mongoose.Schema.Types.ObjectId,
       required: true,
-      validate: {
-        validator: function(v) {
-          // Must have at least 1 entry
-          if (!Array.isArray(v) || v.length < 1) {
-            return false;
-          }
-          
-          // Each entry must have either debit or credit (not both, not neither)
-          const allValid = v.every(entry => {
-            const hasDebit = entry.debit > 0;
-            const hasCredit = entry.credit > 0;
-            return (hasDebit && !hasCredit) || (!hasDebit && hasCredit);
-          });
-          
-          return allValid;
-        },
-        message: 'Opening balance entries must have at least 1 entry, and each entry must have either debit OR credit (not both, not neither)'
-      }
+      refPath: 'accountModel',
+    },
+    accountModel: {
+      type: String,
+      required: true,
+      enum: ['BankAccount', 'CashAccount', 'Supplier', 'Customer', 'Expense', 'Income', 'Asset', 'Liability', 'Equity'],
+    },
+    accountName: {
+      type: String,
+      trim: true,
+    },
+    // Type of voucher: start (opening) or end (closing)
+    voucherType: {
+      type: String,
+      required: true,
+      enum: ['start', 'end'],
+    },
+    // Balance amount for this voucher
+    amount: {
+      type: Number,
+      required: true,
+      min: 0,
     },
     currency: {
       type: mongoose.Schema.Types.ObjectId,
@@ -276,25 +247,13 @@ openingBalanceVoucherSchema.pre('save', async function(next) {
   }
 });
 
-// Virtual for total debit amount
-openingBalanceVoucherSchema.virtual('totalDebits').get(function() {
-  if (!this.entries || !Array.isArray(this.entries)) return 0;
-  return this.entries.reduce((sum, entry) => sum + (entry.debit || 0), 0);
-});
-
-// Virtual for total credit amount
-openingBalanceVoucherSchema.virtual('totalCredits').get(function() {
-  if (!this.entries || !Array.isArray(this.entries)) return 0;
-  return this.entries.reduce((sum, entry) => sum + (entry.credit || 0), 0);
-});
-
 // Create indices for better query performance
 openingBalanceVoucherSchema.index({ voucherNumber: 1 }, { unique: true });
 openingBalanceVoucherSchema.index({ voucherDate: -1 });
 openingBalanceVoucherSchema.index({ financialYear: 1 });
 openingBalanceVoucherSchema.index({ status: 1 });
-openingBalanceVoucherSchema.index({ 'entries.account': 1 });
-openingBalanceVoucherSchema.index({ 'entries.accountModel': 1 });
+openingBalanceVoucherSchema.index({ account: 1 });
+openingBalanceVoucherSchema.index({ accountModel: 1 });
 
 const OpeningBalanceVoucher = mongoose.model('OpeningBalanceVoucher', openingBalanceVoucherSchema);
 
