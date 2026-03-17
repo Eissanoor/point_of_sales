@@ -14,6 +14,7 @@ const createFinancialPayment = async (req, res) => {
       amount,
       paymentDate,
       method,
+      effect,
       relatedModel,
       relatedId,
       isActive,
@@ -35,6 +36,7 @@ const createFinancialPayment = async (req, res) => {
       amount: typeof amount === 'string' ? parseFloat(amount) : amount,
       paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
       method,
+      effect,
       relatedModel,
       relatedId,
       isActive,
@@ -151,6 +153,7 @@ const updateFinancialPayment = async (req, res) => {
       amount,
       paymentDate,
       method,
+      effect,
       relatedModel,
       relatedId,
       isActive,
@@ -171,6 +174,7 @@ const updateFinancialPayment = async (req, res) => {
       }
     }
     if (method !== undefined) financialPayment.method = method;
+    if (effect !== undefined) financialPayment.effect = effect;
     if (relatedModel !== undefined)
       financialPayment.relatedModel = relatedModel;
     if (relatedId !== undefined) financialPayment.relatedId = relatedId;
@@ -238,6 +242,7 @@ const getFinancialPaymentsByRelated = async (req, res) => {
 
     const allowedModels = [
       'Asset',
+      'Expense',
       'Income',
       'Liability',
       'PartnershipAccount',
@@ -269,10 +274,12 @@ const getFinancialPaymentsByRelated = async (req, res) => {
       .sort({ paymentDate: -1 })
       .select('-__v');
 
-    const totalAmount = payments.reduce(
-      (sum, payment) => sum + (payment.amount || 0),
-      0
-    );
+    // Signed total based on effect: subtract => negative, add => positive
+    const totalAmount = payments.reduce((sum, payment) => {
+      const amt = payment.amount || 0;
+      const sign = payment.effect === 'subtract' ? -1 : 1;
+      return sum + sign * amt;
+    }, 0);
 
     res.status(200).json({
       status: 'success',
