@@ -107,6 +107,7 @@ const getJournalPaymentVoucherById = async (req, res) => {
 // Account models that create FinancialPayment (must match FinancialPayment.relatedModel enum)
 const FINANCIAL_ACCOUNT_MODELS = [
   'Asset',
+  'Expense',
   'Income',
   'Liability',
   'PartnershipAccount',
@@ -284,7 +285,10 @@ const createTransactionsFromJournalEntries = async (voucher, userId) => {
       }
     }
 
-    // Asset, Income, Liability, Capital, Owner, Employee, etc. → FinancialPayment (debit = add, credit = subtract)
+    // Asset, Expense, Income, Liability, Capital, Owner, Employee, etc. → FinancialPayment
+    // Business rule for journal-payment-voucher:
+    // - debit  => subtract from that account
+    // - credit => add to that account
     const amount = debit > 0 ? debit : credit;
     const isDebit = debit > 0;
     if (amount > 0 && FINANCIAL_ACCOUNT_MODELS.includes(normalizedModel)) {
@@ -297,6 +301,7 @@ const createTransactionsFromJournalEntries = async (voucher, userId) => {
           amount,
           paymentDate,
           method: 'other',
+          effect: isDebit ? 'subtract' : 'add',
           relatedModel: normalizedModel,
           relatedId: entry.account,
           user: userId,

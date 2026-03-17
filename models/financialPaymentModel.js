@@ -36,10 +36,16 @@ const financialPaymentSchema = new mongoose.Schema(
       enum: ['cash', 'bank_transfer', 'check', 'online', 'other'],
       default: 'cash',
     },
+    effect: {
+      type: String,
+      enum: ['add', 'subtract'],
+      default: 'add',
+    },
     relatedModel: {
       type: String,
       enum: [
         'Asset',
+        'Expense',
         'Income',
         'Liability',
         'PartnershipAccount',
