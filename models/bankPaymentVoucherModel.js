@@ -219,6 +219,11 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // When true, `balance` on the linked BankAccount has already been adjusted for this voucher
+    bankBalanceApplied: {
+      type: Boolean,
+      default: false,
+    },
     referCode: {
       type: String,
       unique: true,
