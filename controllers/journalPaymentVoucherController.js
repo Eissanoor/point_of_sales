@@ -24,6 +24,7 @@ const getJournalPaymentVouchers = async (req, res) => {
     const vouchers = await features.query
       .populate('currency', 'name code symbol')
       .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name')
       .populate('postedBy', 'name email')
@@ -71,6 +72,7 @@ const getJournalPaymentVoucherById = async (req, res) => {
     const voucher = await JournalPaymentVoucher.findById(req.params.id)
       .populate('currency', 'name code symbol')
       .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
       .populate('postedBy', 'name email')
@@ -117,6 +119,49 @@ const FINANCIAL_ACCOUNT_MODELS = [
   'Employee',
   'PropertyAccount',
 ];
+
+/** Statuses where selected entry bank-account balances should be posted. */
+const JOURNAL_BANK_BALANCE_POSTED_STATUSES = ['completed', 'posted'];
+
+/**
+ * Apply bank balance changes from voucher entries exactly once:
+ * - entry.debit on selected bankAccount => subtract balance
+ * - entry.credit on selected bankAccount => add balance
+ */
+const applyBankBalanceForJournalVoucher = async (voucherId) => {
+  if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
+
+  const voucher = await JournalPaymentVoucher.findById(voucherId);
+  if (!voucher || voucher.bankBalanceApplied) return;
+  if (!JOURNAL_BANK_BALANCE_POSTED_STATUSES.includes(voucher.status)) return;
+  if (!Array.isArray(voucher.entries) || voucher.entries.length === 0) return;
+
+  for (const entry of voucher.entries) {
+    if (!entry || !entry.bankAccount) continue;
+
+    const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
+    const credit = typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
+
+    // User rule: debit => subtract, credit => add
+    let delta = 0;
+    if (Number.isFinite(debit) && debit > 0) delta -= debit;
+    if (Number.isFinite(credit) && credit > 0) delta += credit;
+    if (!Number.isFinite(delta) || delta === 0) continue;
+
+    const bank = await BankAccount.findByIdAndUpdate(
+      entry.bankAccount,
+      { $inc: { balance: delta } },
+      { new: true }
+    );
+
+    if (!bank) {
+      console.error('applyBankBalanceForJournalVoucher: bank account not found', entry.bankAccount);
+    }
+  }
+
+  voucher.bankBalanceApplied = true;
+  await voucher.save();
+};
 
 /**
  * Create Payment (customer debit), SupplierPayment (supplier credit), and FinancialPayment
@@ -453,6 +498,7 @@ const createJournalPaymentVoucher = async (req, res) => {
           receivedEntry: entry,
           example: {
             account: "507f1f77bcf86cd799439011",
+            bankAccount: "507f1f77bcf86cd799439012",
             accountModel: "BankAccount",
             accountName: "Main Bank Account",
             debit: 5000,
@@ -469,6 +515,7 @@ const createJournalPaymentVoucher = async (req, res) => {
           receivedEntry: entry,
           example: {
             account: "507f1f77bcf86cd799439011",
+            bankAccount: "507f1f77bcf86cd799439012",
             accountModel: "BankAccount",
             debit: 5000,
             credit: 0
@@ -489,6 +536,7 @@ const createJournalPaymentVoucher = async (req, res) => {
           receivedEntry: entry,
           example: {
             account: "507f1f77bcf86cd799439011",
+            bankAccount: "507f1f77bcf86cd799439012",
             accountModel: "BankAccount",
             debit: 5000,
             credit: 0
@@ -523,6 +571,18 @@ const createJournalPaymentVoucher = async (req, res) => {
 
       // Store normalized accountModel back to entry for later use
       entry.accountModel = accountModel;
+
+      // Validate selected bankAccount in entry (optional)
+      if (entry.bankAccount) {
+        const bankAccountExists = await BankAccount.findById(entry.bankAccount);
+        if (!bankAccountExists) {
+          return res.status(404).json({
+            status: 'fail',
+            message: `Entry ${i} has invalid bank account. Bank account not found.`,
+          });
+        }
+      }
+
       const debit = typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0);
       const credit = typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0);
       
@@ -698,6 +758,7 @@ const createJournalPaymentVoucher = async (req, res) => {
       
       return {
         account: entry.account,
+        bankAccount: entry.bankAccount || undefined,
         accountModel: accountModel,
         accountName: entry.accountName || '',
         debit: typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0),
@@ -781,6 +842,10 @@ const createJournalPaymentVoucher = async (req, res) => {
       }
     }
 
+    if (JOURNAL_BANK_BALANCE_POSTED_STATUSES.includes(voucherStatus)) {
+      await applyBankBalanceForJournalVoucher(voucher._id);
+    }
+
     // Populate before sending response (voucher may have been updated with relatedPayment/relatedSupplierPayment)
     const populatedVoucher = await JournalPaymentVoucher.findById(voucher._id)
       .populate('currency', 'name code symbol')
@@ -851,6 +916,8 @@ const updateJournalPaymentVoucher = async (req, res) => {
         message: 'Journal payment voucher not found',
       });
     }
+
+    const previousStatus = voucher.status;
 
     // Prevent updates if status is completed, posted or cancelled
     if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
@@ -964,8 +1031,22 @@ const updateJournalPaymentVoucher = async (req, res) => {
       }
 
       // Normalize entries
+      for (let i = 0; i < parsedEntries.length; i++) {
+        const entry = parsedEntries[i];
+        if (entry.bankAccount) {
+          const bankAccountExists = await BankAccount.findById(entry.bankAccount);
+          if (!bankAccountExists) {
+            return res.status(404).json({
+              status: 'fail',
+              message: `Entry ${i} has invalid bank account. Bank account not found.`,
+            });
+          }
+        }
+      }
+
       const normalizedEntries = parsedEntries.map(entry => ({
         account: entry.account,
+        bankAccount: entry.bankAccount || undefined,
         accountModel: entry.accountModel,
         accountName: entry.accountName || '',
         debit: typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0),
@@ -1120,10 +1201,17 @@ const updateJournalPaymentVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
+    const wasPosted = JOURNAL_BANK_BALANCE_POSTED_STATUSES.includes(previousStatus);
+    const isPosted = JOURNAL_BANK_BALANCE_POSTED_STATUSES.includes(updatedVoucher.status);
+    if (!wasPosted && isPosted) {
+      await applyBankBalanceForJournalVoucher(updatedVoucher._id);
+    }
+
     // Populate before sending response
     const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
       .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
       .select('-__v');
 
@@ -1174,6 +1262,7 @@ const approveJournalPaymentVoucher = async (req, res) => {
     const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
       .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
       .select('-__v');
@@ -1228,6 +1317,7 @@ const rejectJournalPaymentVoucher = async (req, res) => {
     const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
       .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
       .select('-__v');
@@ -1281,12 +1371,15 @@ const postJournalPaymentVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
+    await applyBankBalanceForJournalVoucher(updatedVoucher._id);
+
     // Create Payment/SupplierPayment from entries if not already created (e.g. when posting a draft)
     await createTransactionsFromJournalEntries(updatedVoucher, req.user._id);
 
     const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
       .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
       .populate('postedBy', 'name email')
       .populate('relatedPayment', 'paymentNumber amount')
@@ -1344,6 +1437,7 @@ const cancelJournalPaymentVoucher = async (req, res) => {
     const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
       .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
       .select('-__v');
 

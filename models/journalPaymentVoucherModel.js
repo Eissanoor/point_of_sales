@@ -9,6 +9,11 @@ const journalEntrySchema = new mongoose.Schema({
     required: true,
     refPath: 'accountModel',
   },
+  bankAccount: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BankAccount',
+    required: false,
+  },
   accountModel: {
     type: String,
     required: true,
@@ -208,6 +213,11 @@ const journalPaymentVoucherSchema = new mongoose.Schema(
     isActive: {
       type: Boolean,
       default: true,
+    },
+    // When true, selected entry bank accounts are already updated for this voucher
+    bankBalanceApplied: {
+      type: Boolean,
+      default: false,
     },
     referCode: {
       type: String,
