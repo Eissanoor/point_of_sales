@@ -120,6 +120,61 @@ const FINANCIAL_ACCOUNT_MODELS = [
   'PropertyAccount',
 ];
 
+const JOURNAL_ACCOUNT_MODEL_MAP = {
+  bankaccount: 'BankAccount',
+  cashaccount: 'CashAccount',
+  supplier: 'Supplier',
+  customer: 'Customer',
+  expense: 'Expense',
+  income: 'Income',
+  asset: 'Asset',
+  liability: 'Liability',
+  equity: 'Equity',
+  partnershipaccount: 'PartnershipAccount',
+  cashbook: 'CashBook',
+  capital: 'Capital',
+  owner: 'Owner',
+  employee: 'Employee',
+  propertyaccount: 'PropertyAccount',
+};
+
+/**
+ * Normalize accountModel string on a journal line (mutates entry).
+ */
+const normalizeJournalEntryAccountModel = (entry) => {
+  let accountModel = entry.accountModel;
+  if (Array.isArray(accountModel)) accountModel = accountModel[0];
+  if (typeof accountModel !== 'string') return '';
+  accountModel = accountModel.trim();
+  const normalized = JOURNAL_ACCOUNT_MODEL_MAP[accountModel.toLowerCase()] || accountModel;
+  entry.accountModel = normalized;
+  return normalized;
+};
+
+/**
+ * Bank lines: client may send only bankAccount (no duplicate account id).
+ * Sync account <-> bankAccount when accountModel is BankAccount.
+ */
+const resolveJournalEntryBankAccountRefs = (entry) => {
+  const model = entry.accountModel;
+  if (model !== 'BankAccount') return;
+
+  const accEmpty =
+    entry.account === undefined ||
+    entry.account === null ||
+    (typeof entry.account === 'string' && entry.account.trim() === '');
+  const bankEmpty =
+    entry.bankAccount === undefined ||
+    entry.bankAccount === null ||
+    (typeof entry.bankAccount === 'string' && entry.bankAccount.trim() === '');
+
+  if (accEmpty && !bankEmpty) {
+    entry.account = typeof entry.bankAccount === 'string' ? entry.bankAccount.trim() : entry.bankAccount;
+  } else if (bankEmpty && !accEmpty) {
+    entry.bankAccount = typeof entry.account === 'string' ? entry.account.trim() : entry.account;
+  }
+};
+
 /** Statuses where selected entry bank-account balances should be posted. */
 const JOURNAL_BANK_BALANCE_POSTED_STATUSES = ['completed', 'posted'];
 
@@ -507,28 +562,13 @@ const createJournalPaymentVoucher = async (req, res) => {
           }
         });
       }
-      
-      if (!entry.account) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Entry ${i} is missing the 'account' field. Each entry must have an account (ObjectId).`,
-          receivedEntry: entry,
-          example: {
-            account: "507f1f77bcf86cd799439011",
-            bankAccount: "507f1f77bcf86cd799439012",
-            accountModel: "BankAccount",
-            debit: 5000,
-            credit: 0
-          }
-        });
-      }
-      // Handle accountModel - it might come as an array from form-data
+
+      // accountModel first — needed to resolve bank line (bankAccount-only is valid for BankAccount)
       let accountModel = entry.accountModel;
       if (Array.isArray(accountModel)) {
-        // If it's an array, take the first element
         accountModel = accountModel[0];
       }
-      
+
       if (!accountModel || (typeof accountModel !== 'string' && !Array.isArray(entry.accountModel))) {
         return res.status(400).json({
           status: 'fail',
@@ -544,33 +584,23 @@ const createJournalPaymentVoucher = async (req, res) => {
           validAccountModels: ["BankAccount", "CashAccount", "Supplier", "Customer", "Expense", "Income", "Asset", "Liability", "Equity", "PartnershipAccount", "CashBook", "Capital", "Owner", "Employee", "PropertyAccount"]
         });
       }
-      
-      // Normalize accountModel - convert to proper case
-      if (typeof accountModel === 'string') {
-        // Convert common variations to proper format
-        accountModel = accountModel.trim();
-        const accountModelMap = {
-          'bankaccount': 'BankAccount',
-          'cashaccount': 'CashAccount',
-          'supplier': 'Supplier',
-          'customer': 'Customer',
-          'expense': 'Expense',
-          'income': 'Income',
-          'asset': 'Asset',
-          'liability': 'Liability',
-          'equity': 'Equity',
-          'partnershipaccount': 'PartnershipAccount',
-          'cashbook': 'CashBook',
-          'capital': 'Capital',
-          'owner': 'Owner',
-          'employee': 'Employee',
-          'propertyaccount': 'PropertyAccount',
-        };
-        accountModel = accountModelMap[accountModel.toLowerCase()] || accountModel;
-      }
 
-      // Store normalized accountModel back to entry for later use
-      entry.accountModel = accountModel;
+      normalizeJournalEntryAccountModel(entry);
+      resolveJournalEntryBankAccountRefs(entry);
+
+      if (!entry.account) {
+        return res.status(400).json({
+          status: 'fail',
+          message: `Entry ${i} is missing the 'account' field. For BankAccount lines you can send bankAccount only (it will be used as account).`,
+          receivedEntry: entry,
+          example: {
+            bankAccount: "507f1f77bcf86cd799439012",
+            accountModel: "BankAccount",
+            debit: 5000,
+            credit: 0
+          }
+        });
+      }
 
       // Validate selected bankAccount in entry (optional)
       if (entry.bankAccount) {
@@ -727,39 +757,14 @@ const createJournalPaymentVoucher = async (req, res) => {
       });
     }
 
-    // Normalize entries (accountModel should already be normalized from validation above)
+    // Normalize entries (validation loop above already normalized; keep helpers in sync)
     const normalizedEntries = parsedEntries.map(entry => {
-      // Handle accountModel normalization again here to be safe
-      let accountModel = entry.accountModel;
-      if (Array.isArray(accountModel)) {
-        accountModel = accountModel[0];
-      }
-      if (typeof accountModel === 'string') {
-        accountModel = accountModel.trim();
-        const accountModelMap = {
-          'bankaccount': 'BankAccount',
-          'cashaccount': 'CashAccount',
-          'supplier': 'Supplier',
-          'customer': 'Customer',
-          'expense': 'Expense',
-          'income': 'Income',
-          'asset': 'Asset',
-          'liability': 'Liability',
-          'equity': 'Equity',
-          'partnershipaccount': 'PartnershipAccount',
-          'cashbook': 'CashBook',
-          'capital': 'Capital',
-          'owner': 'Owner',
-          'employee': 'Employee',
-          'propertyaccount': 'PropertyAccount',
-        };
-        accountModel = accountModelMap[accountModel.toLowerCase()] || accountModel;
-      }
-      
+      normalizeJournalEntryAccountModel(entry);
+      resolveJournalEntryBankAccountRefs(entry);
       return {
         account: entry.account,
         bankAccount: entry.bankAccount || undefined,
-        accountModel: accountModel,
+        accountModel: entry.accountModel,
         accountName: entry.accountName || '',
         debit: typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0),
         credit: typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0),
@@ -1030,9 +1035,23 @@ const updateJournalPaymentVoucher = async (req, res) => {
         });
       }
 
-      // Normalize entries
       for (let i = 0; i < parsedEntries.length; i++) {
         const entry = parsedEntries[i];
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Entry ${i} is invalid.`,
+          });
+        }
+        normalizeJournalEntryAccountModel(entry);
+        resolveJournalEntryBankAccountRefs(entry);
+        if (!entry.account) {
+          return res.status(400).json({
+            status: 'fail',
+            message: `Entry ${i} is missing the 'account' field. For BankAccount lines you can send bankAccount only.`,
+            receivedEntry: entry,
+          });
+        }
         if (entry.bankAccount) {
           const bankAccountExists = await BankAccount.findById(entry.bankAccount);
           if (!bankAccountExists) {
@@ -1044,15 +1063,19 @@ const updateJournalPaymentVoucher = async (req, res) => {
         }
       }
 
-      const normalizedEntries = parsedEntries.map(entry => ({
-        account: entry.account,
-        bankAccount: entry.bankAccount || undefined,
-        accountModel: entry.accountModel,
-        accountName: entry.accountName || '',
-        debit: typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0),
-        credit: typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0),
-        description: entry.description || '',
-      }));
+      const normalizedEntries = parsedEntries.map(entry => {
+        normalizeJournalEntryAccountModel(entry);
+        resolveJournalEntryBankAccountRefs(entry);
+        return {
+          account: entry.account,
+          bankAccount: entry.bankAccount || undefined,
+          accountModel: entry.accountModel,
+          accountName: entry.accountName || '',
+          debit: typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0),
+          credit: typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0),
+          description: entry.description || '',
+        };
+      });
 
       voucher.entries = normalizedEntries;
     }
