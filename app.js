@@ -80,6 +80,9 @@ app.use(morgan('dev')); // Log HTTP requests
 const connectDB = require('./config/db');
 connectDB();
 
+// Register CashAccount model (used by cash vouchers, saraf entries, journal lines)
+require('./models/cashAccountModel');
+
 // Routes
 app.use('/api/users', userRoutes);
 app.use('/api/products', productRoutes);

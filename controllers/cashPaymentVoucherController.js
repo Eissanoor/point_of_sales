@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const CashPaymentVoucher = require('../models/cashPaymentVoucherModel');
+const cashVoucherDoubleEntryHelpers = require('./cashVoucherDoubleEntryHelpers');
 const Shop = require('../models/shopModel');
 const Warehouse = require('../models/warehouseModel');
 const SupplierPayment = require('../models/supplierPaymentModel');
@@ -24,6 +25,9 @@ const getCashPaymentVouchers = async (req, res) => {
 
     const vouchers = await features.query
       .populate('currency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.cashAccount', 'accountName code balance')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('shop', 'name address')
       .populate('warehouse', 'name address')
       .populate('payee', 'name')
@@ -31,6 +35,7 @@ const getCashPaymentVouchers = async (req, res) => {
       .populate('approvalStatus.approvedBy', 'name')
       .populate('relatedPurchase', 'invoiceNumber')
       .populate('relatedSale', 'invoiceNumber')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .sort({ voucherDate: -1 })
       .select('-__v');
 
@@ -67,6 +72,9 @@ const getCashPaymentVoucherById = async (req, res) => {
   try {
     const voucher = await CashPaymentVoucher.findById(req.params.id)
       .populate('currency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.cashAccount', 'accountName code balance')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('shop', 'name address phoneNumber')
       .populate('warehouse', 'name address phoneNumber')
       .populate('payee', 'name email phoneNumber address')
@@ -77,6 +85,7 @@ const getCashPaymentVoucherById = async (req, res) => {
       .populate('relatedPayment', 'paymentNumber amount')
       .populate('relatedSupplierPayment', 'paymentNumber amount')
       .populate('relatedFinancialPayment', 'referCode amount paymentDate method relatedModel relatedId')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     if (!voucher) {
@@ -434,16 +443,240 @@ const createCashPaymentVoucher = async (req, res) => {
       relatedSale,
       relatedPayment,
       relatedSupplierPayment,
+      relatedBankPaymentVoucher,
+      relatedCashPaymentVoucher,
       description,
       notes,
       status,
       attachments,
+      entries,
     } = req.body;
-    
+
+    const parsedCashVoucherEntries =
+      cashVoucherDoubleEntryHelpers.parseCashVoucherEntriesFromBody(entries);
+    if (parsedCashVoucherEntries && parsedCashVoucherEntries.length >= 2) {
+      const normResult = await cashVoucherDoubleEntryHelpers.validateAndNormalizeCashVoucherEntries(
+        parsedCashVoucherEntries
+      );
+      if (!normResult.ok) {
+        return res.status(normResult.response.status).json(normResult.response.body);
+      }
+
+      if (shop) {
+        const shopExists = await Shop.findById(shop);
+        if (!shopExists) {
+          return res.status(404).json({ status: 'fail', message: 'Shop not found' });
+        }
+      }
+      if (warehouse) {
+        const warehouseExists = await Warehouse.findById(warehouse);
+        if (!warehouseExists) {
+          return res.status(404).json({ status: 'fail', message: 'Warehouse not found' });
+        }
+      }
+
+      let uploadedAttachments = [];
+      const parseAttachmentsString = (attachmentsStr) => {
+        if (!attachmentsStr || typeof attachmentsStr !== 'string') return [];
+        try {
+          let cleanString = attachmentsStr.trim();
+          if (
+            (cleanString.startsWith('"') && cleanString.endsWith('"')) ||
+            (cleanString.startsWith("'") && cleanString.endsWith("'"))
+          ) {
+            cleanString = cleanString.slice(1, -1);
+          }
+          cleanString = cleanString
+            .replace(/\\n/g, '')
+            .replace(/\\r/g, '')
+            .replace(/\\t/g, '')
+            .replace(/\\'/g, "'")
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\');
+          const parsed = JSON.parse(cleanString);
+          if (Array.isArray(parsed)) return parsed;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return [parsed];
+          return [];
+        } catch {
+          try {
+            const jsonMatch = attachmentsStr.match(/\[[\s\S]*\]/);
+            if (jsonMatch) {
+              const parsed = JSON.parse(jsonMatch[0]);
+              return Array.isArray(parsed) ? parsed : [parsed];
+            }
+          } catch {
+            /* ignore */
+          }
+          return [];
+        }
+      };
+
+      if (req.file) {
+        try {
+          const uploadResult = await new Promise((resolve, reject) => {
+            const stream = cloudinary.uploader.upload_stream(
+              { folder: 'cash-payment-vouchers' },
+              (error, result) => {
+                if (error) return reject(error);
+                resolve(result);
+              }
+            );
+            stream.end(req.file.buffer);
+          });
+          uploadedAttachments.push({
+            url: String(uploadResult.secure_url || ''),
+            name: String(req.file.originalname || ''),
+            type: String(req.file.mimetype || ''),
+          });
+        } catch (uploadError) {
+          console.error('Error uploading file:', uploadError);
+        }
+      }
+
+      if (attachments !== undefined && attachments !== null) {
+        let parsedAttachments = [];
+        if (Array.isArray(attachments)) parsedAttachments = attachments;
+        else if (typeof attachments === 'string') parsedAttachments = parseAttachmentsString(attachments);
+        else if (typeof attachments === 'object' && !Array.isArray(attachments)) parsedAttachments = [attachments];
+        const normalizedAttachments = parsedAttachments
+          .filter((att) => att && typeof att === 'object' && !Array.isArray(att) && (att.url || att.name))
+          .map((att) => ({
+            url: String(att.url || ''),
+            name: String(att.name || ''),
+            type: String(att.type || att.mimetype || ''),
+          }));
+        uploadedAttachments =
+          req.file && uploadedAttachments.length > 0
+            ? [...uploadedAttachments, ...normalizedAttachments]
+            : normalizedAttachments;
+      }
+
+      if (!req.user || !req.user._id) {
+        return res.status(401).json({ status: 'fail', message: 'User not authenticated' });
+      }
+
+      const voucherData = {
+        voucherType: voucherType || 'journal_entry',
+        entries: normResult.normalizedEntries,
+        amount: normResult.totalDebits,
+        payeeType: 'other',
+        paymentMethod: paymentMethod || 'cash',
+        cashAccountType: cashAccountType || 'main_cash',
+        currency,
+        currencyExchangeRate: currencyExchangeRate
+          ? typeof currencyExchangeRate === 'string'
+            ? parseFloat(currencyExchangeRate)
+            : currencyExchangeRate
+          : 1,
+        referenceNumber,
+        transactionId,
+        relatedPurchase,
+        relatedSale,
+        relatedPayment,
+        relatedSupplierPayment,
+        relatedBankPaymentVoucher,
+        relatedCashPaymentVoucher,
+        description,
+        notes,
+        status: status || 'completed',
+        attachments: uploadedAttachments,
+        user: req.user._id,
+      };
+      if (cashAccount !== undefined && cashAccount !== null && cashAccount !== '') {
+        voucherData.cashAccount = cashAccount;
+      }
+      if (shop) voucherData.shop = shop;
+      if (warehouse) voucherData.warehouse = warehouse;
+
+      if (voucherDate) {
+        const parsedDate = new Date(voucherDate);
+        if (!isNaN(parsedDate.getTime())) voucherData.voucherDate = parsedDate;
+      }
+      if (req.body.voucherNumber) voucherData.voucherNumber = req.body.voucherNumber;
+
+      if (!Array.isArray(voucherData.attachments)) voucherData.attachments = [];
+      else {
+        voucherData.attachments = voucherData.attachments
+          .filter((att) => att && typeof att === 'object' && !Array.isArray(att))
+          .map((att) => ({
+            url: String(att.url || ''),
+            name: String(att.name || ''),
+            type: String(att.type || ''),
+          }));
+      }
+
+      let voucher = await CashPaymentVoucher.create(voucherData);
+      let transactionResult = null;
+      let createdTransactions = null;
+      const voucherStatus = voucher.status || voucherData.status || status;
+      if (voucherStatus === 'completed' || voucherStatus === 'posted') {
+        transactionResult = await cashVoucherDoubleEntryHelpers.createTransactionsFromCashVoucherEntries(
+          voucher,
+          req.user._id
+        );
+        if (
+          transactionResult.createdPayment ||
+          transactionResult.createdSupplierPayment ||
+          (transactionResult.createdFinancialPayments && transactionResult.createdFinancialPayments.length > 0)
+        ) {
+          createdTransactions = {
+            ...(transactionResult.createdPayment && {
+              payment: {
+                type: 'Payment',
+                id: transactionResult.createdPayment._id,
+                paymentNumber: transactionResult.createdPayment.paymentNumber,
+              },
+            }),
+            ...(transactionResult.createdSupplierPayment && {
+              supplierPayment: {
+                type: 'SupplierPayment',
+                id: transactionResult.createdSupplierPayment._id,
+                paymentNumber: transactionResult.createdSupplierPayment.paymentNumber,
+              },
+            }),
+            ...(transactionResult.createdFinancialPayments &&
+              transactionResult.createdFinancialPayments.length > 0 && {
+                financialPayments: transactionResult.createdFinancialPayments.map((fp) => ({
+                  type: 'FinancialPayment',
+                  id: fp._id,
+                  referCode: fp.referCode,
+                  amount: fp.amount,
+                  relatedModel: fp.relatedModel,
+                })),
+              }),
+          };
+        }
+        await cashVoucherDoubleEntryHelpers.applyEntryBalancesForCashVoucher(voucher._id);
+      }
+
+      const populatedVoucher = await CashPaymentVoucher.findById(voucher._id)
+        .populate('currency', 'name code symbol')
+        .populate('entries.account')
+        .populate('entries.cashAccount', 'accountName code balance')
+        .populate('entries.bankAccount', 'accountName accountNumber bankName')
+        .populate('shop', 'name address')
+        .populate('warehouse', 'name address')
+        .populate('user', 'name email')
+        .populate('relatedPayment', 'paymentNumber amount')
+        .populate('relatedSupplierPayment', 'paymentNumber amount')
+        .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
+        .select('-__v');
+
+      const responseData = { voucher: populatedVoucher };
+      if (createdTransactions) responseData.createdTransactions = createdTransactions;
+      if (transactionResult && transactionResult.error) responseData.transactionError = transactionResult.error;
+
+      return res.status(201).json({
+        status: 'success',
+        message: 'Cash payment voucher created successfully',
+        data: responseData,
+      });
+    }
+
     console.log('req.file:', req.file);
     console.log('attachments from req.body:', attachments);
     console.log('attachments type:', typeof attachments);
-    
+
     // Validate shop if provided
     if (shop) {
       const shopExists = await Shop.findById(shop);
@@ -792,11 +1025,15 @@ const createCashPaymentVoucher = async (req, res) => {
     // Populate before sending response
     const populatedVoucher = await CashPaymentVoucher.findById(voucher._id)
       .populate('currency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.cashAccount', 'accountName code balance')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('shop', 'name address')
       .populate('warehouse', 'name address')
       .populate('payee', 'name')
       .populate('user', 'name email')
       .populate('relatedFinancialPayment', 'referCode amount paymentDate method relatedModel relatedId')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     // Build response data and only include transactionError when there is an actual error
@@ -868,13 +1105,15 @@ const updateCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    // Prevent updates if status is completed or cancelled
-    if (voucher.status === 'completed' || voucher.status === 'cancelled') {
+    // Prevent updates if status is completed, posted or cancelled
+    if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot update completed or cancelled voucher',
+        message: 'Cannot update completed, posted or cancelled voucher',
       });
     }
+
+    const previousStatus = voucher.status;
 
     const {
       voucherDate,
@@ -896,10 +1135,13 @@ const updateCashPaymentVoucher = async (req, res) => {
       relatedSale,
       relatedPayment,
       relatedSupplierPayment,
+      relatedBankPaymentVoucher,
+      relatedCashPaymentVoucher,
       description,
       notes,
       status,
       attachments,
+      entries,
     } = req.body;
 
     console.log('Update - req.file:', req.file);
@@ -1086,6 +1328,24 @@ const updateCashPaymentVoucher = async (req, res) => {
       voucher.warehouse = warehouse;
     }
 
+    if (entries !== undefined) {
+      const parsedForUpdate = cashVoucherDoubleEntryHelpers.parseCashVoucherEntriesFromBody(entries);
+      if (!parsedForUpdate || parsedForUpdate.length < 2) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'entries must be a valid array with at least 2 lines',
+        });
+      }
+      const normResult = await cashVoucherDoubleEntryHelpers.validateAndNormalizeCashVoucherEntries(
+        parsedForUpdate
+      );
+      if (!normResult.ok) {
+        return res.status(normResult.response.status).json(normResult.response.body);
+      }
+      voucher.entries = normResult.normalizedEntries;
+      voucher.amount = normResult.totalDebits;
+    }
+
     // Update fields
     if (voucherDate !== undefined) {
       const parsedDate = new Date(voucherDate);
@@ -1159,6 +1419,8 @@ const updateCashPaymentVoucher = async (req, res) => {
     if (relatedSale !== undefined) voucher.relatedSale = relatedSale;
     if (relatedPayment !== undefined) voucher.relatedPayment = relatedPayment;
     if (relatedSupplierPayment !== undefined) voucher.relatedSupplierPayment = relatedSupplierPayment;
+    if (relatedBankPaymentVoucher !== undefined) voucher.relatedBankPaymentVoucher = relatedBankPaymentVoucher;
+    if (relatedCashPaymentVoucher !== undefined) voucher.relatedCashPaymentVoucher = relatedCashPaymentVoucher;
     if (description !== undefined) voucher.description = description;
     if (notes !== undefined) voucher.notes = notes;
     if (status !== undefined) voucher.status = status;
@@ -1180,13 +1442,31 @@ const updateCashPaymentVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
+    const wasPosted = ['completed', 'posted'].includes(previousStatus);
+    const isPosted = ['completed', 'posted'].includes(updatedVoucher.status);
+    if (
+      cashVoucherDoubleEntryHelpers.isCashVoucherDoubleEntry(updatedVoucher) &&
+      !wasPosted &&
+      isPosted
+    ) {
+      await cashVoucherDoubleEntryHelpers.createTransactionsFromCashVoucherEntries(
+        updatedVoucher,
+        req.user._id
+      );
+      await cashVoucherDoubleEntryHelpers.applyEntryBalancesForCashVoucher(updatedVoucher._id);
+    }
+
     // Populate before sending response
     const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.cashAccount', 'accountName code balance')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('shop', 'name address')
       .populate('warehouse', 'name address')
       .populate('payee', 'name')
       .populate('user', 'name email')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({
@@ -1218,10 +1498,10 @@ const approveCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (voucher.status === 'completed' || voucher.status === 'cancelled') {
+    if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot approve completed or cancelled voucher',
+        message: 'Cannot approve completed, posted or cancelled voucher',
       });
     }
 
@@ -1235,11 +1515,15 @@ const approveCashPaymentVoucher = async (req, res) => {
 
     const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.cashAccount', 'accountName code balance')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('shop', 'name address')
       .populate('warehouse', 'name address')
       .populate('payee', 'name')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({
@@ -1273,10 +1557,10 @@ const rejectCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (voucher.status === 'completed' || voucher.status === 'cancelled') {
+    if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot reject completed or cancelled voucher',
+        message: 'Cannot reject completed, posted or cancelled voucher',
       });
     }
 
@@ -1291,6 +1575,9 @@ const rejectCashPaymentVoucher = async (req, res) => {
 
     const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.cashAccount', 'accountName code balance')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('shop', 'name address')
       .populate('warehouse', 'name address')
       .populate('payee', 'name')
@@ -1334,6 +1621,13 @@ const completeCashPaymentVoucher = async (req, res) => {
       });
     }
 
+    if (voucher.status === 'posted') {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Voucher is already posted; use posted workflow',
+      });
+    }
+
     if (voucher.status === 'cancelled' || voucher.status === 'rejected') {
       return res.status(400).json({
         status: 'fail',
@@ -1345,13 +1639,25 @@ const completeCashPaymentVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
+    if (cashVoucherDoubleEntryHelpers.isCashVoucherDoubleEntry(updatedVoucher)) {
+      await cashVoucherDoubleEntryHelpers.createTransactionsFromCashVoucherEntries(
+        updatedVoucher,
+        req.user._id
+      );
+      await cashVoucherDoubleEntryHelpers.applyEntryBalancesForCashVoucher(updatedVoucher._id);
+    }
+
     const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.cashAccount', 'accountName code balance')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('shop', 'name address')
       .populate('warehouse', 'name address')
       .populate('payee', 'name')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({
@@ -1360,6 +1666,80 @@ const completeCashPaymentVoucher = async (req, res) => {
       data: {
         voucher: populatedVoucher,
       },
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Post cash payment voucher (double-entry) to ledger
+// @route   PUT /api/cash-payment-vouchers/:id/post
+// @access  Private
+const postCashPaymentVoucher = async (req, res) => {
+  try {
+    const voucher = await CashPaymentVoucher.findById(req.params.id);
+
+    if (!voucher) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Cash payment voucher not found',
+      });
+    }
+
+    if (!cashVoucherDoubleEntryHelpers.isCashVoucherDoubleEntry(voucher)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Post is only for vouchers with double-entry lines (entries)',
+      });
+    }
+
+    if (voucher.status === 'posted') {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Voucher is already posted',
+      });
+    }
+
+    if (voucher.status === 'cancelled' || voucher.status === 'rejected') {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Cannot post cancelled or rejected voucher',
+      });
+    }
+
+    voucher.status = 'posted';
+    voucher.postedAt = new Date();
+    voucher.postedBy = req.user._id;
+
+    const updatedVoucher = await voucher.save();
+
+    await cashVoucherDoubleEntryHelpers.createTransactionsFromCashVoucherEntries(
+      updatedVoucher,
+      req.user._id
+    );
+    await cashVoucherDoubleEntryHelpers.applyEntryBalancesForCashVoucher(updatedVoucher._id);
+
+    const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
+      .populate('currency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.cashAccount', 'accountName code balance')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
+      .populate('shop', 'name address')
+      .populate('warehouse', 'name address')
+      .populate('user', 'name email')
+      .populate('postedBy', 'name email')
+      .populate('relatedPayment', 'paymentNumber amount')
+      .populate('relatedSupplierPayment', 'paymentNumber amount')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
+      .select('-__v');
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Cash payment voucher posted successfully',
+      data: { voucher: populatedVoucher },
     });
   } catch (error) {
     res.status(500).json({
@@ -1383,10 +1763,10 @@ const cancelCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (voucher.status === 'completed') {
+    if (voucher.status === 'completed' || voucher.status === 'posted') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot cancel completed voucher',
+        message: 'Cannot cancel completed or posted voucher',
       });
     }
 
@@ -1403,6 +1783,9 @@ const cancelCashPaymentVoucher = async (req, res) => {
 
     const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
       .populate('currency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.cashAccount', 'accountName code balance')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
       .populate('shop', 'name address')
       .populate('warehouse', 'name address')
       .populate('payee', 'name')
@@ -1438,11 +1821,11 @@ const deleteCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    // Prevent deletion if status is completed
-    if (voucher.status === 'completed') {
+    // Prevent deletion if status is completed or posted
+    if (voucher.status === 'completed' || voucher.status === 'posted') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot delete completed voucher',
+        message: 'Cannot delete completed or posted voucher',
       });
     }
 
@@ -1529,6 +1912,7 @@ module.exports = {
   approveCashPaymentVoucher,
   rejectCashPaymentVoucher,
   completeCashPaymentVoucher,
+  postCashPaymentVoucher,
   cancelCashPaymentVoucher,
   deleteCashPaymentVoucher,
   getVouchersByCashAccount,

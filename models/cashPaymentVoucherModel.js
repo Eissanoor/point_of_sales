@@ -2,6 +2,72 @@ const mongoose = require('mongoose');
 const autoIncrementPlugin = require('./autoIncrementPlugin');
 const { generateReferCode } = require('../utils/referCodeGenerator');
 
+function hasCashVoucherDoubleEntry(doc) {
+  const e = doc && doc.entries;
+  return Array.isArray(e) && e.length >= 2;
+}
+
+// Double-entry lines (same account types as journal; cashAccount optional for physical cash balance)
+const cashVoucherEntrySchema = new mongoose.Schema(
+  {
+    account: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      refPath: 'accountModel',
+    },
+    cashAccount: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CashAccount',
+      required: false,
+    },
+    bankAccount: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'BankAccount',
+      required: false,
+    },
+    accountModel: {
+      type: String,
+      required: true,
+      enum: [
+        'BankAccount',
+        'CashAccount',
+        'Supplier',
+        'Customer',
+        'Expense',
+        'Income',
+        'Asset',
+        'Liability',
+        'Equity',
+        'PartnershipAccount',
+        'CashBook',
+        'Capital',
+        'Owner',
+        'Employee',
+        'PropertyAccount',
+      ],
+    },
+    accountName: {
+      type: String,
+      trim: true,
+    },
+    debit: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    credit: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    description: {
+      type: String,
+      trim: true,
+    },
+  },
+  { _id: true }
+);
+
 const cashPaymentVoucherSchema = new mongoose.Schema(
   {
     voucherNumber: {
@@ -17,7 +83,17 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     voucherType: {
       type: String,
       required: true,
-      enum: ['payment', 'receipt', 'transfer'],
+      enum: [
+        'payment',
+        'receipt',
+        'transfer',
+        'journal_entry',
+        'adjustment',
+        'reversal',
+        'opening_balance',
+        'closing_entry',
+        'other',
+      ],
       default: 'payment',
     },
     cashAccount: {
@@ -42,9 +118,37 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
       ref: 'Warehouse',
       required: false,
     },
+    // Double-entry journal-style lines (optional; when set, debits must equal credits)
+    entries: {
+      type: [cashVoucherEntrySchema],
+      default: undefined,
+      validate: {
+        validator(v) {
+          if (v == null || v === undefined) return true;
+          if (!Array.isArray(v)) return false;
+          if (v.length === 0) return true;
+          if (v.length < 2) return false;
+          const totalDebits = v.reduce((sum, entry) => sum + (Number(entry.debit) || 0), 0);
+          const totalCredits = v.reduce((sum, entry) => sum + (Number(entry.credit) || 0), 0);
+          return Math.abs(totalDebits - totalCredits) < 0.01;
+        },
+        message:
+          'Cash voucher entries must have at least 2 lines when used, and total debits must equal total credits',
+      },
+    },
+    relatedFinancialPayments: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'FinancialPayment' }],
+      default: [],
+    },
+    cashBalanceApplied: {
+      type: Boolean,
+      default: false,
+    },
     payeeType: {
       type: String,
-      required: true,
+      required: function () {
+        return !hasCashVoucherDoubleEntry(this);
+      },
       enum: [
         'supplier',
         'customer',
@@ -92,7 +196,9 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     },
     amount: {
       type: Number,
-      required: true,
+      required: function () {
+        return !hasCashVoucherDoubleEntry(this);
+      },
       min: 0,
     },
     currency: {
@@ -105,7 +211,9 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      required: true,
+      required: function () {
+        return !hasCashVoucherDoubleEntry(this);
+      },
       enum: ['cash', 'petty_cash', 'cash_register', 'other'],
       default: 'cash',
     },
@@ -135,6 +243,14 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     relatedSupplierPayment: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'SupplierPayment',
+    },
+    relatedBankPaymentVoucher: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'BankPaymentVoucher',
+    },
+    relatedCashPaymentVoucher: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CashPaymentVoucher',
     },
     // Optional link to financial entities (Asset, Income, etc.)
     financialModel: {
@@ -172,7 +288,7 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     status: {
       type: String,
       required: true,
-      enum: ['draft', 'pending', 'approved', 'completed', 'cancelled', 'rejected'],
+      enum: ['draft', 'pending', 'approved', 'completed', 'posted', 'cancelled', 'rejected'],
       default: 'draft',
     },
     approvalStatus: {
@@ -231,6 +347,13 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     isActive: {
       type: Boolean,
       default: true,
+    },
+    postedAt: {
+      type: Date,
+    },
+    postedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
     },
     referCode: {
       type: String,
@@ -321,8 +444,26 @@ cashPaymentVoucherSchema.pre('save', async function(next) {
         },
         voucherType: this.voucherType,
       });
-      
-      const prefix = this.voucherType === 'payment' ? 'CPV' : this.voucherType === 'receipt' ? 'CRV' : 'CTV';
+
+      const vt = this.voucherType;
+      const prefix =
+        vt === 'payment'
+          ? 'CPV'
+          : vt === 'receipt'
+            ? 'CRV'
+            : vt === 'transfer'
+              ? 'CTV'
+              : vt === 'journal_entry'
+                ? 'CJV'
+                : vt === 'adjustment'
+                  ? 'CJA'
+                  : vt === 'reversal'
+                    ? 'CJR'
+                    : vt === 'opening_balance'
+                      ? 'CJO'
+                      : vt === 'closing_entry'
+                        ? 'CJC'
+                        : 'CPV';
       this.voucherNumber = `${prefix}-${year}${month}${day}-${(vouchersCount + 1).toString().padStart(4, '0')}`;
     }
 
@@ -330,8 +471,45 @@ cashPaymentVoucherSchema.pre('save', async function(next) {
     if (!this.transactionId) {
       const timestamp = Date.now();
       const randomPart = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-      const prefix = this.voucherType === 'payment' ? 'CPV' : this.voucherType === 'receipt' ? 'CRV' : 'CTV';
+      const vt = this.voucherType;
+      const prefix =
+        vt === 'payment'
+          ? 'CPV'
+          : vt === 'receipt'
+            ? 'CRV'
+            : vt === 'transfer'
+              ? 'CTV'
+              : vt === 'journal_entry'
+                ? 'CJV'
+                : vt === 'adjustment'
+                  ? 'CJA'
+                  : vt === 'reversal'
+                    ? 'CJR'
+                    : vt === 'opening_balance'
+                      ? 'CJO'
+                      : vt === 'closing_entry'
+                        ? 'CJC'
+                        : 'CPV';
       this.transactionId = `TRX-${prefix}-${timestamp}-${randomPart}`;
+    }
+
+    if (hasCashVoucherDoubleEntry(this)) {
+      if (!this.payeeType) this.payeeType = 'other';
+      if (!this.paymentMethod) this.paymentMethod = 'cash';
+      if (this.amount == null || this.amount === undefined) {
+        const totalDebits = this.entries.reduce((sum, entry) => sum + (Number(entry.debit) || 0), 0);
+        this.amount = totalDebits;
+      }
+    }
+
+    if (this.entries && Array.isArray(this.entries) && this.entries.length > 0) {
+      const totalDebits = this.entries.reduce((sum, entry) => sum + (entry.debit || 0), 0);
+      const totalCredits = this.entries.reduce((sum, entry) => sum + (entry.credit || 0), 0);
+      if (Math.abs(totalDebits - totalCredits) > 0.01) {
+        return next(
+          new Error(`Total debits (${totalDebits}) must equal total credits (${totalCredits})`)
+        );
+      }
     }
 
     // Set payeeModel based on payeeType
@@ -375,6 +553,8 @@ cashPaymentVoucherSchema.index({ payeeType: 1, payee: 1 });
 cashPaymentVoucherSchema.index({ financialModel: 1, financialId: 1 });
 cashPaymentVoucherSchema.index({ status: 1 });
 cashPaymentVoucherSchema.index({ voucherType: 1 });
+cashPaymentVoucherSchema.index({ 'entries.account': 1 });
+cashPaymentVoucherSchema.index({ 'entries.accountModel': 1 });
 cashPaymentVoucherSchema.index({ shop: 1 });
 cashPaymentVoucherSchema.index({ warehouse: 1 });
 

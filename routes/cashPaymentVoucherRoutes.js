@@ -10,6 +10,7 @@ const {
   approveCashPaymentVoucher,
   rejectCashPaymentVoucher,
   completeCashPaymentVoucher,
+  postCashPaymentVoucher,
   cancelCashPaymentVoucher,
   deleteCashPaymentVoucher,
   getVouchersByCashAccount,
@@ -61,6 +62,11 @@ router.route('/:id/reject').put(protect, rejectCashPaymentVoucher);
 // @desc    Complete cash payment voucher
 // @access  Private
 router.route('/:id/complete').put(protect, completeCashPaymentVoucher);
+
+// @route   PUT /api/cash-payment-vouchers/:id/post
+// @desc    Post cash payment voucher with double-entry lines
+// @access  Private
+router.route('/:id/post').put(protect, postCashPaymentVoucher);
 
 // @route   PUT /api/cash-payment-vouchers/:id/cancel
 // @desc    Cancel cash payment voucher
