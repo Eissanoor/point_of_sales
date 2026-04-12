@@ -36,6 +36,7 @@ const REFER_CODE_PREFIXES = {
   'Owner': 'OW',
   'PartnershipAccount': 'PA',
   'Income': 'IN',
+  'Saraf': 'SRF',
   'PropertyAccount': 'PROP',
   'Employee': 'EMP',
   'Liability': 'LB',
