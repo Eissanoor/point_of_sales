@@ -26,6 +26,11 @@ const financialPaymentSchema = new mongoose.Schema(
       required: true,
       min: 0,
     },
+    /** Currency of `amount` when recorded in base/functional units (e.g. PKR for books). */
+    currency: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Currency',
+    },
     paymentDate: {
       type: Date,
       required: true,

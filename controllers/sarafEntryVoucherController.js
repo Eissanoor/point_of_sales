@@ -90,7 +90,7 @@ const getSarafEntryVoucherById = async (req, res) => {
       .populate('relatedSupplierPayment', 'paymentNumber amount')
       .populate('relatedBankPaymentVoucher', 'voucherNumber amount')
       .populate('relatedCashPaymentVoucher', 'voucherNumber amount')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
+      .populate('relatedFinancialPayments', 'referCode amount currency paymentDate relatedModel relatedId')
       .select('-__v');
 
     if (!voucher) {
@@ -422,7 +422,7 @@ const createSarafEntryVoucher = async (req, res) => {
       .populate('user', 'name email')
       .populate('relatedPayment', 'paymentNumber amount')
       .populate('relatedSupplierPayment', 'paymentNumber amount')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
+      .populate('relatedFinancialPayments', 'referCode amount currency paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(201).json({
@@ -747,7 +747,7 @@ const updateSarafEntryVoucher = async (req, res) => {
       .populate('user', 'name email')
       .populate('relatedPayment', 'paymentNumber amount')
       .populate('relatedSupplierPayment', 'paymentNumber amount')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
+      .populate('relatedFinancialPayments', 'referCode amount currency paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({
@@ -925,7 +925,7 @@ const completeSarafEntryVoucher = async (req, res) => {
       .populate('completedBy', 'name email')
       .populate('relatedPayment', 'paymentNumber amount')
       .populate('relatedSupplierPayment', 'paymentNumber amount')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
+      .populate('relatedFinancialPayments', 'referCode amount currency paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({

@@ -134,6 +134,175 @@ function parseSarafEntriesInput(entries) {
 /** Saraf journal postings run when the voucher reaches a finalized ledger state (same idea as journal “posted/completed”). */
 const SARAF_BANK_BALANCE_POSTED_STATUSES = ['completed'];
 
+function parseLineDebitCredit(entry) {
+  const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
+  const credit = typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
+  return { debit, credit };
+}
+
+async function buildCurrencyMapForEntries(entries, extraCurrencyIds = []) {
+  const ids = new Set([
+    ...(entries || [])
+      .filter((e) => e && e.currency)
+      .map((e) => e.currency.toString()),
+    ...extraCurrencyIds.filter(Boolean).map((id) => id.toString()),
+  ]);
+  if (ids.size === 0) return {};
+  const docs = await Currency.find({ _id: { $in: [...ids] } }).select('isBaseCurrency code').lean();
+  const m = {};
+  for (const d of docs) m[d._id.toString()] = d;
+  return m;
+}
+
+/** Same rules as resolveLedgerAmountForTwoLineEntry — must stay in sync. */
+function currencyWeightFromDoc(doc) {
+  if (!doc) return 0;
+  if (doc.isBaseCurrency === true) return 100;
+  const c = (doc.code || '').toUpperCase();
+  if (c === 'PKR' || c === 'INR' || c === 'AFN') return 10;
+  return 1;
+}
+
+/**
+ * Cross-currency saraf pair: books (Asset, FP, customer payment, etc.) use the functional-currency
+ * leg amount (e.g. 5 PKR), not the foreign line (e.g. 0.3 USD), when one line is base/PKR-like.
+ */
+function resolveLedgerAmountForTwoLineEntry(entryIndex, entries, currencyMap) {
+  const entry = entries[entryIndex];
+  const { debit, credit } = parseLineDebitCredit(entry);
+  const rawAmount = debit > 0 ? debit : credit;
+
+  if (!entry || !Array.isArray(entries) || entries.length !== 2) {
+    return {
+      ledgerAmount: rawAmount,
+      ledgerCurrencyId: entry?.currency,
+      lineAmount: rawAmount,
+      lineCurrencyId: entry?.currency,
+    };
+  }
+
+  const j = 1 - entryIndex;
+  const other = entries[j];
+  if (!other || !entry.currency || !other.currency) {
+    return {
+      ledgerAmount: rawAmount,
+      ledgerCurrencyId: entry.currency,
+      lineAmount: rawAmount,
+      lineCurrencyId: entry.currency,
+    };
+  }
+
+  const idA = entry.currency.toString();
+  const idB = other.currency.toString();
+  if (idA === idB) {
+    return {
+      ledgerAmount: rawAmount,
+      ledgerCurrencyId: entry.currency,
+      lineAmount: rawAmount,
+      lineCurrencyId: entry.currency,
+    };
+  }
+
+  const docE = currencyMap[idA];
+  const docO = currencyMap[idB];
+  const od = parseLineDebitCredit(other);
+  const otherAbs = od.debit > 0 ? od.debit : od.credit;
+
+  const wE = currencyWeightFromDoc(docE);
+  const wO = currencyWeightFromDoc(docO);
+
+  if (wE > wO) {
+    return {
+      ledgerAmount: rawAmount,
+      ledgerCurrencyId: entry.currency,
+      lineAmount: rawAmount,
+      lineCurrencyId: entry.currency,
+    };
+  }
+  if (wO > wE) {
+    return {
+      ledgerAmount: otherAbs,
+      ledgerCurrencyId: other.currency,
+      lineAmount: rawAmount,
+      lineCurrencyId: entry.currency,
+    };
+  }
+
+  return {
+    ledgerAmount: rawAmount,
+    ledgerCurrencyId: entry.currency,
+    lineAmount: rawAmount,
+    lineCurrencyId: entry.currency,
+  };
+}
+
+/**
+ * Bank balance is stored in the bank account's currency. If the journal line is in another
+ * currency (e.g. credit 0.252 USD while the account is PKR), apply the movement using the
+ * voucher legs in the bank's currency (e.g. +70 PKR from the customer line), not the raw foreign amount.
+ */
+function computeSarafBankBalanceDelta(entryIndex, voucherEntries, bank, currencyMap = {}) {
+  const entry = voucherEntries[entryIndex];
+  if (!entry) return 0;
+
+  const { debit, credit } = parseLineDebitCredit(entry);
+  const bankCur = bank.currency ? bank.currency.toString() : '';
+  const lineCur = entry.currency ? entry.currency.toString() : '';
+
+  const bankLineIndices = voucherEntries
+    .map((e, j) => (e && e.bankAccount ? j : -1))
+    .filter((j) => j >= 0);
+  const onlyOneBankLine = bankLineIndices.length === 1;
+
+  // Line denominated same as bank → classic rule: debit decreases balance, credit increases
+  if (bankCur && lineCur && bankCur === lineCur) {
+    let delta = 0;
+    if (Number.isFinite(debit) && debit > 0) delta -= debit;
+    if (Number.isFinite(credit) && credit > 0) delta += credit;
+    return delta;
+  }
+
+  // Cross-currency bank line: same functional amount as FinancialPayment (PKR leg), not the foreign line (USD).
+  if (bankCur && lineCur && bankCur !== lineCur && onlyOneBankLine && voucherEntries.length === 2) {
+    const res = resolveLedgerAmountForTwoLineEntry(entryIndex, voucherEntries, currencyMap);
+    const mag = Number.isFinite(res.ledgerAmount) ? res.ledgerAmount : 0;
+    if (mag > 0) {
+      if (credit > 0) return mag;
+      if (debit > 0) return -mag;
+      return 0;
+    }
+  }
+
+  // Fallback: strict currency id match on sibling (3+ lines or resolve returned 0)
+  if (bankCur && lineCur && bankCur !== lineCur && onlyOneBankLine) {
+    let netLocal = 0;
+    for (let j = 0; j < voucherEntries.length; j++) {
+      if (j === entryIndex) continue;
+      const e = voucherEntries[j];
+      if (!e || !e.currency) continue;
+      if (e.currency.toString() !== bankCur) continue;
+      const d = parseLineDebitCredit(e);
+      netLocal += d.debit - d.credit;
+    }
+    const mag = Math.abs(netLocal);
+    if (Number.isFinite(mag) && mag > 0) {
+      if (credit > 0) return mag;
+      if (debit > 0) return -mag;
+    }
+  }
+
+  if (!onlyOneBankLine && bankCur && lineCur && bankCur !== lineCur) {
+    console.warn(
+      'applyBankBalanceForSarafVoucher: multiple bank lines with mixed currencies; using line amounts — prefer same currency as bank or one bank line per voucher'
+    );
+  }
+
+  let delta = 0;
+  if (Number.isFinite(debit) && debit > 0) delta -= debit;
+  if (Number.isFinite(credit) && credit > 0) delta += credit;
+  return delta;
+}
+
 async function applyBankBalanceForSarafVoucher(voucherId) {
   if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
 
@@ -142,26 +311,30 @@ async function applyBankBalanceForSarafVoucher(voucherId) {
   if (!SARAF_BANK_BALANCE_POSTED_STATUSES.includes(voucher.status)) return;
   if (!Array.isArray(voucher.entries) || voucher.entries.length === 0) return;
 
-  for (const entry of voucher.entries) {
+  const entries = voucher.entries;
+
+  const bankAccountIds = [...new Set(entries.filter((e) => e && e.bankAccount).map((e) => e.bankAccount))];
+  let bankCurrencyExtras = [];
+  if (bankAccountIds.length > 0) {
+    const banks = await BankAccount.find({ _id: { $in: bankAccountIds } }).select('currency').lean();
+    bankCurrencyExtras = banks.map((b) => b.currency).filter(Boolean);
+  }
+  const currencyMap = await buildCurrencyMapForEntries(entries, bankCurrencyExtras);
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
     if (!entry || !entry.bankAccount) continue;
 
-    const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
-    const credit = typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
-
-    let delta = 0;
-    if (Number.isFinite(debit) && debit > 0) delta -= debit;
-    if (Number.isFinite(credit) && credit > 0) delta += credit;
-    if (!Number.isFinite(delta) || delta === 0) continue;
-
-    const bank = await BankAccount.findByIdAndUpdate(
-      entry.bankAccount,
-      { $inc: { balance: delta } },
-      { new: true }
-    );
-
+    const bank = await BankAccount.findById(entry.bankAccount);
     if (!bank) {
       console.error('applyBankBalanceForSarafVoucher: bank account not found', entry.bankAccount);
+      continue;
     }
+
+    const delta = computeSarafBankBalanceDelta(i, entries, bank, currencyMap);
+    if (!Number.isFinite(delta) || delta === 0) continue;
+
+    await BankAccount.findByIdAndUpdate(entry.bankAccount, { $inc: { balance: delta } }, { new: true });
   }
 
   voucher.bankBalanceApplied = true;
@@ -214,17 +387,23 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
     return map[s] || (m && m.trim() ? m.trim() : '');
   };
 
-  for (const entry of freshVoucher.entries) {
+  const currencyMap = await buildCurrencyMapForEntries(freshVoucher.entries);
+
+  for (let entryIndex = 0; entryIndex < freshVoucher.entries.length; entryIndex++) {
+    const entry = freshVoucher.entries[entryIndex];
     const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
     const credit = typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
     const normalizedModel = normalizeAccountModel(entry.accountModel);
     const payCurrency = lineCurrency(entry);
+    const resolved = resolveLedgerAmountForTwoLineEntry(entryIndex, freshVoucher.entries, currencyMap);
+    const ledgerAmount = resolved.ledgerAmount;
+    const ledgerCurrencyId = resolved.ledgerCurrencyId;
 
     if (normalizedModel === 'Customer' && debit > 0 && !freshVoucher.relatedPayment) {
       try {
         const Sales = require('../models/salesModel');
         const customerId = entry.account;
-        const amount = debit;
+        const amount = ledgerAmount;
 
         const salesAgg = await Sales.aggregate([
           { $match: { customer: new mongoose.Types.ObjectId(customerId), isActive: true } },
@@ -265,7 +444,7 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
           attachments: freshVoucher.attachments || [],
           user: userId,
           isPartial: false,
-          currency: payCurrency,
+          currency: ledgerCurrencyId || payCurrency,
           paymentType: freshVoucher.relatedSale ? 'sale_payment' : 'advance_payment',
         });
 
@@ -291,7 +470,7 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
 
     if (normalizedModel === 'Supplier' && credit > 0 && !freshVoucher.relatedSupplierPayment) {
       try {
-        const amount = credit;
+        const amount = ledgerAmount;
         const supplierId = entry.account;
 
         const purchasesAgg = await Purchase.aggregate([
@@ -324,7 +503,7 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
           attachments: freshVoucher.attachments || [],
           user: userId,
           isPartial: false,
-          currency: payCurrency,
+          currency: ledgerCurrencyId || payCurrency,
           products: [],
         });
 
@@ -346,18 +525,25 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
       }
     }
 
-    const amount = debit > 0 ? debit : credit;
+    const amount = ledgerAmount;
     const isDebit = debit > 0;
     if (amount > 0 && FINANCIAL_ACCOUNT_MODELS.includes(normalizedModel)) {
       try {
+        const lineAmt = resolved.lineAmount;
+        const lineVsLedger =
+          Math.abs(lineAmt - amount) > 0.0001 ||
+          String(resolved.lineCurrencyId || '') !== String(resolved.ledgerCurrencyId || '')
+            ? ` Line: ${lineAmt} (voucher leg); books: ${amount} (functional).`
+            : '';
         const fp = await FinancialPayment.create({
           name: entry.accountName || `${normalizedModel} saraf entry`,
           mobileNo: null,
           code: freshVoucher.referenceNumber || freshVoucher.voucherNumber || null,
           description:
-            freshVoucher.description ||
-            `Saraf voucher ${freshVoucher.voucherNumber}: ${isDebit ? 'Debit' : 'Credit'} ${amount} to ${entry.accountName || normalizedModel}. ${freshVoucher.notes || ''}`.trim(),
+            (freshVoucher.description ||
+              `Saraf voucher ${freshVoucher.voucherNumber}: ${isDebit ? 'Debit' : 'Credit'} ${amount} to ${entry.accountName || normalizedModel}. ${freshVoucher.notes || ''}`).trim() + lineVsLedger,
           amount,
+          currency: ledgerCurrencyId || undefined,
           paymentDate,
           method: 'other',
           effect: isDebit ? 'subtract' : 'add',
@@ -382,6 +568,53 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
   return { createdPayment, createdSupplierPayment, createdFinancialPayments, error: errorDetails };
 }
 
+function currencyIdString(c) {
+  if (c === undefined || c === null) return '';
+  if (typeof c === 'object' && c.toString) return c.toString();
+  return String(c);
+}
+
+/**
+ * For exactly two lines with different currencies (one pure debit, one pure credit),
+ * treat the amounts as one FX pair and set the debit line's exchangeRate so that
+ * debit×rate = credit×rate on the credit line's rate (usually 1 on the USD/bank side).
+ * This avoids forcing users to compute 0.252/70 manually when entering e.g. 70 PKR vs 0.252 USD.
+ */
+function applyTwoLineCrossCurrencyBalance(entries) {
+  if (!Array.isArray(entries) || entries.length !== 2) return;
+
+  const debitRow = entries.find((e) => {
+    const debit = typeof e.debit === 'string' ? parseFloat(e.debit) : e.debit || 0;
+    const credit = typeof e.credit === 'string' ? parseFloat(e.credit) : e.credit || 0;
+    return debit > 0 && credit === 0;
+  });
+  const creditRow = entries.find((e) => {
+    const debit = typeof e.debit === 'string' ? parseFloat(e.debit) : e.debit || 0;
+    const credit = typeof e.credit === 'string' ? parseFloat(e.credit) : e.credit || 0;
+    return credit > 0 && debit === 0;
+  });
+  if (!debitRow || !creditRow) return;
+
+  const curD = currencyIdString(debitRow.currency);
+  const curC = currencyIdString(creditRow.currency);
+  if (!curD || !curC || curD === curC) return;
+
+  const D = typeof debitRow.debit === 'string' ? parseFloat(debitRow.debit) : debitRow.debit || 0;
+  const C = typeof creditRow.credit === 'string' ? parseFloat(creditRow.credit) : creditRow.credit || 0;
+  if (!(D > 0) || !(C > 0)) return;
+
+  const rC =
+    creditRow.exchangeRate !== undefined && creditRow.exchangeRate !== null && creditRow.exchangeRate !== ''
+      ? typeof creditRow.exchangeRate === 'string'
+        ? parseFloat(creditRow.exchangeRate)
+        : creditRow.exchangeRate
+      : 1;
+  if (!Number.isFinite(rC) || rC < 0) return;
+
+  // Anchor valuation on the credit line; solve for debit line rate
+  debitRow.exchangeRate = (C * rC) / D;
+}
+
 /**
  * Validate journal-style saraf entries (multi-currency double entry in base units).
  */
@@ -393,6 +626,8 @@ async function validateSarafJournalEntries(parsedEntries) {
       message: 'Saraf journal voucher must have at least 2 entries.',
     };
   }
+
+  applyTwoLineCrossCurrencyBalance(parsedEntries);
 
   let totalBaseDebits = 0;
   let totalBaseCredits = 0;
@@ -503,6 +738,7 @@ module.exports = {
   parseSarafEntriesInput,
   validateSarafJournalEntries,
   mapNormalizedSarafEntries,
+  applyTwoLineCrossCurrencyBalance,
   normalizeJournalEntryAccountModel,
   resolveJournalEntryBankAccountRefs,
   createTransactionsFromSarafEntries,
