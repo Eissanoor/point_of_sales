@@ -2,7 +2,78 @@ const mongoose = require('mongoose');
 const autoIncrementPlugin = require('./autoIncrementPlugin');
 const { generateReferCode } = require('../utils/referCodeGenerator');
 
-// Saraf Entry Schema - for currency exchange transactions
+// Journal-style line with per-line currency (debit in one currency, credit in another via separate lines)
+const sarafJournalEntrySchema = new mongoose.Schema(
+  {
+    account: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      refPath: 'accountModel',
+    },
+    bankAccount: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'BankAccount',
+      required: false,
+    },
+    accountModel: {
+      type: String,
+      required: true,
+      enum: [
+        'BankAccount',
+        'CashAccount',
+        'Supplier',
+        'Customer',
+        'Expense',
+        'Income',
+        'Asset',
+        'Liability',
+        'Equity',
+        'PartnershipAccount',
+        'CashBook',
+        'Capital',
+        'Owner',
+        'Employee',
+        'PropertyAccount',
+      ],
+    },
+    accountName: {
+      type: String,
+      trim: true,
+    },
+    debit: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    credit: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    description: {
+      type: String,
+      trim: true,
+    },
+    currency: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Currency',
+      required: true,
+    },
+    /** Weight for balancing: sum(debit×exchangeRate) must equal sum(credit×exchangeRate) across lines */
+    exchangeRate: {
+      type: Number,
+      default: 1,
+      min: 0,
+    },
+  },
+  { _id: true }
+);
+
+function hasJournalEntries(doc) {
+  return doc.entries && Array.isArray(doc.entries) && doc.entries.length >= 2;
+}
+
+// Saraf Entry Schema - legacy single pair exchange OR journal-style multi-currency entries
 const sarafEntryVoucherSchema = new mongoose.Schema(
   {
     voucherNumber: {
@@ -15,6 +86,33 @@ const sarafEntryVoucherSchema = new mongoose.Schema(
       required: false,
       default: Date.now,
     },
+    /**
+     * Journal-style entries (same account types as journal payment voucher).
+     * When present with 2+ lines, legacy from/to fields are not used.
+     */
+    entries: {
+      type: [sarafJournalEntrySchema],
+      default: [],
+      validate: {
+        validator: function (v) {
+          if (!v || v.length === 0) return true;
+          if (v.length < 2) return false;
+          const totalDebits = v.reduce((sum, e) => sum + (e.debit || 0) * (e.exchangeRate ?? 1), 0);
+          const totalCredits = v.reduce((sum, e) => sum + (e.credit || 0) * (e.exchangeRate ?? 1), 0);
+          return Math.abs(totalDebits - totalCredits) < 0.01;
+        },
+        message:
+          'Saraf journal entries need at least 2 lines and debit×exchangeRate must equal credit×exchangeRate in base terms',
+      },
+    },
+    relatedFinancialPayments: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'FinancialPayment' }],
+      default: [],
+    },
+    bankBalanceApplied: {
+      type: Boolean,
+      default: false,
+    },
     // Exchange type
     exchangeType: {
       type: String,
@@ -22,32 +120,42 @@ const sarafEntryVoucherSchema = new mongoose.Schema(
       enum: ['buy', 'sell', 'exchange', 'conversion'],
       default: 'exchange',
     },
-    // From currency (source currency)
+    // From currency (source currency) — required when not using journal entries
     fromCurrency: {
       type: mongoose.Schema.Types.ObjectId,
-      required: true,
+      required: function () {
+        return !hasJournalEntries(this);
+      },
       ref: 'Currency',
     },
     fromAmount: {
       type: Number,
-      required: true,
+      required: function () {
+        return !hasJournalEntries(this);
+      },
       min: 0,
     },
     // To currency (destination currency)
     toCurrency: {
       type: mongoose.Schema.Types.ObjectId,
-      required: true,
+      required: function () {
+        return !hasJournalEntries(this);
+      },
       ref: 'Currency',
     },
     toAmount: {
       type: Number,
-      required: true,
+      required: function () {
+        return !hasJournalEntries(this);
+      },
       min: 0,
     },
-    // Exchange rate details
+    // Exchange rate details (legacy single-pair rate)
     exchangeRate: {
       type: Number,
-      required: true,
+      required: function () {
+        return !hasJournalEntries(this);
+      },
       min: 0,
     },
     // Market rate vs actual rate
@@ -137,7 +245,7 @@ const sarafEntryVoucherSchema = new mongoose.Schema(
       type: String,
       required: true,
       enum: ['draft', 'pending', 'approved', 'completed', 'cancelled', 'rejected'],
-      default: 'draft',
+      default: 'completed',
     },
     // Approval workflow
     approvalStatus: {
@@ -320,15 +428,15 @@ sarafEntryVoucherSchema.pre('save', async function(next) {
       this.transactionId = `TRX-SEV-${timestamp}-${randomPart}`;
     }
 
-    // Validate that from and to currencies are different
-    if (this.fromCurrency && this.toCurrency) {
+    // Legacy: from and to currencies must differ
+    if (!hasJournalEntries(this) && this.fromCurrency && this.toCurrency) {
       if (this.fromCurrency.toString() === this.toCurrency.toString()) {
         return next(new Error('Source and destination currencies cannot be the same'));
       }
     }
 
-    // Calculate exchange gain/loss if market rate is provided
-    if (this.marketRate && this.exchangeRate && this.fromAmount) {
+    // Calculate exchange gain/loss if market rate is provided (legacy pair only)
+    if (!hasJournalEntries(this) && this.marketRate && this.exchangeRate && this.fromAmount) {
       const marketValue = this.fromAmount * this.marketRate;
       const actualValue = this.fromAmount * this.exchangeRate;
       const difference = actualValue - marketValue;
@@ -342,8 +450,8 @@ sarafEntryVoucherSchema.pre('save', async function(next) {
       }
     }
 
-    // Calculate commission if percentage is provided
-    if (this.commissionPercentage > 0 && this.fromAmount) {
+    // Calculate commission if percentage is provided (legacy)
+    if (!hasJournalEntries(this) && this.commissionPercentage > 0 && this.fromAmount) {
       this.commission = (this.fromAmount * this.commissionPercentage) / 100;
     }
 
@@ -361,6 +469,7 @@ sarafEntryVoucherSchema.index({ status: 1 });
 sarafEntryVoucherSchema.index({ exchangeType: 1 });
 sarafEntryVoucherSchema.index({ fromBankAccount: 1 });
 sarafEntryVoucherSchema.index({ toBankAccount: 1 });
+sarafEntryVoucherSchema.index({ 'entries.currency': 1 });
 
 const SarafEntryVoucher = mongoose.model('SarafEntryVoucher', sarafEntryVoucherSchema);
 

@@ -4,6 +4,14 @@ const Currency = require('../models/currencyModel');
 const BankAccount = require('../models/bankAccountModel');
 const APIFeatures = require('../utils/apiFeatures');
 const cloudinary = require('cloudinary').v2;
+const {
+  parseSarafEntriesInput,
+  validateSarafJournalEntries,
+  mapNormalizedSarafEntries,
+  createTransactionsFromSarafEntries,
+  applyBankBalanceForSarafVoucher,
+  SARAF_BANK_BALANCE_POSTED_STATUSES,
+} = require('../services/sarafVoucherEntryTransactions');
 
 // @desc    Get all saraf entry vouchers with filtering and pagination
 // @route   GET /api/saraf-entry-vouchers
@@ -19,6 +27,9 @@ const getSarafEntryVouchers = async (req, res) => {
     const vouchers = await features.query
       .populate('fromCurrency', 'name code symbol')
       .populate('toCurrency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
+      .populate('entries.currency', 'name code symbol')
       .populate('fromBankAccount', 'accountName accountNumber bankName')
       .populate('toBankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
@@ -63,6 +74,9 @@ const getSarafEntryVoucherById = async (req, res) => {
     const voucher = await SarafEntryVoucher.findById(req.params.id)
       .populate('fromCurrency', 'name code symbol')
       .populate('toCurrency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
+      .populate('entries.currency', 'name code symbol')
       .populate('fromBankAccount', 'accountName accountNumber bankName')
       .populate('toBankAccount', 'accountName accountNumber bankName')
       .populate('fromCashAccount')
@@ -76,6 +90,7 @@ const getSarafEntryVoucherById = async (req, res) => {
       .populate('relatedSupplierPayment', 'paymentNumber amount')
       .populate('relatedBankPaymentVoucher', 'voucherNumber amount')
       .populate('relatedCashPaymentVoucher', 'voucherNumber amount')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     if (!voucher) {
@@ -135,54 +150,79 @@ const createSarafEntryVoucher = async (req, res) => {
       relatedBankPaymentVoucher,
       relatedCashPaymentVoucher,
       attachments,
+      entries,
     } = req.body;
-    
-    console.log('req.file:', req.file);
-    console.log('attachments from req.body:', attachments);
-    
-    // Validate currencies exist
-    const fromCurrencyExists = await Currency.findById(fromCurrency);
-    if (!fromCurrencyExists) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Source currency not found',
-      });
-    }
 
-    const toCurrencyExists = await Currency.findById(toCurrency);
-    if (!toCurrencyExists) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Destination currency not found',
-      });
-    }
-
-    // Validate that from and to currencies are different
-    if (fromCurrency.toString() === toCurrency.toString()) {
+    const { error: entriesParseError, parsedEntries } = parseSarafEntriesInput(entries);
+    if (entriesParseError) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Source and destination currencies cannot be the same',
+        message: entriesParseError,
       });
     }
 
-    // Validate bank accounts if provided
-    if (fromBankAccount) {
-      const fromBankAccountExists = await BankAccount.findById(fromBankAccount);
-      if (!fromBankAccountExists) {
-        return res.status(404).json({
-          status: 'fail',
-          message: 'Source bank account not found',
-        });
-      }
+    const isJournalMode = parsedEntries && Array.isArray(parsedEntries) && parsedEntries.length >= 2;
+
+    if (parsedEntries && Array.isArray(parsedEntries) && parsedEntries.length === 1) {
+      return res.status(400).json({
+        status: 'fail',
+        message:
+          'Saraf journal mode requires at least two entries with per-line currency, or omit entries to use the legacy two-currency exchange fields.',
+      });
     }
 
-    if (toBankAccount) {
-      const toBankAccountExists = await BankAccount.findById(toBankAccount);
-      if (!toBankAccountExists) {
+    if (isJournalMode) {
+      const journalCheck = await validateSarafJournalEntries(parsedEntries);
+      if (!journalCheck.ok) {
+        return res.status(journalCheck.status).json({
+          status: 'fail',
+          message: journalCheck.message,
+          totalBaseDebits: journalCheck.totalBaseDebits,
+          totalBaseCredits: journalCheck.totalBaseCredits,
+        });
+      }
+    } else {
+      const fromCurrencyExists = await Currency.findById(fromCurrency);
+      if (!fromCurrencyExists) {
         return res.status(404).json({
           status: 'fail',
-          message: 'Destination bank account not found',
+          message: 'Source currency not found',
         });
+      }
+
+      const toCurrencyExists = await Currency.findById(toCurrency);
+      if (!toCurrencyExists) {
+        return res.status(404).json({
+          status: 'fail',
+          message: 'Destination currency not found',
+        });
+      }
+
+      if (fromCurrency.toString() === toCurrency.toString()) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Source and destination currencies cannot be the same',
+        });
+      }
+
+      if (fromBankAccount) {
+        const fromBankAccountExists = await BankAccount.findById(fromBankAccount);
+        if (!fromBankAccountExists) {
+          return res.status(404).json({
+            status: 'fail',
+            message: 'Source bank account not found',
+          });
+        }
+      }
+
+      if (toBankAccount) {
+        const toBankAccountExists = await BankAccount.findById(toBankAccount);
+        if (!toBankAccountExists) {
+          return res.status(404).json({
+            status: 'fail',
+            message: 'Destination bank account not found',
+          });
+        }
       }
     }
 
@@ -281,39 +321,62 @@ const createSarafEntryVoucher = async (req, res) => {
       });
     }
 
-    // Create voucher
-    const voucherData = {
-      exchangeType: exchangeType || 'exchange',
-      fromCurrency,
-      fromAmount: typeof fromAmount === 'string' ? parseFloat(fromAmount) : fromAmount,
-      toCurrency,
-      toAmount: typeof toAmount === 'string' ? parseFloat(toAmount) : toAmount,
-      exchangeRate: typeof exchangeRate === 'string' ? parseFloat(exchangeRate) : exchangeRate,
-      marketRate: marketRate ? (typeof marketRate === 'string' ? parseFloat(marketRate) : marketRate) : undefined,
-      commission: commission ? (typeof commission === 'string' ? parseFloat(commission) : commission) : 0,
-      commissionPercentage: commissionPercentage ? (typeof commissionPercentage === 'string' ? parseFloat(commissionPercentage) : commissionPercentage) : 0,
-      fromBankAccount,
-      toBankAccount,
-      fromCashAccount,
-      toCashAccount,
-      referenceNumber,
-      transactionId,
-      bankTransactionId,
-      sarafName,
-      sarafContact,
-      purpose,
-      description,
-      notes,
-      status: status || 'draft',
-      relatedPurchase,
-      relatedSale,
-      relatedPayment,
-      relatedSupplierPayment,
-      relatedBankPaymentVoucher,
-      relatedCashPaymentVoucher,
-      attachments: uploadedAttachments,
-      user: req.user._id,
-    };
+    const voucherStatus = status || 'completed';
+
+    const voucherData = isJournalMode
+      ? {
+          exchangeType: exchangeType || 'exchange',
+          entries: mapNormalizedSarafEntries(parsedEntries),
+          referenceNumber,
+          transactionId,
+          bankTransactionId,
+          sarafName,
+          sarafContact,
+          purpose,
+          description,
+          notes,
+          status: voucherStatus,
+          relatedPurchase,
+          relatedSale,
+          relatedPayment,
+          relatedSupplierPayment,
+          relatedBankPaymentVoucher,
+          relatedCashPaymentVoucher,
+          attachments: uploadedAttachments,
+          user: req.user._id,
+        }
+      : {
+          exchangeType: exchangeType || 'exchange',
+          fromCurrency,
+          fromAmount: typeof fromAmount === 'string' ? parseFloat(fromAmount) : fromAmount,
+          toCurrency,
+          toAmount: typeof toAmount === 'string' ? parseFloat(toAmount) : toAmount,
+          exchangeRate: typeof exchangeRate === 'string' ? parseFloat(exchangeRate) : exchangeRate,
+          marketRate: marketRate ? (typeof marketRate === 'string' ? parseFloat(marketRate) : marketRate) : undefined,
+          commission: commission ? (typeof commission === 'string' ? parseFloat(commission) : commission) : 0,
+          commissionPercentage: commissionPercentage ? (typeof commissionPercentage === 'string' ? parseFloat(commissionPercentage) : commissionPercentage) : 0,
+          fromBankAccount,
+          toBankAccount,
+          fromCashAccount,
+          toCashAccount,
+          referenceNumber,
+          transactionId,
+          bankTransactionId,
+          sarafName,
+          sarafContact,
+          purpose,
+          description,
+          notes,
+          status: voucherStatus,
+          relatedPurchase,
+          relatedSale,
+          relatedPayment,
+          relatedSupplierPayment,
+          relatedBankPaymentVoucher,
+          relatedCashPaymentVoucher,
+          attachments: uploadedAttachments,
+          user: req.user._id,
+        };
 
     if (voucherDate) {
       const parsedDate = new Date(voucherDate);
@@ -340,12 +403,26 @@ const createSarafEntryVoucher = async (req, res) => {
 
     const voucher = await SarafEntryVoucher.create(voucherData);
 
+    if (
+      isJournalMode &&
+      SARAF_BANK_BALANCE_POSTED_STATUSES.includes(voucherStatus)
+    ) {
+      await applyBankBalanceForSarafVoucher(voucher._id);
+      await createTransactionsFromSarafEntries(voucher, req.user._id);
+    }
+
     const populatedVoucher = await SarafEntryVoucher.findById(voucher._id)
       .populate('fromCurrency', 'name code symbol')
       .populate('toCurrency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
+      .populate('entries.currency', 'name code symbol')
       .populate('fromBankAccount', 'accountName accountNumber bankName')
       .populate('toBankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
+      .populate('relatedPayment', 'paymentNumber amount')
+      .populate('relatedSupplierPayment', 'paymentNumber amount')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(201).json({
@@ -413,6 +490,8 @@ const updateSarafEntryVoucher = async (req, res) => {
       });
     }
 
+    const previousStatus = voucher.status;
+
     const {
       voucherDate,
       exchangeType,
@@ -444,10 +523,40 @@ const updateSarafEntryVoucher = async (req, res) => {
       relatedBankPaymentVoucher,
       relatedCashPaymentVoucher,
       attachments,
+      entries,
     } = req.body;
 
-    // Validate currencies if provided
-    if (fromCurrency !== undefined) {
+    const { error: entriesParseError, parsedEntries } = parseSarafEntriesInput(entries);
+    if (entriesParseError) {
+      return res.status(400).json({
+        status: 'fail',
+        message: entriesParseError,
+      });
+    }
+
+    if (entries !== undefined) {
+      if (!parsedEntries || !Array.isArray(parsedEntries) || parsedEntries.length < 2) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Journal-style saraf vouchers require at least two entries, each with currency, debit/credit, and exchangeRate.',
+        });
+      }
+      const journalCheck = await validateSarafJournalEntries(parsedEntries);
+      if (!journalCheck.ok) {
+        return res.status(journalCheck.status).json({
+          status: 'fail',
+          message: journalCheck.message,
+          totalBaseDebits: journalCheck.totalBaseDebits,
+          totalBaseCredits: journalCheck.totalBaseCredits,
+        });
+      }
+      voucher.entries = mapNormalizedSarafEntries(parsedEntries);
+    }
+
+    const isJournalDoc = voucher.entries && Array.isArray(voucher.entries) && voucher.entries.length >= 2;
+
+    // Validate currencies if provided (legacy two-currency exchange only)
+    if (!isJournalDoc && fromCurrency !== undefined) {
       const fromCurrencyExists = await Currency.findById(fromCurrency);
       if (!fromCurrencyExists) {
         return res.status(404).json({
@@ -458,7 +567,7 @@ const updateSarafEntryVoucher = async (req, res) => {
       voucher.fromCurrency = fromCurrency;
     }
 
-    if (toCurrency !== undefined) {
+    if (!isJournalDoc && toCurrency !== undefined) {
       const toCurrencyExists = await Currency.findById(toCurrency);
       if (!toCurrencyExists) {
         return res.status(404).json({
@@ -469,8 +578,7 @@ const updateSarafEntryVoucher = async (req, res) => {
       voucher.toCurrency = toCurrency;
     }
 
-    // Validate that from and to currencies are different
-    if (voucher.fromCurrency && voucher.toCurrency) {
+    if (!isJournalDoc && voucher.fromCurrency && voucher.toCurrency) {
       if (voucher.fromCurrency.toString() === voucher.toCurrency.toString()) {
         return res.status(400).json({
           status: 'fail',
@@ -479,8 +587,7 @@ const updateSarafEntryVoucher = async (req, res) => {
       }
     }
 
-    // Validate bank accounts if provided
-    if (fromBankAccount !== undefined) {
+    if (!isJournalDoc && fromBankAccount !== undefined) {
       if (fromBankAccount) {
         const fromBankAccountExists = await BankAccount.findById(fromBankAccount);
         if (!fromBankAccountExists) {
@@ -493,7 +600,7 @@ const updateSarafEntryVoucher = async (req, res) => {
       voucher.fromBankAccount = fromBankAccount;
     }
 
-    if (toBankAccount !== undefined) {
+    if (!isJournalDoc && toBankAccount !== undefined) {
       if (toBankAccount) {
         const toBankAccountExists = await BankAccount.findById(toBankAccount);
         if (!toBankAccountExists) {
@@ -622,12 +729,25 @@ const updateSarafEntryVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
+    const wasPosted = SARAF_BANK_BALANCE_POSTED_STATUSES.includes(previousStatus);
+    const isPosted = SARAF_BANK_BALANCE_POSTED_STATUSES.includes(updatedVoucher.status);
+    if (!wasPosted && isPosted && updatedVoucher.entries && updatedVoucher.entries.length >= 2) {
+      await applyBankBalanceForSarafVoucher(updatedVoucher._id);
+      await createTransactionsFromSarafEntries(updatedVoucher, req.user._id);
+    }
+
     const populatedVoucher = await SarafEntryVoucher.findById(updatedVoucher._id)
       .populate('fromCurrency', 'name code symbol')
       .populate('toCurrency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
+      .populate('entries.currency', 'name code symbol')
       .populate('fromBankAccount', 'accountName accountNumber bankName')
       .populate('toBankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
+      .populate('relatedPayment', 'paymentNumber amount')
+      .populate('relatedSupplierPayment', 'paymentNumber amount')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({
@@ -788,13 +908,24 @@ const completeSarafEntryVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
+    if (updatedVoucher.entries && updatedVoucher.entries.length >= 2) {
+      await applyBankBalanceForSarafVoucher(updatedVoucher._id);
+      await createTransactionsFromSarafEntries(updatedVoucher, req.user._id);
+    }
+
     const populatedVoucher = await SarafEntryVoucher.findById(updatedVoucher._id)
       .populate('fromCurrency', 'name code symbol')
       .populate('toCurrency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.bankAccount', 'accountName accountNumber bankName')
+      .populate('entries.currency', 'name code symbol')
       .populate('fromBankAccount', 'accountName accountNumber bankName')
       .populate('toBankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
       .populate('completedBy', 'name email')
+      .populate('relatedPayment', 'paymentNumber amount')
+      .populate('relatedSupplierPayment', 'paymentNumber amount')
+      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({
@@ -931,16 +1062,16 @@ const getVouchersByCurrency = async (req, res) => {
 
     let query = {};
     
-    // Filter by type: 'from', 'to', or 'all'
+    // Filter by type: 'from', 'to', or 'all' (legacy pair + journal lines with per-line currency)
     if (type === 'from') {
-      query.fromCurrency = currencyId;
+      query.$or = [{ fromCurrency: currencyId }, { 'entries.currency': currencyId }];
     } else if (type === 'to') {
-      query.toCurrency = currencyId;
+      query.$or = [{ toCurrency: currencyId }, { 'entries.currency': currencyId }];
     } else {
-      // Default: show both from and to
       query.$or = [
         { fromCurrency: currencyId },
-        { toCurrency: currencyId }
+        { toCurrency: currencyId },
+        { 'entries.currency': currencyId },
       ];
     }
 
@@ -960,6 +1091,8 @@ const getVouchersByCurrency = async (req, res) => {
     const vouchers = await SarafEntryVoucher.find(query)
       .populate('fromCurrency', 'name code symbol')
       .populate('toCurrency', 'name code symbol')
+      .populate('entries.account')
+      .populate('entries.currency', 'name code symbol')
       .populate('fromBankAccount', 'accountName accountNumber bankName')
       .populate('toBankAccount', 'accountName accountNumber bankName')
       .populate('user', 'name email')
