@@ -12,6 +12,7 @@ const createFinancialPayment = async (req, res) => {
       code,
       description,
       amount,
+      currency,
       paymentDate,
       method,
       effect,
@@ -34,6 +35,7 @@ const createFinancialPayment = async (req, res) => {
       code,
       description,
       amount: typeof amount === 'string' ? parseFloat(amount) : amount,
+      currency,
       paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
       method,
       effect,
@@ -47,6 +49,7 @@ const createFinancialPayment = async (req, res) => {
       financialPayment._id
     )
       .populate('user', 'name email')
+      .populate('currency', 'name code symbol')
       .populate({
         path: 'relatedId',
         select: 'name code description',
@@ -79,6 +82,7 @@ const getFinancialPayments = async (req, res) => {
 
     const financialPayments = await features.query
       .populate('user', 'name email')
+      .populate('currency', 'name code symbol')
       .populate({
         path: 'relatedId',
         select: 'name code description',
@@ -106,6 +110,7 @@ const getFinancialPaymentById = async (req, res) => {
   try {
     const financialPayment = await FinancialPayment.findById(req.params.id)
       .populate('user', 'name email')
+      .populate('currency', 'name code symbol')
       .populate({
         path: 'relatedId',
         select: 'name code description',
@@ -151,6 +156,7 @@ const updateFinancialPayment = async (req, res) => {
       code,
       description,
       amount,
+      currency,
       paymentDate,
       method,
       effect,
@@ -167,6 +173,7 @@ const updateFinancialPayment = async (req, res) => {
       financialPayment.amount =
         typeof amount === 'string' ? parseFloat(amount) : amount;
     }
+    if (currency !== undefined) financialPayment.currency = currency;
     if (paymentDate !== undefined) {
       const parsedDate = new Date(paymentDate);
       if (!isNaN(parsedDate.getTime())) {
@@ -186,6 +193,7 @@ const updateFinancialPayment = async (req, res) => {
       updatedFinancialPayment._id
     )
       .populate('user', 'name email')
+      .populate('currency', 'name code symbol')
       .populate({
         path: 'relatedId',
         select: 'name code description',

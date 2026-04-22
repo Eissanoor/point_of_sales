@@ -525,25 +525,20 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
       }
     }
 
-    const amount = ledgerAmount;
+    // Financial payments should keep voucher line currency/amount per side.
+    const amount = resolved.lineAmount;
     const isDebit = debit > 0;
     if (amount > 0 && FINANCIAL_ACCOUNT_MODELS.includes(normalizedModel)) {
       try {
-        const lineAmt = resolved.lineAmount;
-        const lineVsLedger =
-          Math.abs(lineAmt - amount) > 0.0001 ||
-          String(resolved.lineCurrencyId || '') !== String(resolved.ledgerCurrencyId || '')
-            ? ` Line: ${lineAmt} (voucher leg); books: ${amount} (functional).`
-            : '';
         const fp = await FinancialPayment.create({
           name: entry.accountName || `${normalizedModel} saraf entry`,
           mobileNo: null,
           code: freshVoucher.referenceNumber || freshVoucher.voucherNumber || null,
           description:
             (freshVoucher.description ||
-              `Saraf voucher ${freshVoucher.voucherNumber}: ${isDebit ? 'Debit' : 'Credit'} ${amount} to ${entry.accountName || normalizedModel}. ${freshVoucher.notes || ''}`).trim() + lineVsLedger,
+              `Saraf voucher ${freshVoucher.voucherNumber}: ${isDebit ? 'Debit' : 'Credit'} ${amount} to ${entry.accountName || normalizedModel}. ${freshVoucher.notes || ''}`).trim(),
           amount,
-          currency: ledgerCurrencyId || undefined,
+          currency: resolved.lineCurrencyId || undefined,
           paymentDate,
           method: 'other',
           effect: isDebit ? 'subtract' : 'add',
