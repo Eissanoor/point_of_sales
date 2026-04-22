@@ -267,6 +267,7 @@ const getFinancialPaymentsByRelated = async (req, res) => {
       relatedId,
     })
       .populate('user', 'name email')
+      .populate('currency')
       .populate({
         path: 'relatedId',
         select: 'name code description',
