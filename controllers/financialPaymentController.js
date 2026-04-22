@@ -1,5 +1,6 @@
 const FinancialPayment = require('../models/financialPaymentModel');
 const APIFeatures = require('../utils/apiFeatures');
+const mongoose = require('mongoose');
 
 // @desc    Create a new financial payment
 // @route   POST /api/financial-payments
@@ -247,6 +248,7 @@ const deleteFinancialPayment = async (req, res) => {
 const getFinancialPaymentsByRelated = async (req, res) => {
   try {
     const { relatedModel, relatedId } = req.params;
+    const { currency, currencyId } = req.query;
 
     const allowedModels = [
       'Asset',
@@ -270,10 +272,27 @@ const getFinancialPaymentsByRelated = async (req, res) => {
       });
     }
 
-    const payments = await FinancialPayment.find({
+    const requestedCurrencyId = currency || currencyId;
+    if (
+      requestedCurrencyId &&
+      !mongoose.Types.ObjectId.isValid(String(requestedCurrencyId))
+    ) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid currency id format',
+      });
+    }
+
+    const paymentQuery = {
       relatedModel,
       relatedId,
-    })
+    };
+
+    if (requestedCurrencyId) {
+      paymentQuery.currency = requestedCurrencyId;
+    }
+
+    const payments = await FinancialPayment.find(paymentQuery)
       .populate('user', 'name email')
       .populate('currency')
       .populate({
