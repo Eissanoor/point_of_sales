@@ -13,6 +13,35 @@ const cloudinary = require('cloudinary').v2;
 /** Statuses where the bank movement is considered posted (balance should reflect the voucher). */
 const BANK_BALANCE_POSTED_STATUSES = ['pending', 'approved', 'completed'];
 
+const FINANCIAL_ACCOUNT_MODELS = [
+  'Asset',
+  'Income',
+  'Liability',
+  'PartnershipAccount',
+  'CashBook',
+  'Capital',
+  'Owner',
+  'Employee',
+  'PropertyAccount',
+];
+
+/**
+ * Payee-side balance effect for bank vouchers (double entry with bank account):
+ * - payment  => money leaves bank, payee balance increases
+ * - receipt  => money enters bank, payee balance decreases
+ */
+const getPayeeEffectForBankVoucher = (voucherType) =>
+  voucherType === 'receipt' ? 'subtract' : 'add';
+
+const shouldCreateSupplierPaymentForVoucher = (voucherType) =>
+  voucherType !== 'receipt';
+
+const shouldCreateCustomerPaymentForVoucher = (voucherType) =>
+  voucherType !== 'payment';
+
+const shouldCreateLedgerTransactionForStatus = (status) =>
+  BANK_BALANCE_POSTED_STATUSES.includes(status);
+
 /**
  * Updates BankAccount.balance when a voucher is posted (money out reduces balance; receipt increases).
  * Opening balance is left unchanged; running balance is stored in `balance` (same as account create flow).
@@ -65,6 +94,16 @@ const reverseBankBalanceForBankPaymentVoucher = async (voucherId) => {
   await BankAccount.findByIdAndUpdate(v.bankAccount, { $inc: { balance: delta } });
   v.bankBalanceApplied = false;
   await v.save();
+};
+
+/** Undo payee-side FinancialPayment when a posted voucher is cancelled/rejected/deleted. */
+const reversePayeeTransactionForBankPaymentVoucher = async (voucherId) => {
+  if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
+
+  const v = await BankPaymentVoucher.findById(voucherId);
+  if (!v || !v.relatedFinancialPayment) return;
+
+  await FinancialPayment.findByIdAndUpdate(v.relatedFinancialPayment, { isActive: false });
 };
 
 // @desc    Get all bank payment vouchers with filtering and pagination
@@ -201,7 +240,12 @@ const createTransactionFromVoucher = async (voucher, userId) => {
   let errorDetails = null;
 
   // Only create transactions if they don't already exist
-  if (freshVoucher.payeeType === 'supplier' && freshVoucher.payee && !freshVoucher.relatedSupplierPayment) {
+  if (
+    freshVoucher.payeeType === 'supplier' &&
+    freshVoucher.payee &&
+    !freshVoucher.relatedSupplierPayment &&
+    shouldCreateSupplierPaymentForVoucher(freshVoucher.voucherType)
+  ) {
     console.log('Creating SupplierPayment for supplier:', freshVoucher.payee);
     try {
       // Generate payment number
@@ -289,7 +333,12 @@ const createTransactionFromVoucher = async (voucher, userId) => {
     relatedPayment: freshVoucher.relatedPayment
   });
 
-  if (freshVoucher.payeeType === 'customer' && freshVoucher.payee && !freshVoucher.relatedPayment) {
+  if (
+    freshVoucher.payeeType === 'customer' &&
+    freshVoucher.payee &&
+    !freshVoucher.relatedPayment &&
+    shouldCreateCustomerPaymentForVoucher(freshVoucher.voucherType)
+  ) {
     console.log('✓ Condition met - Creating Payment for customer:', freshVoucher.payee);
     try {
       // Use voucher's transactionId or generate a new one
@@ -511,24 +560,13 @@ const createTransactionFromVoucher = async (voucher, userId) => {
     });
   }
 
-  // Create FinancialPayment when voucher is linked to a financial entity (Asset, Income, etc.)
+  // Create FinancialPayment when voucher is linked to a financial entity (Asset, Income, Employee, etc.)
   // Check both financialModel/financialId fields AND payeeType for financial models
-  const financialModels = [
-    'Asset',
-    'Income',
-    'Liability',
-    'PartnershipAccount',
-    'CashBook',
-    'Capital',
-    'Owner',
-    'Employee',
-    'PropertyAccount',
-  ];
   const isFinancialModel =
     (freshVoucher.financialModel &&
       freshVoucher.financialId &&
       !freshVoucher.relatedFinancialPayment) ||
-    (financialModels.includes(freshVoucher.payeeType) &&
+    (FINANCIAL_ACCOUNT_MODELS.includes(freshVoucher.payeeType) &&
       freshVoucher.payee &&
       !freshVoucher.relatedFinancialPayment);
 
@@ -550,24 +588,29 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         methodMapForFinancial[freshVoucher.paymentMethod] || 'bank_transfer';
 
       const paymentDate = freshVoucher.voucherDate || new Date();
+      const payeeEffect = getPayeeEffectForBankVoucher(freshVoucher.voucherType);
+      const voucherTypeLabel =
+        freshVoucher.voucherType === 'receipt' ? 'Receipt' : 'Payment';
 
       createdFinancialPayment = await FinancialPayment.create({
         name:
           freshVoucher.payeeName ||
           freshVoucher.description ||
-          `Financial payment for ${freshVoucher.financialModel}`,
+          `Financial payment for ${targetFinancialModel}`,
         mobileNo: null,
         code: freshVoucher.referenceNumber || null,
         description:
           freshVoucher.description ||
-          `Payment via bank payment voucher ${freshVoucher.voucherNumber}`,
+          `${voucherTypeLabel} via bank payment voucher ${freshVoucher.voucherNumber}`,
         amount: freshVoucher.amount,
+        currency: freshVoucher.currency || null,
         paymentDate,
         method: mappedMethod,
+        effect: payeeEffect,
         relatedModel: targetFinancialModel,
         relatedId: targetFinancialId,
         user: userId,
-        isActive: freshVoucher.isActive,
+        isActive: freshVoucher.isActive !== false,
       });
 
       freshVoucher.relatedFinancialPayment = createdFinancialPayment._id;
@@ -925,7 +968,7 @@ const createBankPaymentVoucher = async (req, res) => {
     console.log('Voucher created with status:', voucherStatus, 'Voucher ID:', voucher._id);
 
     const shouldCreateLedgerTransaction =
-      voucherStatus === 'completed' || voucherStatus === 'approved';
+      shouldCreateLedgerTransactionForStatus(voucherStatus);
     const shouldApplyBankBalance = BANK_BALANCE_POSTED_STATUSES.includes(voucherStatus);
 
     if (shouldCreateLedgerTransaction) {
@@ -1353,10 +1396,7 @@ const updateBankPaymentVoucher = async (req, res) => {
     const becamePosted = isPosted && !wasPosted;
 
     if (becamePosted) {
-      if (
-        updatedVoucher.status === 'completed' ||
-        updatedVoucher.status === 'approved'
-      ) {
+      if (shouldCreateLedgerTransactionForStatus(updatedVoucher.status)) {
         await createTransactionFromVoucher(updatedVoucher, req.user._id);
       }
       await applyBankBalanceForBankPaymentVoucher(updatedVoucher._id);
@@ -1465,6 +1505,7 @@ const rejectBankPaymentVoucher = async (req, res) => {
     }
 
     await reverseBankBalanceForBankPaymentVoucher(voucher._id);
+    await reversePayeeTransactionForBankPaymentVoucher(voucher._id);
 
     const voucherAfterReverse = await BankPaymentVoucher.findById(req.params.id);
     if (!voucherAfterReverse) {
@@ -1594,6 +1635,7 @@ const cancelBankPaymentVoucher = async (req, res) => {
     }
 
     await reverseBankBalanceForBankPaymentVoucher(voucher._id);
+    await reversePayeeTransactionForBankPaymentVoucher(voucher._id);
 
     const voucherAfterReverse = await BankPaymentVoucher.findById(req.params.id);
     if (!voucherAfterReverse) {
@@ -1652,6 +1694,7 @@ const deleteBankPaymentVoucher = async (req, res) => {
     }
 
     await reverseBankBalanceForBankPaymentVoucher(voucher._id);
+    await reversePayeeTransactionForBankPaymentVoucher(voucher._id);
 
     await BankPaymentVoucher.findByIdAndDelete(req.params.id);
 
@@ -1775,11 +1818,17 @@ const createMissingTransaction = async (req, res) => {
       });
     }
 
-    // Only create transaction if voucher is completed or approved
-    if (voucher.status !== 'completed' && voucher.status !== 'approved') {
+    if (voucher.relatedFinancialPayment) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Can only create transactions for completed or approved vouchers',
+        message: 'Financial payment already exists for this voucher',
+      });
+    }
+
+    if (!shouldCreateLedgerTransactionForStatus(voucher.status)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: `Can only create transactions for posted vouchers (${BANK_BALANCE_POSTED_STATUSES.join(', ')})`,
       });
     }
 
@@ -1796,15 +1845,25 @@ const createMissingTransaction = async (req, res) => {
       .populate('relatedSupplierPayment', 'paymentNumber amount')
       .select('-__v');
 
-    if (transactionResult.createdSupplierPayment || transactionResult.createdPayment) {
+    if (
+      transactionResult.createdSupplierPayment ||
+      transactionResult.createdPayment ||
+      transactionResult.createdFinancialPayment
+    ) {
       res.status(200).json({
         status: 'success',
         message: 'Transaction created successfully',
         data: {
           voucher: updatedVoucher,
-          createdTransaction: transactionResult.createdSupplierPayment 
+          createdTransaction: transactionResult.createdSupplierPayment
             ? { type: 'SupplierPayment', id: transactionResult.createdSupplierPayment._id }
-            : { type: 'Payment', id: transactionResult.createdPayment._id }
+            : transactionResult.createdPayment
+              ? { type: 'Payment', id: transactionResult.createdPayment._id }
+              : {
+                  type: 'FinancialPayment',
+                  id: transactionResult.createdFinancialPayment._id,
+                  referCode: transactionResult.createdFinancialPayment.referCode,
+                },
         },
       });
     } else {

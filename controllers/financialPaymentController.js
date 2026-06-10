@@ -286,6 +286,7 @@ const getFinancialPaymentsByRelated = async (req, res) => {
     const paymentQuery = {
       relatedModel,
       relatedId,
+      isActive: true,
     };
 
     if (requestedCurrencyId) {
