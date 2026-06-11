@@ -6,7 +6,9 @@ const {
   createBankAccount,
   updateBankAccount,
   deleteBankAccount,
-  getAccountBalance
+  getAccountBalance,
+  getAllBankAccountsDetailsHandler,
+  getBankAccountDetailsHandler,
 } = require('../controllers/bankAccountController');
 
 // Import auth middleware
@@ -21,6 +23,9 @@ router
   .get(getBankAccounts)  // Get all bank accounts
   .post(admin, createBankAccount);  // Create new bank account (admin only)
 
+// Summary for all accounts (must be before /:id)
+router.get('/details', getAllBankAccountsDetailsHandler);
+
 router
   .route('/:id')
   .get(getBankAccountById)  // Get single bank account
@@ -29,5 +34,8 @@ router
 
 // Get account balance
 router.get('/:id/balance', getAccountBalance);
+
+// Full account details with ledger and debit/credit totals
+router.get('/:id/details', getBankAccountDetailsHandler);
 
 module.exports = router;

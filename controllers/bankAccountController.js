@@ -1,5 +1,9 @@
 const BankAccount = require('../models/bankAccountModel');
 const APIFeatures = require('../utils/apiFeatures');
+const {
+  getBankAccountDetails,
+  getAllBankAccountsDetails,
+} = require('../services/bankAccountDetailsService');
 
 // @desc    Fetch all bank accounts
 // @route   GET /api/bank-accounts
@@ -250,11 +254,67 @@ const getAccountBalance = async (req, res) => {
   }
 };
 
+// @desc    Get all bank accounts with debit/credit summary and balances
+// @route   GET /api/bank-accounts/details
+// @access  Private
+const getAllBankAccountsDetailsHandler = async (req, res) => {
+  try {
+    const { isActive, startDate, endDate } = req.query;
+    const data = await getAllBankAccountsDetails({ isActive, startDate, endDate });
+
+    res.status(200).json({
+      status: 'success',
+      results: data.accounts.length,
+      data,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Get full bank account details with ledger, debit/credit totals
+// @route   GET /api/bank-accounts/:id/details
+// @access  Private
+const getBankAccountDetailsHandler = async (req, res) => {
+  try {
+    const { startDate, endDate, page, limit, includeTransactions } = req.query;
+    const details = await getBankAccountDetails(req.params.id, {
+      startDate,
+      endDate,
+      page,
+      limit,
+      includeTransactions: includeTransactions !== 'false',
+    });
+
+    if (!details) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Bank account not found',
+      });
+    }
+
+    res.status(200).json({
+      status: 'success',
+      data: details,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   getBankAccounts,
   getBankAccountById,
   createBankAccount,
   updateBankAccount,
   deleteBankAccount,
-  getAccountBalance
+  getAccountBalance,
+  getAllBankAccountsDetailsHandler,
+  getBankAccountDetailsHandler,
 };
