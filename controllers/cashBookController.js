@@ -6,7 +6,7 @@ const APIFeatures = require('../utils/apiFeatures');
 // @access  Private
 const createCashBook = async (req, res) => {
   try {
-    const { name, mobileNo, code, description } = req.body;
+    const { name, mobileNo, code, description, openingBalance } = req.body;
 
     // Validate user is authenticated
     if (!req.user || !req.user._id) {
@@ -16,11 +16,14 @@ const createCashBook = async (req, res) => {
       });
     }
 
+    const opening = openingBalance != null ? Number(openingBalance) : 0;
     const cashBook = await CashBook.create({
       name,
       mobileNo,
       code,
       description,
+      balance: Number.isFinite(opening) ? opening : 0,
+      openingBalance: Number.isFinite(opening) ? opening : 0,
       user: req.user._id,
     });
 

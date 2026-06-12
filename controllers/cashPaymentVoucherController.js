@@ -1,8 +1,7 @@
 const mongoose = require('mongoose');
 const CashPaymentVoucher = require('../models/cashPaymentVoucherModel');
-const cashVoucherDoubleEntryHelpers = require('./cashVoucherDoubleEntryHelpers');
-const Shop = require('../models/shopModel');
-const Warehouse = require('../models/warehouseModel');
+const CashBook = require('../models/cashBookModel');
+const BankAccount = require('../models/bankAccountModel');
 const SupplierPayment = require('../models/supplierPaymentModel');
 const Payment = require('../models/paymentModel');
 const SupplierJourney = require('../models/supplierJourneyModel');
@@ -11,6 +10,291 @@ const Purchase = require('../models/purchaseModel');
 const FinancialPayment = require('../models/financialPaymentModel');
 const APIFeatures = require('../utils/apiFeatures');
 const cloudinary = require('cloudinary').v2;
+
+/** Statuses where the cash movement is considered posted (balance should reflect the voucher). */
+const CASH_BALANCE_POSTED_STATUSES = ['pending', 'approved', 'completed'];
+
+const FINANCIAL_ACCOUNT_MODELS = [
+  'Asset',
+  'Income',
+  'Liability',
+  'PartnershipAccount',
+  'CashBook',
+  'Capital',
+  'Owner',
+  'Employee',
+  'PropertyAccount',
+];
+
+/**
+ * Payee-side balance effect for cash vouchers (double entry with cash account):
+ * - payment  => money leaves cash, payee balance increases
+ * - receipt  => money enters cash, payee balance decreases
+ */
+const getPayeeEffectForCashVoucher = (voucherType) =>
+  voucherType === 'receipt' ? 'subtract' : 'add';
+
+const shouldCreateSupplierPaymentForVoucher = (voucherType) =>
+  voucherType !== 'receipt';
+
+const shouldCreateCustomerPaymentForVoucher = (voucherType) =>
+  voucherType !== 'payment';
+
+const shouldCreateLedgerTransactionForStatus = (status) =>
+  CASH_BALANCE_POSTED_STATUSES.includes(status);
+
+/** Source cash book: receipt adds, payment/transfer subtracts. */
+const getSourceCashBookDelta = (voucherType, amount) => {
+  const amt = typeof amount === 'number' ? amount : parseFloat(amount);
+  if (!Number.isFinite(amt) || amt <= 0) return 0;
+  return voucherType === 'receipt' ? amt : -amt;
+};
+
+/** Payee side is opposite of source cash book movement. */
+const getPayeeSideDelta = (voucherType, amount) => {
+  const amt = typeof amount === 'number' ? amount : parseFloat(amount);
+  if (!Number.isFinite(amt) || amt <= 0) return 0;
+  return voucherType === 'receipt' ? -amt : amt;
+};
+
+/** FinancialPayment effect on source cash book (receipt = add, payment/transfer = subtract). */
+const getSourceCashBookEffect = (voucherType) =>
+  voucherType === 'receipt' ? 'add' : 'subtract';
+
+const ensurePayeeCashBookFinancialPayment = async (voucherId) => {
+  const v = await CashPaymentVoucher.findById(voucherId);
+  if (!v || v.payeeType !== 'CashBook' || !v.payee || v.relatedFinancialPayment) return;
+  if (!v.payeeCashBookBalanceApplied) return;
+
+  const amt = typeof v.amount === 'number' ? v.amount : parseFloat(v.amount);
+  if (!Number.isFinite(amt) || amt <= 0) return;
+
+  const voucherTypeLabel = v.voucherType === 'receipt' ? 'Receipt' : 'Payment';
+  const fp = await FinancialPayment.create({
+    name: v.payeeName || v.description || `Cash book ${voucherTypeLabel}`,
+    mobileNo: null,
+    code: v.referenceNumber || v.voucherNumber || null,
+    description:
+      v.description ||
+      `${voucherTypeLabel} via cash payment voucher ${v.voucherNumber} (payee cash book)`,
+    amount: amt,
+    currency: v.currency || null,
+    paymentDate: v.voucherDate || new Date(),
+    method: 'cash',
+    effect: getPayeeEffectForCashVoucher(v.voucherType),
+    relatedModel: 'CashBook',
+    relatedId: v.payee,
+    user: v.user,
+    isActive: v.isActive !== false,
+  });
+
+  v.relatedFinancialPayment = fp._id;
+  await v.save();
+};
+
+const ensureSourceCashBookFinancialPayment = async (voucherId) => {
+  const v = await CashPaymentVoucher.findById(voucherId);
+  if (!v || !v.cashBook || v.relatedCashBookFinancialPayment) return;
+  if (!v.cashBalanceApplied) return;
+
+  const amt = typeof v.amount === 'number' ? v.amount : parseFloat(v.amount);
+  if (!Number.isFinite(amt) || amt <= 0) return;
+
+  const voucherTypeLabel = v.voucherType === 'receipt' ? 'Receipt' : 'Payment';
+  const fp = await FinancialPayment.create({
+    name: v.payeeName || v.description || `Cash book ${voucherTypeLabel}`,
+    mobileNo: null,
+    code: v.referenceNumber || v.voucherNumber || null,
+    description:
+      v.description ||
+      `${voucherTypeLabel} via cash payment voucher ${v.voucherNumber}`,
+    amount: amt,
+    currency: v.currency || null,
+    paymentDate: v.voucherDate || new Date(),
+    method: 'cash',
+    effect: getSourceCashBookEffect(v.voucherType),
+    relatedModel: 'CashBook',
+    relatedId: v.cashBook,
+    user: v.user,
+    isActive: v.isActive !== false,
+  });
+
+  v.relatedCashBookFinancialPayment = fp._id;
+  await v.save();
+};
+
+/**
+ * Updates CashBook.balance when a voucher is posted (money out reduces balance; receipt increases).
+ * Opening balance is left unchanged; running balance is stored in `balance` (same as account create flow).
+ * Idempotent via cashBalanceApplied on the voucher.
+ */
+const applyCashBalanceForCashPaymentVoucher = async (voucherId) => {
+  if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
+
+  const v = await CashPaymentVoucher.findById(voucherId);
+  if (!v || v.cashBalanceApplied) return;
+  if (!CASH_BALANCE_POSTED_STATUSES.includes(v.status)) return;
+
+  const amt = typeof v.amount === 'number' ? v.amount : parseFloat(v.amount);
+  if (!Number.isFinite(amt) || amt <= 0) return;
+  if (!v.cashBook) return;
+
+  const delta = getSourceCashBookDelta(v.voucherType, amt);
+  if (delta === 0) return;
+
+  const cashBook = await CashBook.findByIdAndUpdate(
+    v.cashBook,
+    { $inc: { balance: delta } },
+    { new: true }
+  );
+  if (!cashBook) {
+    console.error('applyCashBalanceForCashPaymentVoucher: cash book not found', v.cashBook);
+    return;
+  }
+
+  v.cashBalanceApplied = true;
+  await v.save();
+
+  await ensureSourceCashBookFinancialPayment(v._id);
+};
+
+/** Undo applyCashBalanceForCashPaymentVoucher when a posted voucher is cancelled/rejected/deleted. */
+const reverseCashBalanceForCashPaymentVoucher = async (voucherId) => {
+  if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
+
+  const v = await CashPaymentVoucher.findById(voucherId);
+  if (!v || !v.cashBalanceApplied) return;
+
+  const amt = typeof v.amount === 'number' ? v.amount : parseFloat(v.amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    v.cashBalanceApplied = false;
+    await v.save();
+    return;
+  }
+  if (!v.cashBook) return;
+
+  const delta = -getSourceCashBookDelta(v.voucherType, amt);
+
+  await CashBook.findByIdAndUpdate(v.cashBook, { $inc: { balance: delta } });
+  v.cashBalanceApplied = false;
+  await v.save();
+};
+
+/** Adjust payee CashBook balance (transfer between cash books). */
+const applyPayeeCashBookBalanceForCashPaymentVoucher = async (voucherId) => {
+  if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
+
+  const v = await CashPaymentVoucher.findById(voucherId);
+  if (!v || v.payeeCashBookBalanceApplied || v.payeeType !== 'CashBook' || !v.payee) return;
+  if (!CASH_BALANCE_POSTED_STATUSES.includes(v.status)) return;
+
+  const payeeId = String(v.payee);
+  const sourceId = v.cashBook ? String(v.cashBook) : null;
+  if (sourceId && payeeId === sourceId) return;
+
+  const amt = typeof v.amount === 'number' ? v.amount : parseFloat(v.amount);
+  const delta = getPayeeSideDelta(v.voucherType, amt);
+  if (delta === 0) return;
+
+  const payeeCashBook = await CashBook.findByIdAndUpdate(v.payee, { $inc: { balance: delta } }, { new: true });
+  if (!payeeCashBook) {
+    console.error('applyPayeeCashBookBalanceForCashPaymentVoucher: payee cash book not found', v.payee);
+    return;
+  }
+
+  v.payeeCashBookBalanceApplied = true;
+  await v.save();
+
+  await ensurePayeeCashBookFinancialPayment(v._id);
+};
+
+const reversePayeeCashBookBalanceForCashPaymentVoucher = async (voucherId) => {
+  if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
+
+  const v = await CashPaymentVoucher.findById(voucherId);
+  if (!v || !v.payeeCashBookBalanceApplied || v.payeeType !== 'CashBook' || !v.payee) return;
+
+  const amt = typeof v.amount === 'number' ? v.amount : parseFloat(v.amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    v.payeeCashBookBalanceApplied = false;
+    await v.save();
+    return;
+  }
+
+  const delta = -getPayeeSideDelta(v.voucherType, amt);
+  await CashBook.findByIdAndUpdate(v.payee, { $inc: { balance: delta } });
+  v.payeeCashBookBalanceApplied = false;
+  await v.save();
+};
+
+/** Credit/debit payee BankAccount when payeeType is BankAccount (cash deposit/withdrawal). */
+const applyPayeeBankBalanceForCashPaymentVoucher = async (voucherId) => {
+  if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
+
+  const v = await CashPaymentVoucher.findById(voucherId);
+  if (!v || v.payeeBankBalanceApplied || v.payeeType !== 'BankAccount' || !v.payee) return;
+  if (!CASH_BALANCE_POSTED_STATUSES.includes(v.status)) return;
+
+  const amt = typeof v.amount === 'number' ? v.amount : parseFloat(v.amount);
+  if (!Number.isFinite(amt) || amt <= 0) return;
+
+  const delta = getPayeeSideDelta(v.voucherType, amt);
+  if (delta === 0) return;
+
+  const bank = await BankAccount.findByIdAndUpdate(v.payee, { $inc: { balance: delta } }, { new: true });
+  if (!bank) {
+    console.error('applyPayeeBankBalanceForCashPaymentVoucher: bank account not found', v.payee);
+    return;
+  }
+
+  v.payeeBankBalanceApplied = true;
+  await v.save();
+};
+
+const reversePayeeBankBalanceForCashPaymentVoucher = async (voucherId) => {
+  if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
+
+  const v = await CashPaymentVoucher.findById(voucherId);
+  if (!v || !v.payeeBankBalanceApplied || v.payeeType !== 'BankAccount' || !v.payee) return;
+
+  const amt = typeof v.amount === 'number' ? v.amount : parseFloat(v.amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    v.payeeBankBalanceApplied = false;
+    await v.save();
+    return;
+  }
+
+  const delta = -getPayeeSideDelta(v.voucherType, amt);
+  await BankAccount.findByIdAndUpdate(v.payee, { $inc: { balance: delta } });
+  v.payeeBankBalanceApplied = false;
+  await v.save();
+};
+
+/** Deactivate FinancialPayment ledger lines when a posted voucher is cancelled/rejected/deleted. */
+const reversePayeeTransactionForCashPaymentVoucher = async (voucherId) => {
+  if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
+
+  const v = await CashPaymentVoucher.findById(voucherId);
+  if (!v) return;
+
+  const fpIds = [v.relatedFinancialPayment, v.relatedCashBookFinancialPayment].filter(Boolean);
+  for (const fpId of fpIds) {
+    await FinancialPayment.findByIdAndUpdate(fpId, { isActive: false });
+  }
+};
+
+const applyPostedBalancesForCashPaymentVoucher = async (voucherId) => {
+  await applyCashBalanceForCashPaymentVoucher(voucherId);
+  await applyPayeeCashBookBalanceForCashPaymentVoucher(voucherId);
+  await applyPayeeBankBalanceForCashPaymentVoucher(voucherId);
+};
+
+const reversePostedBalancesForCashPaymentVoucher = async (voucherId) => {
+  await reverseCashBalanceForCashPaymentVoucher(voucherId);
+  await reversePayeeCashBookBalanceForCashPaymentVoucher(voucherId);
+  await reversePayeeBankBalanceForCashPaymentVoucher(voucherId);
+  await reversePayeeTransactionForCashPaymentVoucher(voucherId);
+};
 
 // @desc    Get all cash payment vouchers with filtering and pagination
 // @route   GET /api/cash-payment-vouchers
@@ -24,18 +308,13 @@ const getCashPaymentVouchers = async (req, res) => {
       .paginate();
 
     const vouchers = await features.query
+      .populate('cashBook', 'name code balance referCode')
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.cashAccount', 'accountName code balance')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('shop', 'name address')
-      .populate('warehouse', 'name address')
-      .populate('payee', 'name')
+      .populate('payee', 'name accountName accountNumber bankName code')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name')
       .populate('relatedPurchase', 'invoiceNumber')
       .populate('relatedSale', 'invoiceNumber')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .sort({ voucherDate: -1 })
       .select('-__v');
 
@@ -71,13 +350,9 @@ const getCashPaymentVouchers = async (req, res) => {
 const getCashPaymentVoucherById = async (req, res) => {
   try {
     const voucher = await CashPaymentVoucher.findById(req.params.id)
+      .populate('cashBook', 'name code balance referCode')
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.cashAccount', 'accountName code balance')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('shop', 'name address phoneNumber')
-      .populate('warehouse', 'name address phoneNumber')
-      .populate('payee', 'name email phoneNumber address')
+      .populate('payee', 'name email phoneNumber address accountName accountNumber bankName code')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
       .populate('relatedPurchase', 'invoiceNumber totalAmount')
@@ -85,7 +360,6 @@ const getCashPaymentVoucherById = async (req, res) => {
       .populate('relatedPayment', 'paymentNumber amount')
       .populate('relatedSupplierPayment', 'paymentNumber amount')
       .populate('relatedFinancialPayment', 'referCode amount paymentDate method relatedModel relatedId')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     if (!voucher) {
@@ -111,21 +385,21 @@ const getCashPaymentVoucherById = async (req, res) => {
 
 // Helper function to create Payment or SupplierPayment transaction from voucher
 const createTransactionFromVoucher = async (voucher, userId) => {
-  console.log('=== createTransactionFromVoucher called (CashPaymentVoucher) ===');
+  console.log('=== createTransactionFromVoucher called ===');
   console.log('Voucher ID:', voucher?._id);
   console.log('User ID:', userId);
   
   // Ensure voucher is a Mongoose document with all fields loaded
   if (!voucher || !voucher._id) {
     console.error('Invalid voucher passed to createTransactionFromVoucher');
-    return { createdSupplierPayment: null, createdPayment: null, createdFinancialPayment: null };
+    return { createdSupplierPayment: null, createdPayment: null };
   }
 
   // Refresh voucher from database to ensure we have all fields
   const freshVoucher = await CashPaymentVoucher.findById(voucher._id);
   if (!freshVoucher) {
     console.error('Voucher not found in database');
-    return { createdSupplierPayment: null, createdPayment: null, createdFinancialPayment: null };
+    return { createdSupplierPayment: null, createdPayment: null };
   }
   
   console.log('Fresh voucher loaded:', {
@@ -143,7 +417,7 @@ const createTransactionFromVoucher = async (voucher, userId) => {
       'cash': 'cash',
       'petty_cash': 'cash',
       'cash_register': 'cash',
-      'other': 'cash'
+      'other': 'other'
     };
     return methodMap[voucherMethod] || 'cash';
   };
@@ -154,7 +428,12 @@ const createTransactionFromVoucher = async (voucher, userId) => {
   let errorDetails = null;
 
   // Only create transactions if they don't already exist
-  if (freshVoucher.payeeType === 'supplier' && freshVoucher.payee && !freshVoucher.relatedSupplierPayment) {
+  if (
+    freshVoucher.payeeType === 'supplier' &&
+    freshVoucher.payee &&
+    !freshVoucher.relatedSupplierPayment &&
+    shouldCreateSupplierPaymentForVoucher(freshVoucher.voucherType)
+  ) {
     console.log('Creating SupplierPayment for supplier:', freshVoucher.payee);
     try {
       // Generate payment number
@@ -203,7 +482,7 @@ const createTransactionFromVoucher = async (voucher, userId) => {
       // Use voucherDate or paymentDate for consistency
       const paymentDate = freshVoucher.voucherDate || createdSupplierPayment.paymentDate || new Date();
       
-      // Create supplier journey entry
+      // Create supplier journey entry - this is what the payments API queries
       const journeyEntry = await SupplierJourney.create({
         supplier: freshVoucher.payee,
         user: userId,
@@ -211,7 +490,7 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         payment: {
           amount: freshVoucher.amount,
           method: mapPaymentMethod(freshVoucher.paymentMethod || 'cash'),
-          date: paymentDate,
+          date: paymentDate, // Use consistent date
           status: 'completed',
           transactionId: paymentTransactionId
         },
@@ -229,16 +508,31 @@ const createTransactionFromVoucher = async (voucher, userId) => {
       console.log('SupplierPayment created automatically:', createdSupplierPayment._id);
     } catch (error) {
       console.error('Error creating SupplierPayment automatically:', error);
-      errorDetails = error;
+      // Continue without failing - voucher is already created
     }
   }
 
   // Create Payment if customer is selected and no relatedPayment provided
-  if (freshVoucher.payeeType === 'customer' && freshVoucher.payee && !freshVoucher.relatedPayment) {
-    console.log('Creating Payment for customer:', freshVoucher.payee);
+  console.log('Checking customer payment creation:', {
+    payeeType: freshVoucher.payeeType,
+    hasPayee: !!freshVoucher.payee,
+    payee: freshVoucher.payee,
+    hasRelatedPayment: !!freshVoucher.relatedPayment,
+    relatedPayment: freshVoucher.relatedPayment
+  });
+
+  if (
+    freshVoucher.payeeType === 'customer' &&
+    freshVoucher.payee &&
+    !freshVoucher.relatedPayment &&
+    shouldCreateCustomerPaymentForVoucher(freshVoucher.voucherType)
+  ) {
+    console.log('✓ Condition met - Creating Payment for customer:', freshVoucher.payee);
     try {
+      // Use voucher's transactionId or generate a new one
       const paymentTransactionId = freshVoucher.transactionId || `TRX-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
       
+      // Calculate customer balances (like supplier payments)
       const Sales = require('../models/salesModel');
       const salesAgg = await Sales.aggregate([
         { $match: { customer: new mongoose.Types.ObjectId(freshVoucher.payee), isActive: true } },
@@ -253,23 +547,31 @@ const createTransactionFromVoucher = async (voucher, userId) => {
       const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
       const remainingBefore = totalSalesAmount - paidSoFar;
       
+      // Prepare payments array for Payment model
       const paymentMethodMapped = mapPaymentMethod(freshVoucher.paymentMethod || 'cash');
       const paymentsArray = [{
         method: paymentMethodMapped,
         amount: freshVoucher.amount,
-        bankAccount: null // Cash payments don't have bank accounts
+        bankAccount: null
       }];
 
+      // Use voucherDate or paymentDate for consistency
       const paymentDate = freshVoucher.voucherDate || new Date();
+
+      // Ensure customer is an ObjectId for Payment creation
       const customerIdForPayment = typeof freshVoucher.payee === 'string' 
         ? new mongoose.Types.ObjectId(freshVoucher.payee) 
         : freshVoucher.payee;
 
+      console.log('Creating Payment with customer ID:', customerIdForPayment.toString());
+
+      // Generate payment number (required field - must be set before creation)
       const date = new Date(paymentDate);
       const year = date.getFullYear().toString().slice(-2);
       const month = (date.getMonth() + 1).toString().padStart(2, '0');
       const day = date.getDate().toString().padStart(2, '0');
       
+      // Get count of payments for today to generate sequential number
       const startOfDay = new Date(date);
       startOfDay.setHours(0, 0, 0, 0);
       const endOfDay = new Date(date);
@@ -283,7 +585,9 @@ const createTransactionFromVoucher = async (voucher, userId) => {
       });
       
       const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
+      console.log('Generated payment number:', paymentNumber);
 
+      // Create Payment
       createdPayment = await Payment.create({
         paymentNumber: paymentNumber,
         customer: customerIdForPayment,
@@ -301,20 +605,34 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         paymentType: freshVoucher.relatedSale ? 'sale_payment' : 'advance_payment'
       });
 
+      console.log('Payment created successfully:', createdPayment._id, 'Payment Number:', createdPayment.paymentNumber);
+
+      // Calculate new balances (like supplier payments)
       const newPaidAmount = paidSoFar + freshVoucher.amount;
       const newRemainingBalance = remainingBefore - freshVoucher.amount;
       const isAdvancedPayment = newRemainingBalance < 0;
 
+      // Get the actual payment status from the created payment
+      const actualPaymentStatus = createdPayment.status || 'completed';
+
+      // Ensure customer is an ObjectId
+      const customerId = typeof freshVoucher.payee === 'string' 
+        ? new mongoose.Types.ObjectId(freshVoucher.payee) 
+        : freshVoucher.payee;
+
+      console.log('Creating PaymentJourney with customer ID:', customerId.toString(), 'Type:', typeof customerId);
+
+      // Create payment journey record with balance info (like supplier payments)
       const paymentJourneyData = {
         payment: createdPayment._id,
-        customer: customerIdForPayment,
+        customer: customerId, // Ensure customer field is set as ObjectId
         user: userId,
         action: 'payment_made',
         paymentDetails: {
           amount: freshVoucher.amount,
           method: paymentMethodMapped,
           date: paymentDate,
-          status: 'completed',
+          status: actualPaymentStatus, // Use actual payment status
           transactionId: paymentTransactionId
         },
         paidAmount: newPaidAmount,
@@ -323,8 +641,53 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         notes: `Payment of ${freshVoucher.amount} received from customer via cash payment voucher ${freshVoucher.voucherNumber}. Transaction ID: ${paymentTransactionId}. ${isAdvancedPayment ? `Advanced payment: ${Math.abs(newRemainingBalance)}` : `Remaining balance: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`
       };
       
+      console.log('PaymentJourney data before creation:', {
+        customer: paymentJourneyData.customer?.toString(),
+        customerType: typeof paymentJourneyData.customer,
+        action: paymentJourneyData.action,
+        payment: paymentJourneyData.payment?.toString()
+      });
+      
       const paymentJourneyEntry = await PaymentJourney.create(paymentJourneyData);
 
+      console.log('PaymentJourney entry created successfully:', {
+        journeyId: paymentJourneyEntry._id,
+        customerId: paymentJourneyEntry.customer?.toString(),
+        paymentId: paymentJourneyEntry.payment?.toString(),
+        action: paymentJourneyEntry.action,
+        paymentDetails: paymentJourneyEntry.paymentDetails
+      });
+      
+      // Ensure customer field is set (in case it wasn't saved properly)
+      if (!paymentJourneyEntry.customer || paymentJourneyEntry.customer.toString() !== customerId.toString()) {
+        console.log('⚠️ Customer field missing or incorrect, updating PaymentJourney...');
+        paymentJourneyEntry.customer = customerId;
+        await paymentJourneyEntry.save();
+        console.log('✓ PaymentJourney customer field updated to:', customerId.toString());
+      }
+
+      // Verify PaymentJourney was created correctly by querying it back
+      const verifyJourney = await PaymentJourney.findById(paymentJourneyEntry._id);
+      if (verifyJourney) {
+        console.log('Verified PaymentJourney exists with customer:', verifyJourney.customer?.toString());
+        
+        // Also verify by querying PaymentJourney with customer filter (like the API does)
+        const apiQueryTest = await PaymentJourney.find({
+          customer: customerId,
+          action: 'payment_made'
+        }).limit(1);
+        console.log('API query test - found PaymentJourney entries:', apiQueryTest.length);
+        if (apiQueryTest.length > 0) {
+          console.log('✓ PaymentJourney will be found by customer transactions API');
+        } else {
+          console.error('✗ WARNING: PaymentJourney NOT found by customer transactions API query!');
+          console.error('Query used:', { customer: customerId.toString(), action: 'payment_made' });
+        }
+      } else {
+        console.error('ERROR: PaymentJourney not found after creation!');
+      }
+
+      // Update sale payment status if sale exists
       if (freshVoucher.relatedSale) {
         const saleRecord = await Sales.findById(freshVoucher.relatedSale);
         if (saleRecord) {
@@ -339,49 +702,79 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         }
       }
 
+      // Update voucher with created Payment reference
       freshVoucher.relatedPayment = createdPayment._id;
-      await freshVoucher.save();
+      const savedVoucher = await freshVoucher.save();
+      
+      console.log('✓ Voucher updated with relatedPayment:', {
+        voucherId: savedVoucher._id,
+        relatedPayment: savedVoucher.relatedPayment?.toString(),
+        paymentId: createdPayment._id.toString()
+      });
+
+      // Verify the update persisted
+      const verifyVoucher = await CashPaymentVoucher.findById(freshVoucher._id);
+      console.log('✓ Verified voucher has relatedPayment:', verifyVoucher.relatedPayment?.toString());
 
       console.log('Payment created automatically:', createdPayment._id);
     } catch (error) {
-      console.error('Error creating Payment automatically:', error);
-      errorDetails = error;
+      console.error('❌ ERROR creating Payment automatically:', error);
+      console.error('Error stack:', error.stack);
+      errorDetails = {
+        message: error.message,
+        name: error.name,
+        code: error.code,
+        errors: error.errors
+      };
+      console.error('Error details:', errorDetails);
+      
+      // Log the voucher details for debugging
+      console.error('Voucher details at error:', {
+        voucherId: freshVoucher._id,
+        payeeType: freshVoucher.payeeType,
+        payee: freshVoucher.payee,
+        amount: freshVoucher.amount,
+        status: freshVoucher.status
+      });
+      
+      // Don't fail the voucher creation, but log the error
+      // Continue without failing - voucher is already created
     }
+  } else {
+    console.log('✗ Condition NOT met for customer payment creation:', {
+      payeeType: freshVoucher.payeeType,
+      hasPayee: !!freshVoucher.payee,
+      hasRelatedPayment: !!freshVoucher.relatedPayment
+    });
   }
 
-  // Create FinancialPayment when voucher is linked to a financial entity (Asset, Income, etc.)
-  const financialModels = [
-    'Asset',
-    'Income',
-    'Liability',
-    'PartnershipAccount',
-    'CashBook',
-    'Capital',
-    'Owner',
-    'Employee',
-    'PropertyAccount',
-  ];
+  // Create FinancialPayment when voucher is linked to a financial entity (Asset, Income, Employee, etc.)
+  // Check both financialModel/financialId fields AND payeeType for financial models
   const isFinancialModel =
     (freshVoucher.financialModel &&
       freshVoucher.financialId &&
       !freshVoucher.relatedFinancialPayment) ||
-    (financialModels.includes(freshVoucher.payeeType) &&
+    (FINANCIAL_ACCOUNT_MODELS.includes(freshVoucher.payeeType) &&
+      freshVoucher.payeeType !== 'CashBook' &&
       freshVoucher.payee &&
       !freshVoucher.relatedFinancialPayment);
 
   if (isFinancialModel) {
+    // Use financialModel/financialId if set, otherwise derive from payeeType/payee
     const targetFinancialModel = freshVoucher.financialModel || freshVoucher.payeeType;
     const targetFinancialId = freshVoucher.financialId || freshVoucher.payee;
     try {
       const methodMapForFinancial = {
-        cash: 'cash',
-        petty_cash: 'cash',
-        cash_register: 'cash',
-        other: 'cash',
+        cash: 'cash', petty_cash: 'cash', cash_register: 'cash', other: 'other',
       };
 
-      const mappedMethod = methodMapForFinancial[freshVoucher.paymentMethod] || 'cash';
+      const mappedMethod =
+        methodMapForFinancial[freshVoucher.paymentMethod] || 'cash';
+
       const paymentDate = freshVoucher.voucherDate || new Date();
+      const payeeEffect = getPayeeEffectForCashVoucher(freshVoucher.voucherType);
+      const voucherTypeLabel =
+        freshVoucher.voucherType === 'receipt' ? 'Receipt' : 'Payment';
 
       createdFinancialPayment = await FinancialPayment.create({
         name:
@@ -392,14 +785,16 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         code: freshVoucher.referenceNumber || null,
         description:
           freshVoucher.description ||
-          `Payment via cash payment voucher ${freshVoucher.voucherNumber}`,
+          `${voucherTypeLabel} via cash payment voucher ${freshVoucher.voucherNumber}`,
         amount: freshVoucher.amount,
+        currency: freshVoucher.currency || null,
         paymentDate,
         method: mappedMethod,
+        effect: payeeEffect,
         relatedModel: targetFinancialModel,
         relatedId: targetFinancialId,
         user: userId,
-        isActive: freshVoucher.isActive,
+        isActive: freshVoucher.isActive !== false,
       });
 
       freshVoucher.relatedFinancialPayment = createdFinancialPayment._id;
@@ -426,10 +821,8 @@ const createCashPaymentVoucher = async (req, res) => {
     const {
       voucherDate,
       voucherType,
-      cashAccount,
-      cashAccountType,
-      shop,
-      warehouse,
+      cashBook: cashBookBody,
+      cashAccount: cashAccountAlias,
       payeeType,
       payee,
       payeeName,
@@ -443,260 +836,33 @@ const createCashPaymentVoucher = async (req, res) => {
       relatedSale,
       relatedPayment,
       relatedSupplierPayment,
-      relatedBankPaymentVoucher,
-      relatedCashPaymentVoucher,
       description,
       notes,
       status,
       attachments,
-      entries,
     } = req.body;
 
-    const parsedCashVoucherEntries =
-      cashVoucherDoubleEntryHelpers.parseCashVoucherEntriesFromBody(entries);
-    if (parsedCashVoucherEntries && parsedCashVoucherEntries.length >= 2) {
-      const normResult = await cashVoucherDoubleEntryHelpers.validateAndNormalizeCashVoucherEntries(
-        parsedCashVoucherEntries
-      );
-      if (!normResult.ok) {
-        return res.status(normResult.response.status).json(normResult.response.body);
-      }
+    const cashBook = cashBookBody || cashAccountAlias;
 
-      if (shop) {
-        const shopExists = await Shop.findById(shop);
-        if (!shopExists) {
-          return res.status(404).json({ status: 'fail', message: 'Shop not found' });
-        }
-      }
-      if (warehouse) {
-        const warehouseExists = await Warehouse.findById(warehouse);
-        if (!warehouseExists) {
-          return res.status(404).json({ status: 'fail', message: 'Warehouse not found' });
-        }
-      }
-
-      let uploadedAttachments = [];
-      const parseAttachmentsString = (attachmentsStr) => {
-        if (!attachmentsStr || typeof attachmentsStr !== 'string') return [];
-        try {
-          let cleanString = attachmentsStr.trim();
-          if (
-            (cleanString.startsWith('"') && cleanString.endsWith('"')) ||
-            (cleanString.startsWith("'") && cleanString.endsWith("'"))
-          ) {
-            cleanString = cleanString.slice(1, -1);
-          }
-          cleanString = cleanString
-            .replace(/\\n/g, '')
-            .replace(/\\r/g, '')
-            .replace(/\\t/g, '')
-            .replace(/\\'/g, "'")
-            .replace(/\\"/g, '"')
-            .replace(/\\\\/g, '\\');
-          const parsed = JSON.parse(cleanString);
-          if (Array.isArray(parsed)) return parsed;
-          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return [parsed];
-          return [];
-        } catch {
-          try {
-            const jsonMatch = attachmentsStr.match(/\[[\s\S]*\]/);
-            if (jsonMatch) {
-              const parsed = JSON.parse(jsonMatch[0]);
-              return Array.isArray(parsed) ? parsed : [parsed];
-            }
-          } catch {
-            /* ignore */
-          }
-          return [];
-        }
-      };
-
-      if (req.file) {
-        try {
-          const uploadResult = await new Promise((resolve, reject) => {
-            const stream = cloudinary.uploader.upload_stream(
-              { folder: 'cash-payment-vouchers' },
-              (error, result) => {
-                if (error) return reject(error);
-                resolve(result);
-              }
-            );
-            stream.end(req.file.buffer);
-          });
-          uploadedAttachments.push({
-            url: String(uploadResult.secure_url || ''),
-            name: String(req.file.originalname || ''),
-            type: String(req.file.mimetype || ''),
-          });
-        } catch (uploadError) {
-          console.error('Error uploading file:', uploadError);
-        }
-      }
-
-      if (attachments !== undefined && attachments !== null) {
-        let parsedAttachments = [];
-        if (Array.isArray(attachments)) parsedAttachments = attachments;
-        else if (typeof attachments === 'string') parsedAttachments = parseAttachmentsString(attachments);
-        else if (typeof attachments === 'object' && !Array.isArray(attachments)) parsedAttachments = [attachments];
-        const normalizedAttachments = parsedAttachments
-          .filter((att) => att && typeof att === 'object' && !Array.isArray(att) && (att.url || att.name))
-          .map((att) => ({
-            url: String(att.url || ''),
-            name: String(att.name || ''),
-            type: String(att.type || att.mimetype || ''),
-          }));
-        uploadedAttachments =
-          req.file && uploadedAttachments.length > 0
-            ? [...uploadedAttachments, ...normalizedAttachments]
-            : normalizedAttachments;
-      }
-
-      if (!req.user || !req.user._id) {
-        return res.status(401).json({ status: 'fail', message: 'User not authenticated' });
-      }
-
-      const voucherData = {
-        voucherType: voucherType || 'journal_entry',
-        entries: normResult.normalizedEntries,
-        amount: normResult.totalDebits,
-        payeeType: 'other',
-        paymentMethod: paymentMethod || 'cash',
-        cashAccountType: cashAccountType || 'main_cash',
-        currency,
-        currencyExchangeRate: currencyExchangeRate
-          ? typeof currencyExchangeRate === 'string'
-            ? parseFloat(currencyExchangeRate)
-            : currencyExchangeRate
-          : 1,
-        referenceNumber,
-        transactionId,
-        relatedPurchase,
-        relatedSale,
-        relatedPayment,
-        relatedSupplierPayment,
-        relatedBankPaymentVoucher,
-        relatedCashPaymentVoucher,
-        description,
-        notes,
-        status: status || 'completed',
-        attachments: uploadedAttachments,
-        user: req.user._id,
-      };
-      if (cashAccount !== undefined && cashAccount !== null && cashAccount !== '') {
-        voucherData.cashAccount = cashAccount;
-      }
-      if (shop) voucherData.shop = shop;
-      if (warehouse) voucherData.warehouse = warehouse;
-
-      if (voucherDate) {
-        const parsedDate = new Date(voucherDate);
-        if (!isNaN(parsedDate.getTime())) voucherData.voucherDate = parsedDate;
-      }
-      if (req.body.voucherNumber) voucherData.voucherNumber = req.body.voucherNumber;
-
-      if (!Array.isArray(voucherData.attachments)) voucherData.attachments = [];
-      else {
-        voucherData.attachments = voucherData.attachments
-          .filter((att) => att && typeof att === 'object' && !Array.isArray(att))
-          .map((att) => ({
-            url: String(att.url || ''),
-            name: String(att.name || ''),
-            type: String(att.type || ''),
-          }));
-      }
-
-      let voucher = await CashPaymentVoucher.create(voucherData);
-      let transactionResult = null;
-      let createdTransactions = null;
-      const voucherStatus = voucher.status || voucherData.status || status;
-      if (voucherStatus === 'completed' || voucherStatus === 'posted') {
-        transactionResult = await cashVoucherDoubleEntryHelpers.createTransactionsFromCashVoucherEntries(
-          voucher,
-          req.user._id
-        );
-        if (
-          transactionResult.createdPayment ||
-          transactionResult.createdSupplierPayment ||
-          (transactionResult.createdFinancialPayments && transactionResult.createdFinancialPayments.length > 0)
-        ) {
-          createdTransactions = {
-            ...(transactionResult.createdPayment && {
-              payment: {
-                type: 'Payment',
-                id: transactionResult.createdPayment._id,
-                paymentNumber: transactionResult.createdPayment.paymentNumber,
-              },
-            }),
-            ...(transactionResult.createdSupplierPayment && {
-              supplierPayment: {
-                type: 'SupplierPayment',
-                id: transactionResult.createdSupplierPayment._id,
-                paymentNumber: transactionResult.createdSupplierPayment.paymentNumber,
-              },
-            }),
-            ...(transactionResult.createdFinancialPayments &&
-              transactionResult.createdFinancialPayments.length > 0 && {
-                financialPayments: transactionResult.createdFinancialPayments.map((fp) => ({
-                  type: 'FinancialPayment',
-                  id: fp._id,
-                  referCode: fp.referCode,
-                  amount: fp.amount,
-                  relatedModel: fp.relatedModel,
-                })),
-              }),
-          };
-        }
-        await cashVoucherDoubleEntryHelpers.applyEntryBalancesForCashVoucher(voucher._id);
-      }
-
-      const populatedVoucher = await CashPaymentVoucher.findById(voucher._id)
-        .populate('currency', 'name code symbol')
-        .populate('entries.account')
-        .populate('entries.cashAccount', 'accountName code balance')
-        .populate('entries.bankAccount', 'accountName accountNumber bankName')
-        .populate('shop', 'name address')
-        .populate('warehouse', 'name address')
-        .populate('user', 'name email')
-        .populate('relatedPayment', 'paymentNumber amount')
-        .populate('relatedSupplierPayment', 'paymentNumber amount')
-        .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
-        .select('-__v');
-
-      const responseData = { voucher: populatedVoucher };
-      if (createdTransactions) responseData.createdTransactions = createdTransactions;
-      if (transactionResult && transactionResult.error) responseData.transactionError = transactionResult.error;
-
-      return res.status(201).json({
-        status: 'success',
-        message: 'Cash payment voucher created successfully',
-        data: responseData,
+    if (req.body.bankAccount !== undefined && req.body.bankAccount !== null && req.body.bankAccount !== '') {
+      return res.status(400).json({
+        status: 'fail',
+        message:
+          'Bank account is not available as the source on cash payment vouchers. Use cashBook (cash book) instead.',
       });
     }
-
+    
     console.log('req.file:', req.file);
     console.log('attachments from req.body:', attachments);
     console.log('attachments type:', typeof attachments);
-
-    // Validate shop if provided
-    if (shop) {
-      const shopExists = await Shop.findById(shop);
-      if (!shopExists) {
-        return res.status(404).json({
-          status: 'fail',
-          message: 'Shop not found',
-        });
-      }
-    }
-
-    // Validate warehouse if provided
-    if (warehouse) {
-      const warehouseExists = await Warehouse.findById(warehouse);
-      if (!warehouseExists) {
-        return res.status(404).json({
-          status: 'fail',
-          message: 'Warehouse not found',
-        });
-      }
+    
+    // Validate cash book exists
+    const cashBookExists = await CashBook.findById(cashBook);
+    if (!cashBookExists) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Cash book not found',
+      });
     }
 
     // Normalize payee: treat empty string as undefined
@@ -713,7 +879,7 @@ const createCashPaymentVoucher = async (req, res) => {
       } else if (payeeType === 'customer') {
         PayeeModel = require('../models/customerModel');
       } else if (payeeType === 'employee') {
-        PayeeModel = require('../models/userModel');
+        PayeeModel = require('../models/userModel'); // Assuming Employee uses User model
       } else if (payeeType === 'Asset') {
         PayeeModel = require('../models/assetModel');
       } else if (payeeType === 'Income') {
@@ -724,6 +890,8 @@ const createCashPaymentVoucher = async (req, res) => {
         PayeeModel = require('../models/partnershipAccountModel');
       } else if (payeeType === 'CashBook') {
         PayeeModel = require('../models/cashBookModel');
+      } else if (payeeType === 'BankAccount') {
+        PayeeModel = require('../models/bankAccountModel');
       } else if (payeeType === 'Capital') {
         PayeeModel = require('../models/capitalModel');
       } else if (payeeType === 'Owner') {
@@ -891,30 +1059,55 @@ const createCashPaymentVoucher = async (req, res) => {
       'Liability',
       'PartnershipAccount',
       'CashBook',
+      'BankAccount',
       'Capital',
       'Owner',
       'Employee',
       'PropertyAccount',
     ];
+    if (
+      payeeType === 'CashBook' &&
+      normalizedPayee &&
+      cashBook &&
+      String(normalizedPayee) === String(cashBook)
+    ) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Source cash book and payee cash book cannot be the same',
+      });
+    }
+
     let finalStatus = status || 'draft';
-    if (!status && (payeeType === 'supplier' || payeeType === 'customer') && normalizedPayee) {
-      finalStatus = 'completed';
-      console.log('Auto-setting status to "completed" because supplier/customer is selected');
+    if (!status) {
+      if ((payeeType === 'supplier' || payeeType === 'customer') && payee) {
+        finalStatus = 'completed';
+        console.log('Auto-setting status to "completed" because supplier/customer is selected');
+      } else if (financialModels.includes(payeeType) && normalizedPayee) {
+        finalStatus = 'completed';
+        console.log(
+          `Auto-setting status to "completed" because payeeType "${payeeType}" is a financial model`
+        );
+      } else if (
+        (voucherType === 'payment' ||
+          voucherType === 'receipt' ||
+          voucherType === 'transfer' ||
+          voucherType === undefined) &&
+        cashBook
+      ) {
+        const amountNum =
+          typeof amount === 'string' ? parseFloat(amount) : Number(amount);
+        if (Number.isFinite(amountNum) && amountNum > 0) {
+          finalStatus = 'pending';
+          console.log(
+            'Auto-setting status to "pending" so cash balance updates for this cash payment voucher'
+          );
+        }
+      }
     }
-    // Also auto-complete when payeeType is a financial model (Asset, Income, etc.)
-    if (!status && financialModels.includes(payeeType) && normalizedPayee) {
-      finalStatus = 'completed';
-      console.log(
-        `Auto-setting status to "completed" because payeeType "${payeeType}" is a financial model`
-      );
-    }
-    
+
     const voucherData = {
       voucherType,
-      cashAccount,
-      cashAccountType: cashAccountType || 'main_cash',
-      shop,
-      warehouse,
+      cashBook,
       payeeType,
       // Only set payee when we actually have one and type is not "other"
       payee:
@@ -922,7 +1115,11 @@ const createCashPaymentVoucher = async (req, res) => {
       payeeName,
       amount: typeof amount === 'string' ? parseFloat(amount) : amount,
       currency,
-      currencyExchangeRate: currencyExchangeRate ? (typeof currencyExchangeRate === 'string' ? parseFloat(currencyExchangeRate) : currencyExchangeRate) : 1,
+      currencyExchangeRate: currencyExchangeRate
+        ? typeof currencyExchangeRate === 'string'
+          ? parseFloat(currencyExchangeRate)
+          : currencyExchangeRate
+        : 1,
       paymentMethod,
       transactionId,
       referenceNumber,
@@ -975,12 +1172,17 @@ const createCashPaymentVoucher = async (req, res) => {
 
     // Automatically create Payment or SupplierPayment transaction if supplier/customer is selected
     // Only create if status is 'completed' or 'approved' and relatedPayment/relatedSupplierPayment is not already provided
+    // Check voucher.status (after creation) to ensure we have the actual saved status
     let createdTransaction = null;
     let transactionResult = null;
     const voucherStatus = voucher.status || voucherData.status || status;
     console.log('Voucher created with status:', voucherStatus, 'Voucher ID:', voucher._id);
-    
-    if ((voucherStatus === 'completed' || voucherStatus === 'approved')) {
+
+    const shouldCreateLedgerTransaction =
+      shouldCreateLedgerTransactionForStatus(voucherStatus);
+    const shouldApplyCashBalance = CASH_BALANCE_POSTED_STATUSES.includes(voucherStatus);
+
+    if (shouldCreateLedgerTransaction) {
       console.log('Creating transaction from voucher - status is completed/approved');
       transactionResult = await createTransactionFromVoucher(voucher, req.user._id);
       console.log('Transaction result:', {
@@ -1012,34 +1214,41 @@ const createCashPaymentVoucher = async (req, res) => {
         };
         console.log('Transaction created - FinancialPayment:', createdTransaction.id);
       } else {
-        console.log('No transaction created - check if supplier/customer/financial model was selected and relatedPayment/relatedSupplierPayment/relatedFinancialPayment was already set');
+        console.log('No transaction created - check if supplier/customer was selected and relatedPayment/relatedSupplierPayment was already set');
         if (transactionResult.error) {
           console.error('Transaction creation error:', transactionResult.error);
         }
       }
       
-      // Refresh voucher to get updated relatedPayment/relatedSupplierPayment/relatedFinancialPayment
+      // Reload voucher after transaction creation to ensure we have the latest data
       voucher = await CashPaymentVoucher.findById(voucher._id);
+      console.log('Voucher reloaded after transaction creation:', {
+        voucherId: voucher._id,
+        relatedPayment: voucher.relatedPayment?.toString(),
+        relatedSupplierPayment: voucher.relatedSupplierPayment?.toString()
+      });
+    } else {
+      console.log('Transaction NOT created - voucher status is:', voucherStatus, '(expected: completed or approved)');
     }
 
-    // Populate before sending response
+    if (shouldApplyCashBalance) {
+      await applyPostedBalancesForCashPaymentVoucher(voucher._id);
+    }
+
+    // Populate before sending response - use the reloaded voucher
     const populatedVoucher = await CashPaymentVoucher.findById(voucher._id)
+      .populate('cashBook', 'name code balance referCode')
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.cashAccount', 'accountName code balance')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('shop', 'name address')
-      .populate('warehouse', 'name address')
-      .populate('payee', 'name')
+      .populate('payee', 'name accountName accountNumber bankName code')
       .populate('user', 'name email')
-      .populate('relatedFinancialPayment', 'referCode amount paymentDate method relatedModel relatedId')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
+      .populate('relatedPayment', 'paymentNumber amount')
+      .populate('relatedSupplierPayment', 'paymentNumber amount')
       .select('-__v');
 
     // Build response data and only include transactionError when there is an actual error
     const responseData = {
       voucher: populatedVoucher,
-      createdTransaction,
+      createdTransaction: createdTransaction,
     };
 
     if (transactionResult && transactionResult.error) {
@@ -1105,23 +1314,29 @@ const updateCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    // Prevent updates if status is completed, posted or cancelled
-    if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
+    const previousStatus = voucher.status;
+
+    if (req.body.bankAccount !== undefined && req.body.bankAccount !== null && req.body.bankAccount !== '') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot update completed, posted or cancelled voucher',
+        message:
+          'Bank account is not available as the source on cash payment vouchers. Use cashBook (cash book) instead.',
       });
     }
 
-    const previousStatus = voucher.status;
+    // Prevent updates if status is completed or cancelled
+    if (voucher.status === 'completed' || voucher.status === 'cancelled') {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Cannot update completed or cancelled voucher',
+      });
+    }
 
     const {
       voucherDate,
       voucherType,
-      cashAccount,
-      cashAccountType,
-      shop,
-      warehouse,
+      cashBook: cashBookBody,
+      cashAccount: cashAccountAlias,
       payeeType,
       payee,
       payeeName,
@@ -1135,13 +1350,10 @@ const updateCashPaymentVoucher = async (req, res) => {
       relatedSale,
       relatedPayment,
       relatedSupplierPayment,
-      relatedBankPaymentVoucher,
-      relatedCashPaymentVoucher,
       description,
       notes,
       status,
       attachments,
-      entries,
     } = req.body;
 
     console.log('Update - req.file:', req.file);
@@ -1300,62 +1512,20 @@ const updateCashPaymentVoucher = async (req, res) => {
       }
     }
 
-    // Validate shop if provided
-    if (shop !== undefined) {
-      if (shop) {
-        const shopExists = await Shop.findById(shop);
-        if (!shopExists) {
-          return res.status(404).json({
-            status: 'fail',
-            message: 'Shop not found',
-          });
-        }
-      }
-      voucher.shop = shop;
-    }
-
-    // Validate warehouse if provided
-    if (warehouse !== undefined) {
-      if (warehouse) {
-        const warehouseExists = await Warehouse.findById(warehouse);
-        if (!warehouseExists) {
-          return res.status(404).json({
-            status: 'fail',
-            message: 'Warehouse not found',
-          });
-        }
-      }
-      voucher.warehouse = warehouse;
-    }
-
-    if (entries !== undefined) {
-      const parsedForUpdate = cashVoucherDoubleEntryHelpers.parseCashVoucherEntriesFromBody(entries);
-      if (!parsedForUpdate || parsedForUpdate.length < 2) {
-        return res.status(400).json({
+    // Update fields
+    if (voucherDate !== undefined) voucher.voucherDate = voucherDate;
+    if (voucherType !== undefined) voucher.voucherType = voucherType;
+    const cashBookUpdate = cashBookBody !== undefined ? cashBookBody : cashAccountAlias;
+    if (cashBookUpdate !== undefined) {
+      const cashBookExists = await CashBook.findById(cashBookUpdate);
+      if (!cashBookExists) {
+        return res.status(404).json({
           status: 'fail',
-          message: 'entries must be a valid array with at least 2 lines',
+          message: 'Cash book not found',
         });
       }
-      const normResult = await cashVoucherDoubleEntryHelpers.validateAndNormalizeCashVoucherEntries(
-        parsedForUpdate
-      );
-      if (!normResult.ok) {
-        return res.status(normResult.response.status).json(normResult.response.body);
-      }
-      voucher.entries = normResult.normalizedEntries;
-      voucher.amount = normResult.totalDebits;
+      voucher.cashBook = cashBookUpdate;
     }
-
-    // Update fields
-    if (voucherDate !== undefined) {
-      const parsedDate = new Date(voucherDate);
-      if (!isNaN(parsedDate.getTime())) {
-        voucher.voucherDate = parsedDate;
-      }
-    }
-    if (voucherType !== undefined) voucher.voucherType = voucherType;
-    if (cashAccount !== undefined) voucher.cashAccount = cashAccount;
-    if (cashAccountType !== undefined) voucher.cashAccountType = cashAccountType;
     if (payeeType !== undefined) voucher.payeeType = payeeType;
     // Normalize payee on update: treat empty string as undefined
     if (payee !== undefined) {
@@ -1384,6 +1554,8 @@ const updateCashPaymentVoucher = async (req, res) => {
             PayeeModel = require('../models/partnershipAccountModel');
           } else if (finalPayeeType === 'CashBook') {
             PayeeModel = require('../models/cashBookModel');
+          } else if (finalPayeeType === 'BankAccount') {
+            PayeeModel = require('../models/bankAccountModel');
           } else if (finalPayeeType === 'Capital') {
             PayeeModel = require('../models/capitalModel');
           } else if (finalPayeeType === 'Owner') {
@@ -1409,9 +1581,9 @@ const updateCashPaymentVoucher = async (req, res) => {
       }
     }
     if (payeeName !== undefined) voucher.payeeName = payeeName;
-    if (amount !== undefined) voucher.amount = typeof amount === 'string' ? parseFloat(amount) : amount;
+    if (amount !== undefined) voucher.amount = amount;
     if (currency !== undefined) voucher.currency = currency;
-    if (currencyExchangeRate !== undefined) voucher.currencyExchangeRate = typeof currencyExchangeRate === 'string' ? parseFloat(currencyExchangeRate) : currencyExchangeRate;
+    if (currencyExchangeRate !== undefined) voucher.currencyExchangeRate = currencyExchangeRate;
     if (paymentMethod !== undefined) voucher.paymentMethod = paymentMethod;
     if (transactionId !== undefined) voucher.transactionId = transactionId;
     if (referenceNumber !== undefined) voucher.referenceNumber = referenceNumber;
@@ -1419,8 +1591,6 @@ const updateCashPaymentVoucher = async (req, res) => {
     if (relatedSale !== undefined) voucher.relatedSale = relatedSale;
     if (relatedPayment !== undefined) voucher.relatedPayment = relatedPayment;
     if (relatedSupplierPayment !== undefined) voucher.relatedSupplierPayment = relatedSupplierPayment;
-    if (relatedBankPaymentVoucher !== undefined) voucher.relatedBankPaymentVoucher = relatedBankPaymentVoucher;
-    if (relatedCashPaymentVoucher !== undefined) voucher.relatedCashPaymentVoucher = relatedCashPaymentVoucher;
     if (description !== undefined) voucher.description = description;
     if (notes !== undefined) voucher.notes = notes;
     if (status !== undefined) voucher.status = status;
@@ -1442,31 +1612,23 @@ const updateCashPaymentVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
-    const wasPosted = ['completed', 'posted'].includes(previousStatus);
-    const isPosted = ['completed', 'posted'].includes(updatedVoucher.status);
-    if (
-      cashVoucherDoubleEntryHelpers.isCashVoucherDoubleEntry(updatedVoucher) &&
-      !wasPosted &&
-      isPosted
-    ) {
-      await cashVoucherDoubleEntryHelpers.createTransactionsFromCashVoucherEntries(
-        updatedVoucher,
-        req.user._id
-      );
-      await cashVoucherDoubleEntryHelpers.applyEntryBalancesForCashVoucher(updatedVoucher._id);
+    const wasPosted = CASH_BALANCE_POSTED_STATUSES.includes(previousStatus);
+    const isPosted = CASH_BALANCE_POSTED_STATUSES.includes(updatedVoucher.status);
+    const becamePosted = isPosted && !wasPosted;
+
+    if (becamePosted) {
+      if (shouldCreateLedgerTransactionForStatus(updatedVoucher.status)) {
+        await createTransactionFromVoucher(updatedVoucher, req.user._id);
+      }
+      await applyPostedBalancesForCashPaymentVoucher(updatedVoucher._id);
     }
 
     // Populate before sending response
     const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
+      .populate('cashBook', 'name code balance referCode')
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.cashAccount', 'accountName code balance')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('shop', 'name address')
-      .populate('warehouse', 'name address')
-      .populate('payee', 'name')
+      .populate('payee', 'name accountName accountNumber bankName code')
       .populate('user', 'name email')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({
@@ -1498,10 +1660,10 @@ const approveCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
+    if (voucher.status === 'completed' || voucher.status === 'cancelled') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot approve completed, posted or cancelled voucher',
+        message: 'Cannot approve completed or cancelled voucher',
       });
     }
 
@@ -1513,17 +1675,16 @@ const approveCashPaymentVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
+    // Create transactions if supplier/customer is selected and not already created
+    await createTransactionFromVoucher(updatedVoucher, req.user._id);
+    await applyPostedBalancesForCashPaymentVoucher(updatedVoucher._id);
+
     const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
+      .populate('cashBook', 'name code balance referCode')
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.cashAccount', 'accountName code balance')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('shop', 'name address')
-      .populate('warehouse', 'name address')
-      .populate('payee', 'name')
+      .populate('payee', 'name accountName accountNumber bankName code')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({
@@ -1557,30 +1718,36 @@ const rejectCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
+    if (voucher.status === 'completed' || voucher.status === 'cancelled') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot reject completed, posted or cancelled voucher',
+        message: 'Cannot reject completed or cancelled voucher',
       });
     }
 
-    voucher.status = 'rejected';
-    voucher.approvalStatus = {
+    await reversePostedBalancesForCashPaymentVoucher(voucher._id);
+
+    const voucherAfterReverse = await CashPaymentVoucher.findById(req.params.id);
+    if (!voucherAfterReverse) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Cash payment voucher not found',
+      });
+    }
+
+    voucherAfterReverse.status = 'rejected';
+    voucherAfterReverse.approvalStatus = {
       approvedBy: req.user._id,
       approvedAt: new Date(),
       rejectionReason: rejectionReason || 'No reason provided',
     };
 
-    const updatedVoucher = await voucher.save();
+    const updatedVoucher = await voucherAfterReverse.save();
 
     const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
+      .populate('cashBook', 'name code balance referCode')
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.cashAccount', 'accountName code balance')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('shop', 'name address')
-      .populate('warehouse', 'name address')
-      .populate('payee', 'name')
+      .populate('payee', 'name accountName accountNumber bankName code')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
       .select('-__v');
@@ -1621,13 +1788,6 @@ const completeCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (voucher.status === 'posted') {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Voucher is already posted; use posted workflow',
-      });
-    }
-
     if (voucher.status === 'cancelled' || voucher.status === 'rejected') {
       return res.status(400).json({
         status: 'fail',
@@ -1639,25 +1799,16 @@ const completeCashPaymentVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
-    if (cashVoucherDoubleEntryHelpers.isCashVoucherDoubleEntry(updatedVoucher)) {
-      await cashVoucherDoubleEntryHelpers.createTransactionsFromCashVoucherEntries(
-        updatedVoucher,
-        req.user._id
-      );
-      await cashVoucherDoubleEntryHelpers.applyEntryBalancesForCashVoucher(updatedVoucher._id);
-    }
+    // Create transactions if supplier/customer is selected and not already created
+    await createTransactionFromVoucher(updatedVoucher, req.user._id);
+    await applyPostedBalancesForCashPaymentVoucher(updatedVoucher._id);
 
     const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
+      .populate('cashBook', 'name code balance referCode')
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.cashAccount', 'accountName code balance')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('shop', 'name address')
-      .populate('warehouse', 'name address')
-      .populate('payee', 'name')
+      .populate('payee', 'name accountName accountNumber bankName code')
       .populate('user', 'name email')
       .populate('approvalStatus.approvedBy', 'name email')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
       .select('-__v');
 
     res.status(200).json({
@@ -1666,80 +1817,6 @@ const completeCashPaymentVoucher = async (req, res) => {
       data: {
         voucher: populatedVoucher,
       },
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
-  }
-};
-
-// @desc    Post cash payment voucher (double-entry) to ledger
-// @route   PUT /api/cash-payment-vouchers/:id/post
-// @access  Private
-const postCashPaymentVoucher = async (req, res) => {
-  try {
-    const voucher = await CashPaymentVoucher.findById(req.params.id);
-
-    if (!voucher) {
-      return res.status(404).json({
-        status: 'fail',
-        message: 'Cash payment voucher not found',
-      });
-    }
-
-    if (!cashVoucherDoubleEntryHelpers.isCashVoucherDoubleEntry(voucher)) {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Post is only for vouchers with double-entry lines (entries)',
-      });
-    }
-
-    if (voucher.status === 'posted') {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Voucher is already posted',
-      });
-    }
-
-    if (voucher.status === 'cancelled' || voucher.status === 'rejected') {
-      return res.status(400).json({
-        status: 'fail',
-        message: 'Cannot post cancelled or rejected voucher',
-      });
-    }
-
-    voucher.status = 'posted';
-    voucher.postedAt = new Date();
-    voucher.postedBy = req.user._id;
-
-    const updatedVoucher = await voucher.save();
-
-    await cashVoucherDoubleEntryHelpers.createTransactionsFromCashVoucherEntries(
-      updatedVoucher,
-      req.user._id
-    );
-    await cashVoucherDoubleEntryHelpers.applyEntryBalancesForCashVoucher(updatedVoucher._id);
-
-    const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
-      .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.cashAccount', 'accountName code balance')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('shop', 'name address')
-      .populate('warehouse', 'name address')
-      .populate('user', 'name email')
-      .populate('postedBy', 'name email')
-      .populate('relatedPayment', 'paymentNumber amount')
-      .populate('relatedSupplierPayment', 'paymentNumber amount')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
-      .select('-__v');
-
-    res.status(200).json({
-      status: 'success',
-      message: 'Cash payment voucher posted successfully',
-      data: { voucher: populatedVoucher },
     });
   } catch (error) {
     res.status(500).json({
@@ -1763,10 +1840,10 @@ const cancelCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (voucher.status === 'completed' || voucher.status === 'posted') {
+    if (voucher.status === 'completed') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot cancel completed or posted voucher',
+        message: 'Cannot cancel completed voucher',
       });
     }
 
@@ -1777,18 +1854,24 @@ const cancelCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    voucher.status = 'cancelled';
+    await reversePostedBalancesForCashPaymentVoucher(voucher._id);
 
-    const updatedVoucher = await voucher.save();
+    const voucherAfterReverse = await CashPaymentVoucher.findById(req.params.id);
+    if (!voucherAfterReverse) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Cash payment voucher not found',
+      });
+    }
+
+    voucherAfterReverse.status = 'cancelled';
+
+    const updatedVoucher = await voucherAfterReverse.save();
 
     const populatedVoucher = await CashPaymentVoucher.findById(updatedVoucher._id)
+      .populate('cashBook', 'name code balance referCode')
       .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.cashAccount', 'accountName code balance')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('shop', 'name address')
-      .populate('warehouse', 'name address')
-      .populate('payee', 'name')
+      .populate('payee', 'name accountName accountNumber bankName code')
       .populate('user', 'name email')
       .select('-__v');
 
@@ -1821,13 +1904,15 @@ const deleteCashPaymentVoucher = async (req, res) => {
       });
     }
 
-    // Prevent deletion if status is completed or posted
-    if (voucher.status === 'completed' || voucher.status === 'posted') {
+    // Prevent deletion if status is completed
+    if (voucher.status === 'completed') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Cannot delete completed or posted voucher',
+        message: 'Cannot delete completed voucher',
       });
     }
+
+    await reversePostedBalancesForCashPaymentVoucher(voucher._id);
 
     await CashPaymentVoucher.findByIdAndDelete(req.params.id);
 
@@ -1843,19 +1928,34 @@ const deleteCashPaymentVoucher = async (req, res) => {
   }
 };
 
-// @desc    Get cash payment vouchers by cash account
-// @route   GET /api/cash-payment-vouchers/cash-account/:cashAccount
+// @desc    Get cash payment vouchers by cash book
+// @route   GET /api/cash-payment-vouchers/cash-book/:cashBookId
 // @access  Private
-const getVouchersByCashAccount = async (req, res) => {
+const getVouchersByCashBook = async (req, res) => {
   try {
-    const { cashAccount } = req.params;
+    const { cashBookId } = req.params;
     const { page = 1, limit = 10, startDate, endDate, status, voucherType } = req.query;
+
+    if (!mongoose.Types.ObjectId.isValid(cashBookId)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid cash book ID format',
+      });
+    }
+
+    const cashBookDoc = await CashBook.findById(cashBookId);
+    if (!cashBookDoc) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Cash book not found',
+      });
+    }
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const skip = (pageNum - 1) * limitNum;
 
-    let query = { cashAccount };
+    let query = { cashBook: cashBookId };
 
     if (status) {
       query.status = status;
@@ -1876,9 +1976,7 @@ const getVouchersByCashAccount = async (req, res) => {
 
     const vouchers = await CashPaymentVoucher.find(query)
       .populate('currency', 'name code symbol')
-      .populate('shop', 'name address')
-      .populate('warehouse', 'name address')
-      .populate('payee', 'name')
+      .populate('payee', 'name accountName accountNumber bankName code')
       .populate('user', 'name email')
       .sort({ voucherDate: -1 })
       .skip(skip)
@@ -1891,12 +1989,169 @@ const getVouchersByCashAccount = async (req, res) => {
       totalPages: Math.ceil(totalVouchers / limitNum),
       currentPage: pageNum,
       totalVouchers,
-      cashAccount,
+      cashBook: { _id: cashBookDoc._id, name: cashBookDoc.name, code: cashBookDoc.code, balance: cashBookDoc.balance, referCode: cashBookDoc.referCode },
       data: {
         vouchers,
       },
     });
   } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Create missing Payment transactions for existing vouchers
+// @route   POST /api/cash-payment-vouchers/:id/create-transaction
+// @access  Private
+const createMissingTransaction = async (req, res) => {
+  try {
+    const voucher = await CashPaymentVoucher.findById(req.params.id);
+
+    if (!voucher) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Cash payment voucher not found',
+      });
+    }
+
+    // Check if transaction already exists
+    if (voucher.payeeType === 'supplier' && voucher.relatedSupplierPayment) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Supplier payment already exists for this voucher',
+      });
+    }
+
+    if (voucher.payeeType === 'customer' && voucher.relatedPayment) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Payment already exists for this voucher',
+      });
+    }
+
+    if (voucher.relatedFinancialPayment) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Financial payment already exists for this voucher',
+      });
+    }
+
+    if (!shouldCreateLedgerTransactionForStatus(voucher.status)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: `Can only create transactions for posted vouchers (${CASH_BALANCE_POSTED_STATUSES.join(', ')})`,
+      });
+    }
+
+    // Create the transaction
+    const transactionResult = await createTransactionFromVoucher(voucher, req.user._id);
+
+    // Reload voucher to get updated data
+    const updatedVoucher = await CashPaymentVoucher.findById(voucher._id)
+      .populate('cashBook', 'name code balance referCode')
+      .populate('currency', 'name code symbol')
+      .populate('payee', 'name accountName accountNumber bankName code')
+      .populate('user', 'name email')
+      .populate('relatedPayment', 'paymentNumber amount')
+      .populate('relatedSupplierPayment', 'paymentNumber amount')
+      .select('-__v');
+
+    if (
+      transactionResult.createdSupplierPayment ||
+      transactionResult.createdPayment ||
+      transactionResult.createdFinancialPayment
+    ) {
+      res.status(200).json({
+        status: 'success',
+        message: 'Transaction created successfully',
+        data: {
+          voucher: updatedVoucher,
+          createdTransaction: transactionResult.createdSupplierPayment
+            ? { type: 'SupplierPayment', id: transactionResult.createdSupplierPayment._id }
+            : transactionResult.createdPayment
+              ? { type: 'Payment', id: transactionResult.createdPayment._id }
+              : {
+                  type: 'FinancialPayment',
+                  id: transactionResult.createdFinancialPayment._id,
+                  referCode: transactionResult.createdFinancialPayment.referCode,
+                },
+        },
+      });
+    } else {
+      res.status(400).json({
+        status: 'fail',
+        message: 'Failed to create transaction. Check server logs for details.',
+        data: {
+          voucher: updatedVoucher
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error creating missing transaction:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Create missing Payment transactions for all vouchers without transactions
+// @route   POST /api/cash-payment-vouchers/create-missing-transactions
+// @access  Private/Admin
+const createMissingTransactionsForAll = async (req, res) => {
+  try {
+    // Find all completed/approved vouchers without transactions
+    const vouchersWithoutTransactions = await CashPaymentVoucher.find({
+      status: { $in: ['completed', 'approved'] },
+      $or: [
+        { payeeType: 'customer', relatedPayment: { $exists: false } },
+        { payeeType: 'customer', relatedPayment: null },
+        { payeeType: 'supplier', relatedSupplierPayment: { $exists: false } },
+        { payeeType: 'supplier', relatedSupplierPayment: null }
+      ]
+    }).limit(100); // Limit to 100 at a time to avoid timeout
+
+    const results = {
+      processed: 0,
+      succeeded: 0,
+      failed: 0,
+      errors: []
+    };
+
+    for (const voucher of vouchersWithoutTransactions) {
+      try {
+        results.processed++;
+        const transactionResult = await createTransactionFromVoucher(voucher, req.user._id);
+        
+        if (transactionResult.createdSupplierPayment || transactionResult.createdPayment) {
+          results.succeeded++;
+        } else {
+          results.failed++;
+          results.errors.push({
+            voucherId: voucher._id,
+            voucherNumber: voucher.voucherNumber,
+            error: 'Transaction creation returned null'
+          });
+        }
+      } catch (error) {
+        results.failed++;
+        results.errors.push({
+          voucherId: voucher._id,
+          voucherNumber: voucher.voucherNumber,
+          error: error.message
+        });
+      }
+    }
+
+    res.status(200).json({
+      status: 'success',
+      message: `Processed ${results.processed} vouchers`,
+      data: results
+    });
+  } catch (error) {
+    console.error('Error creating missing transactions:', error);
     res.status(500).json({
       status: 'error',
       message: error.message,
@@ -1912,9 +2167,10 @@ module.exports = {
   approveCashPaymentVoucher,
   rejectCashPaymentVoucher,
   completeCashPaymentVoucher,
-  postCashPaymentVoucher,
   cancelCashPaymentVoucher,
   deleteCashPaymentVoucher,
-  getVouchersByCashAccount,
+  getVouchersByCashBook,
+  createMissingTransaction,
+  createMissingTransactionsForAll,
 };
 

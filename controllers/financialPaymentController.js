@@ -290,7 +290,11 @@ const getFinancialPaymentsByRelated = async (req, res) => {
     };
 
     if (requestedCurrencyId) {
-      paymentQuery.currency = requestedCurrencyId;
+      paymentQuery.$or = [
+        { currency: requestedCurrencyId },
+        { currency: null },
+        { currency: { $exists: false } },
+      ];
     }
 
     const payments = await FinancialPayment.find(paymentQuery)

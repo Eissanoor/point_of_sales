@@ -10,10 +10,11 @@ const {
   approveCashPaymentVoucher,
   rejectCashPaymentVoucher,
   completeCashPaymentVoucher,
-  postCashPaymentVoucher,
   cancelCashPaymentVoucher,
   deleteCashPaymentVoucher,
-  getVouchersByCashAccount,
+  getVouchersByCashBook,
+  createMissingTransaction,
+  createMissingTransactionsForAll,
 } = require('../controllers/cashPaymentVoucherController');
 
 // @route   GET /api/cash-payment-vouchers
@@ -27,10 +28,10 @@ router.route('/').get(protect, getCashPaymentVouchers);
 // @field   attachment - File field name for uploading a single attachment file
 router.route('/').post(protect, uploadSingleAttachment, createCashPaymentVoucher);
 
-// @route   GET /api/cash-payment-vouchers/cash-account/:cashAccount
-// @desc    Get vouchers by cash account
+// @route   GET /api/cash-payment-vouchers/cash-book/:cashBookId
+// @desc    Get vouchers by cash book
 // @access  Private
-router.route('/cash-account/:cashAccount').get(protect, getVouchersByCashAccount);
+router.route('/cash-book/:cashBookId').get(protect, getVouchersByCashBook);
 
 // @route   GET /api/cash-payment-vouchers/:id
 // @desc    Get cash payment voucher by ID
@@ -63,15 +64,19 @@ router.route('/:id/reject').put(protect, rejectCashPaymentVoucher);
 // @access  Private
 router.route('/:id/complete').put(protect, completeCashPaymentVoucher);
 
-// @route   PUT /api/cash-payment-vouchers/:id/post
-// @desc    Post cash payment voucher with double-entry lines
-// @access  Private
-router.route('/:id/post').put(protect, postCashPaymentVoucher);
-
 // @route   PUT /api/cash-payment-vouchers/:id/cancel
 // @desc    Cancel cash payment voucher
 // @access  Private
 router.route('/:id/cancel').put(protect, cancelCashPaymentVoucher);
 
-module.exports = router;
+// @route   POST /api/cash-payment-vouchers/:id/create-transaction
+// @desc    Create missing Payment/SupplierPayment transaction for a voucher
+// @access  Private
+router.route('/:id/create-transaction').post(protect, createMissingTransaction);
 
+// @route   POST /api/cash-payment-vouchers/create-missing-transactions
+// @desc    Create missing transactions for all vouchers without transactions
+// @access  Private/Admin
+router.route('/create-missing-transactions').post(protect, admin, createMissingTransactionsForAll);
+
+module.exports = router;
