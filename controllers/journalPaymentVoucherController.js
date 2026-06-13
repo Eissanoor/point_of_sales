@@ -1,14 +1,126 @@
 const mongoose = require('mongoose');
 const JournalPaymentVoucher = require('../models/journalPaymentVoucherModel');
-const BankAccount = require('../models/bankAccountModel');
-const SupplierPayment = require('../models/supplierPaymentModel');
-const Payment = require('../models/paymentModel');
-const SupplierJourney = require('../models/supplierJourneyModel');
-const PaymentJourney = require('../models/paymentJourneyModel');
-const Purchase = require('../models/purchaseModel');
-const FinancialPayment = require('../models/financialPaymentModel');
+const Currency = require('../models/currencyModel');
 const APIFeatures = require('../utils/apiFeatures');
 const cloudinary = require('cloudinary').v2;
+const {
+  parseSarafEntriesInput,
+  validateSarafJournalEntries,
+  mapNormalizedSarafEntries,
+  createTransactionsFromJournalPaymentEntries,
+  applyBankBalanceForJournalPaymentVoucher,
+  JOURNAL_PAYMENT_BANK_BALANCE_POSTED_STATUSES,
+} = require('../services/sarafVoucherEntryTransactions');
+
+const populateJournalVoucher = (query) =>
+  query
+    .populate('currency', 'name code symbol')
+    .populate('entries.account')
+    .populate('entries.bankAccount', 'accountName accountNumber bankName')
+    .populate('entries.currency', 'name code symbol')
+    .populate('user', 'name email')
+    .populate('approvalStatus.approvedBy', 'name email')
+    .populate('postedBy', 'name email')
+    .populate('completedBy', 'name email')
+    .populate('relatedPurchase', 'invoiceNumber totalAmount')
+    .populate('relatedSale', 'invoiceNumber grandTotal')
+    .populate('relatedPayment', 'paymentNumber amount')
+    .populate('relatedSupplierPayment', 'paymentNumber amount')
+    .populate('relatedBankPaymentVoucher', 'voucherNumber amount')
+    .populate('relatedCashPaymentVoucher', 'voucherNumber amount')
+    .populate('relatedFinancialPayments', 'referCode amount currency paymentDate relatedModel relatedId')
+    .select('-__v');
+
+const parseAttachmentsString = (attachmentsStr) => {
+  if (!attachmentsStr || typeof attachmentsStr !== 'string') return [];
+
+  try {
+    let cleanString = attachmentsStr.trim();
+    if (
+      (cleanString.startsWith('"') && cleanString.endsWith('"')) ||
+      (cleanString.startsWith("'") && cleanString.endsWith("'"))
+    ) {
+      cleanString = cleanString.slice(1, -1);
+    }
+    cleanString = cleanString
+      .replace(/\\n/g, '')
+      .replace(/\\r/g, '')
+      .replace(/\\t/g, '')
+      .replace(/\\'/g, "'")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, '\\');
+
+    const parsed = JSON.parse(cleanString);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return [parsed];
+    return [];
+  } catch {
+    return [];
+  }
+};
+
+const normalizeAttachmentsInput = (attachments, reqFile, existingAttachments = []) => {
+  let uploadedAttachments = existingAttachments.length ? [...existingAttachments] : [];
+
+  if (reqFile) {
+    uploadedAttachments = [];
+  }
+
+  if (attachments !== undefined && attachments !== null) {
+    let parsedAttachments = [];
+    if (Array.isArray(attachments)) {
+      parsedAttachments = attachments;
+    } else if (typeof attachments === 'string') {
+      parsedAttachments = parseAttachmentsString(attachments);
+    } else if (typeof attachments === 'object' && !Array.isArray(attachments)) {
+      parsedAttachments = [attachments];
+    }
+
+    const normalizedAttachments = parsedAttachments
+      .filter((att) => att && typeof att === 'object' && !Array.isArray(att) && (att.url || att.name))
+      .map((att) => ({
+        url: String(att.url || ''),
+        name: String(att.name || ''),
+        type: String(att.type || att.mimetype || ''),
+      }));
+
+    if (reqFile && uploadedAttachments.length > 0) {
+      uploadedAttachments = [...uploadedAttachments, ...normalizedAttachments];
+    } else if (!reqFile) {
+      uploadedAttachments = normalizedAttachments;
+    }
+  }
+
+  return uploadedAttachments
+    .filter((att) => att && typeof att === 'object' && !Array.isArray(att))
+    .map((att) => ({
+      url: String(att.url || ''),
+      name: String(att.name || ''),
+      type: String(att.type || ''),
+    }));
+};
+
+const uploadAttachmentFile = async (reqFile, folder) => {
+  const uploadResult = await new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream({ folder }, (error, result) => {
+      if (error) return reject(error);
+      resolve(result);
+    });
+    stream.end(reqFile.buffer);
+  });
+
+  return {
+    url: String(uploadResult.secure_url || ''),
+    name: String(reqFile.originalname || ''),
+    type: String(reqFile.mimetype || ''),
+  };
+};
+
+const applyJournalPostingSideEffects = async (voucher, userId) => {
+  if (!voucher.entries || voucher.entries.length < 2) return null;
+  await applyBankBalanceForJournalPaymentVoucher(voucher._id);
+  return createTransactionsFromJournalPaymentEntries(voucher, userId);
+};
 
 // @desc    Get all journal payment vouchers with filtering and pagination
 // @route   GET /api/journal-payment-vouchers
@@ -21,40 +133,22 @@ const getJournalPaymentVouchers = async (req, res) => {
       .limitFields()
       .paginate();
 
-    const vouchers = await features.query
-      .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('user', 'name email')
-      .populate('approvalStatus.approvedBy', 'name')
-      .populate('postedBy', 'name email')
-      .populate('relatedPurchase', 'invoiceNumber')
-      .populate('relatedSale', 'invoiceNumber')
-      .populate('relatedPayment', 'paymentNumber amount')
-      .populate('relatedSupplierPayment', 'paymentNumber amount')
-      .populate('relatedBankPaymentVoucher', 'voucherNumber amount')
-      .populate('relatedCashPaymentVoucher', 'voucherNumber amount')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
-      .sort({ voucherDate: -1 })
-      .select('-__v');
+    const vouchers = await populateJournalVoucher(features.query).sort({ voucherDate: -1 });
 
-    // Build filter query for count
     const queryObj = { ...req.query };
     const excludedFields = ['page', 'sort', 'limit', 'fields'];
-    excludedFields.forEach(el => delete queryObj[el]);
+    excludedFields.forEach((el) => delete queryObj[el]);
     let queryStr = JSON.stringify(queryObj);
-    queryStr = queryStr.replace(/\b(gte|gt|lte|lt)\b/g, match => `$${match}`);
+    queryStr = queryStr.replace(/\b(gte|gt|lte|lt)\b/g, (match) => `$${match}`);
     const filterQuery = queryStr ? JSON.parse(queryStr) : {};
-    
+
     const totalVouchers = await JournalPaymentVoucher.countDocuments(filterQuery);
 
     res.status(200).json({
       status: 'success',
       results: vouchers.length,
       totalVouchers,
-      data: {
-        vouchers,
-      },
+      data: { vouchers },
     });
   } catch (error) {
     res.status(500).json({
@@ -69,21 +163,7 @@ const getJournalPaymentVouchers = async (req, res) => {
 // @access  Private
 const getJournalPaymentVoucherById = async (req, res) => {
   try {
-    const voucher = await JournalPaymentVoucher.findById(req.params.id)
-      .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('user', 'name email')
-      .populate('approvalStatus.approvedBy', 'name email')
-      .populate('postedBy', 'name email')
-      .populate('relatedPurchase', 'invoiceNumber totalAmount')
-      .populate('relatedSale', 'invoiceNumber grandTotal')
-      .populate('relatedPayment', 'paymentNumber amount')
-      .populate('relatedSupplierPayment', 'paymentNumber amount')
-      .populate('relatedBankPaymentVoucher', 'voucherNumber amount')
-      .populate('relatedCashPaymentVoucher', 'voucherNumber amount')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
-      .select('-__v');
+    const voucher = await populateJournalVoucher(JournalPaymentVoucher.findById(req.params.id));
 
     if (!voucher) {
       return res.status(404).json({
@@ -94,9 +174,7 @@ const getJournalPaymentVoucherById = async (req, res) => {
 
     res.status(200).json({
       status: 'success',
-      data: {
-        voucher,
-      },
+      data: { voucher },
     });
   } catch (error) {
     res.status(500).json({
@@ -104,323 +182,6 @@ const getJournalPaymentVoucherById = async (req, res) => {
       message: error.message,
     });
   }
-};
-
-// Account models that create FinancialPayment (must match FinancialPayment.relatedModel enum)
-const FINANCIAL_ACCOUNT_MODELS = [
-  'Asset',
-  'Expense',
-  'Income',
-  'Liability',
-  'PartnershipAccount',
-  'CashBook',
-  'Capital',
-  'Owner',
-  'Employee',
-  'PropertyAccount',
-];
-
-const JOURNAL_ACCOUNT_MODEL_MAP = {
-  bankaccount: 'BankAccount',
-  cashaccount: 'CashAccount',
-  supplier: 'Supplier',
-  customer: 'Customer',
-  expense: 'Expense',
-  income: 'Income',
-  asset: 'Asset',
-  liability: 'Liability',
-  equity: 'Equity',
-  partnershipaccount: 'PartnershipAccount',
-  cashbook: 'CashBook',
-  capital: 'Capital',
-  owner: 'Owner',
-  employee: 'Employee',
-  propertyaccount: 'PropertyAccount',
-};
-
-/**
- * Normalize accountModel string on a journal line (mutates entry).
- */
-const normalizeJournalEntryAccountModel = (entry) => {
-  let accountModel = entry.accountModel;
-  if (Array.isArray(accountModel)) accountModel = accountModel[0];
-  if (typeof accountModel !== 'string') return '';
-  accountModel = accountModel.trim();
-  const normalized = JOURNAL_ACCOUNT_MODEL_MAP[accountModel.toLowerCase()] || accountModel;
-  entry.accountModel = normalized;
-  return normalized;
-};
-
-/**
- * Bank lines: client may send only bankAccount (no duplicate account id).
- * Sync account <-> bankAccount when accountModel is BankAccount.
- */
-const resolveJournalEntryBankAccountRefs = (entry) => {
-  const model = entry.accountModel;
-  if (model !== 'BankAccount') return;
-
-  const accEmpty =
-    entry.account === undefined ||
-    entry.account === null ||
-    (typeof entry.account === 'string' && entry.account.trim() === '');
-  const bankEmpty =
-    entry.bankAccount === undefined ||
-    entry.bankAccount === null ||
-    (typeof entry.bankAccount === 'string' && entry.bankAccount.trim() === '');
-
-  if (accEmpty && !bankEmpty) {
-    entry.account = typeof entry.bankAccount === 'string' ? entry.bankAccount.trim() : entry.bankAccount;
-  } else if (bankEmpty && !accEmpty) {
-    entry.bankAccount = typeof entry.account === 'string' ? entry.account.trim() : entry.account;
-  }
-};
-
-/** Statuses where selected entry bank-account balances should be posted. */
-const JOURNAL_BANK_BALANCE_POSTED_STATUSES = ['completed', 'posted'];
-
-/**
- * Apply bank balance changes from voucher entries exactly once:
- * - entry.debit on selected bankAccount => subtract balance
- * - entry.credit on selected bankAccount => add balance
- */
-const applyBankBalanceForJournalVoucher = async (voucherId) => {
-  if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
-
-  const voucher = await JournalPaymentVoucher.findById(voucherId);
-  if (!voucher || voucher.bankBalanceApplied) return;
-  if (!JOURNAL_BANK_BALANCE_POSTED_STATUSES.includes(voucher.status)) return;
-  if (!Array.isArray(voucher.entries) || voucher.entries.length === 0) return;
-
-  for (const entry of voucher.entries) {
-    if (!entry || !entry.bankAccount) continue;
-
-    const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
-    const credit = typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
-
-    // User rule: debit => subtract, credit => add
-    let delta = 0;
-    if (Number.isFinite(debit) && debit > 0) delta -= debit;
-    if (Number.isFinite(credit) && credit > 0) delta += credit;
-    if (!Number.isFinite(delta) || delta === 0) continue;
-
-    const bank = await BankAccount.findByIdAndUpdate(
-      entry.bankAccount,
-      { $inc: { balance: delta } },
-      { new: true }
-    );
-
-    if (!bank) {
-      console.error('applyBankBalanceForJournalVoucher: bank account not found', entry.bankAccount);
-    }
-  }
-
-  voucher.bankBalanceApplied = true;
-  await voucher.save();
-};
-
-/**
- * Create Payment (customer debit), SupplierPayment (supplier credit), and FinancialPayment
- * (Asset/Income/Liability/etc.) from journal entries.
- * - Customer debit → Payment (subtract from receivable).
- * - Supplier credit → SupplierPayment (subtract from payable).
- * - Asset/Income/Liability/etc. debit or credit → FinancialPayment (transaction recorded for adding/subtracting).
- */
-const createTransactionsFromJournalEntries = async (voucher, userId) => {
-  if (!voucher || !voucher._id || !voucher.entries || !Array.isArray(voucher.entries)) {
-    return { createdPayment: null, createdSupplierPayment: null, createdFinancialPayments: [], error: null };
-  }
-
-  const freshVoucher = await JournalPaymentVoucher.findById(voucher._id);
-  if (!freshVoucher) return { createdPayment: null, createdSupplierPayment: null, createdFinancialPayments: [], error: null };
-
-  let createdPayment = null;
-  let createdSupplierPayment = null;
-  const createdFinancialPayments = [];
-  let errorDetails = null;
-  const paymentMethodForPayment = 'other';
-  const paymentMethodForSupplier = 'bank_transfer';
-
-  const transactionId = freshVoucher.transactionId || `TRX-JV-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
-  const paymentDate = freshVoucher.voucherDate || new Date();
-
-  const normalizeAccountModel = (m) => {
-    const s = (m || '').trim().toLowerCase();
-    const map = {
-      customer: 'Customer', supplier: 'Supplier', bankaccount: 'BankAccount', cashaccount: 'CashAccount',
-      expense: 'Expense', income: 'Income', asset: 'Asset', liability: 'Liability', equity: 'Equity',
-      partnershipaccount: 'PartnershipAccount', cashbook: 'CashBook', capital: 'Capital',
-      owner: 'Owner', employee: 'Employee', propertyaccount: 'PropertyAccount',
-    };
-    return map[s] || (m && m.trim() ? m.trim() : '');
-  };
-
-  for (const entry of freshVoucher.entries) {
-    const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
-    const credit = typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
-    const normalizedModel = normalizeAccountModel(entry.accountModel);
-
-    // Customer debit → Payment (customer paid us / we receive → subtract from receivable)
-    if (normalizedModel === 'Customer' && debit > 0 && !freshVoucher.relatedPayment) {
-      try {
-        const Sales = require('../models/salesModel');
-        const customerId = entry.account;
-        const amount = debit;
-
-        const salesAgg = await Sales.aggregate([
-          { $match: { customer: new mongoose.Types.ObjectId(customerId), isActive: true } },
-          { $group: { _id: null, total: { $sum: '$grandTotal' } } }
-        ]);
-        const totalSalesAmount = salesAgg.length > 0 ? (salesAgg[0].total || 0) : 0;
-        const paymentsAgg = await Payment.aggregate([
-          { $match: { customer: new mongoose.Types.ObjectId(customerId), status: { $nin: ['failed', 'refunded'] } } },
-          { $group: { _id: null, total: { $sum: '$amount' } } }
-        ]);
-        const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
-        const remainingBefore = totalSalesAmount - paidSoFar;
-        const newPaidAmount = paidSoFar + amount;
-        const newRemainingBalance = remainingBefore - amount;
-        const isAdvancedPayment = newRemainingBalance < 0;
-
-        const date = new Date(paymentDate);
-        const year = date.getFullYear().toString().slice(-2);
-        const month = (date.getMonth() + 1).toString().padStart(2, '0');
-        const day = date.getDate().toString().padStart(2, '0');
-        const startOfDay = new Date(date); startOfDay.setHours(0, 0, 0, 0);
-        const endOfDay = new Date(date); endOfDay.setHours(23, 59, 59, 999);
-        const paymentsCount = await Payment.countDocuments({ createdAt: { $gte: startOfDay, $lt: endOfDay } });
-        const paymentNumber = `PAY-${year}${month}${day}-${(paymentsCount + 1).toString().padStart(3, '0')}`;
-
-        createdPayment = await Payment.create({
-          paymentNumber,
-          customer: customerId,
-          sale: freshVoucher.relatedSale || null,
-          amount,
-          payments: [{ method: paymentMethodForPayment, amount, bankAccount: null }],
-          paymentDate,
-          transactionId,
-          status: 'completed',
-          notes: freshVoucher.notes || `Payment via journal voucher ${freshVoucher.voucherNumber}`,
-          attachments: freshVoucher.attachments || [],
-          user: userId,
-          isPartial: false,
-          currency: freshVoucher.currency || null,
-          paymentType: freshVoucher.relatedSale ? 'sale_payment' : 'advance_payment'
-        });
-
-        await PaymentJourney.create({
-          payment: createdPayment._id,
-          customer: customerId,
-          user: userId,
-          action: 'payment_made',
-          paymentDetails: { amount, method: paymentMethodForPayment, date: paymentDate, status: 'completed', transactionId },
-          paidAmount: newPaidAmount,
-          remainingBalance: newRemainingBalance,
-          changes: [],
-          notes: `Payment of ${amount} received via journal voucher ${freshVoucher.voucherNumber}. ${isAdvancedPayment ? `Advanced: ${Math.abs(newRemainingBalance)}` : `Remaining: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`
-        });
-
-        freshVoucher.relatedPayment = createdPayment._id;
-        await freshVoucher.save();
-      } catch (err) {
-        console.error('Error creating Payment from journal entry:', err);
-        errorDetails = err;
-      }
-    }
-
-    // Supplier credit → SupplierPayment (we paid supplier → subtract from payable)
-    if (normalizedModel === 'Supplier' && credit > 0 && !freshVoucher.relatedSupplierPayment) {
-      try {
-        const amount = credit;
-        const supplierId = entry.account;
-
-        const purchasesAgg = await Purchase.aggregate([
-          { $match: { supplier: new mongoose.Types.ObjectId(supplierId), isActive: true } },
-          { $group: { _id: null, total: { $sum: '$totalAmount' } } }
-        ]);
-        const totalPurchasesAmount = purchasesAgg.length > 0 ? (purchasesAgg[0].total || 0) : 0;
-        const paymentsAgg = await SupplierPayment.aggregate([
-          { $match: { supplier: new mongoose.Types.ObjectId(supplierId), status: { $nin: ['failed', 'refunded'] } } },
-          { $group: { _id: null, total: { $sum: '$amount' } } }
-        ]);
-        const paidSoFar = paymentsAgg.length > 0 ? (paymentsAgg[0].total || 0) : 0;
-        const remainingBefore = totalPurchasesAmount - paidSoFar;
-        const newPaidAmount = paidSoFar + amount;
-        const newRemainingBalance = remainingBefore - amount;
-        const isAdvancedPayment = newRemainingBalance < 0;
-
-        const paymentCount = await SupplierPayment.countDocuments();
-        const paymentNumber = `SP-${paymentCount + 1}`;
-
-        createdSupplierPayment = await SupplierPayment.create({
-          paymentNumber,
-          supplier: supplierId,
-          amount,
-          paymentMethod: paymentMethodForSupplier,
-          paymentDate,
-          transactionId,
-          status: 'completed',
-          notes: freshVoucher.notes || `Payment via journal voucher ${freshVoucher.voucherNumber}`,
-          attachments: freshVoucher.attachments || [],
-          user: userId,
-          isPartial: false,
-          currency: freshVoucher.currency || null,
-          products: []
-        });
-
-        await SupplierJourney.create({
-          supplier: supplierId,
-          user: userId,
-          action: 'payment_made',
-          payment: { amount, method: paymentMethodForSupplier, date: paymentDate, status: 'completed', transactionId },
-          paidAmount: newPaidAmount,
-          remainingBalance: newRemainingBalance,
-          notes: `Payment of ${amount} to supplier via journal voucher ${freshVoucher.voucherNumber}. ${isAdvancedPayment ? `Advanced: ${Math.abs(newRemainingBalance)}` : `Remaining: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`
-        });
-
-        freshVoucher.relatedSupplierPayment = createdSupplierPayment._id;
-        await freshVoucher.save();
-      } catch (err) {
-        console.error('Error creating SupplierPayment from journal entry:', err);
-        errorDetails = err;
-      }
-    }
-
-    // Asset, Expense, Income, Liability, Capital, Owner, Employee, etc. → FinancialPayment
-    // Business rule for journal-payment-voucher:
-    // - debit  => subtract from that account
-    // - credit => add to that account
-    const amount = debit > 0 ? debit : credit;
-    const isDebit = debit > 0;
-    if (amount > 0 && FINANCIAL_ACCOUNT_MODELS.includes(normalizedModel)) {
-      try {
-        const fp = await FinancialPayment.create({
-          name: entry.accountName || `${normalizedModel} journal entry`,
-          mobileNo: null,
-          code: freshVoucher.referenceNumber || freshVoucher.voucherNumber || null,
-          description: freshVoucher.description || `Journal voucher ${freshVoucher.voucherNumber}: ${isDebit ? 'Debit' : 'Credit'} ${amount} to ${entry.accountName || normalizedModel}. ${freshVoucher.notes || ''}`.trim(),
-          amount,
-          paymentDate,
-          method: 'other',
-          effect: isDebit ? 'subtract' : 'add',
-          relatedModel: normalizedModel,
-          relatedId: entry.account,
-          user: userId,
-          isActive: true,
-        });
-        createdFinancialPayments.push(fp);
-        if (!freshVoucher.relatedFinancialPayments || !Array.isArray(freshVoucher.relatedFinancialPayments)) {
-          freshVoucher.relatedFinancialPayments = [];
-        }
-        freshVoucher.relatedFinancialPayments.push(fp._id);
-        await freshVoucher.save();
-      } catch (err) {
-        console.error('Error creating FinancialPayment from journal entry:', err);
-        errorDetails = err;
-      }
-    }
-  }
-
-  return { createdPayment, createdSupplierPayment, createdFinancialPayments, error: errorDetails };
 };
 
 // @desc    Create new journal payment voucher
@@ -447,309 +208,42 @@ const createJournalPaymentVoucher = async (req, res) => {
       status,
       attachments,
     } = req.body;
-    
-    console.log('req.file:', req.file);
-    console.log('attachments from req.body:', attachments);
-    console.log('attachments type:', typeof attachments);
-    console.log('entries from req.body:', entries);
-    console.log('entries type:', typeof entries);
-    
-    // Parse entries if it comes as a string (from form-data)
-    let parsedEntries = entries;
-    
-    if (typeof entries === 'string') {
-      try {
-        // Try to parse as JSON string
-        let cleanString = entries.trim();
-        if ((cleanString.startsWith('"') && cleanString.endsWith('"')) || 
-            (cleanString.startsWith("'") && cleanString.endsWith("'"))) {
-          cleanString = cleanString.slice(1, -1);
-        }
-        cleanString = cleanString
-          .replace(/\\n/g, '')
-          .replace(/\\r/g, '')
-          .replace(/\\t/g, '')
-          .replace(/\\'/g, "'")
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, '\\');
-        
-        const parsed = JSON.parse(cleanString);
-        if (Array.isArray(parsed)) {
-          parsedEntries = parsed;
-        }
-      } catch (parseError) {
-        console.error('Error parsing entries string:', parseError);
-        return res.status(400).json({
-          status: 'fail',
-          message: 'Invalid entries format. Entries must be a valid JSON array.',
-        });
-      }
+
+    const { error: entriesParseError, parsedEntries } = parseSarafEntriesInput(entries);
+    if (entriesParseError) {
+      return res.status(400).json({
+        status: 'fail',
+        message: entriesParseError,
+      });
     }
-    
-    // Handle form-data array notation (entries[0], entries[1], etc.)
-    if (!Array.isArray(parsedEntries) && typeof parsedEntries === 'object' && parsedEntries !== null) {
-      // Check if it's an object with numeric keys (form-data array notation)
-      const keys = Object.keys(parsedEntries);
-      const numericKeys = keys.filter(key => /^\d+$/.test(key));
-      if (numericKeys.length > 0) {
-        // Convert object with numeric keys to array
-        parsedEntries = numericKeys
-          .sort((a, b) => parseInt(a) - parseInt(b))
-          .map(key => {
-            const entryValue = parsedEntries[key];
-            // If entryValue is a string, try to parse it as JSON
-            if (typeof entryValue === 'string') {
-              try {
-                return JSON.parse(entryValue);
-              } catch (e) {
-                // If it's not JSON, it might be just a string - return as is
-                return entryValue;
-              }
-            }
-            return entryValue;
-          });
-      }
-    }
-    
-    // Validate entries
+
     if (!parsedEntries || !Array.isArray(parsedEntries) || parsedEntries.length < 2) {
       return res.status(400).json({
         status: 'fail',
-        message: 'Journal voucher must have at least 2 entries. Please provide entries as a JSON array.',
-        receivedEntries: entries,
-        parsedEntries: parsedEntries,
+        message: 'Journal voucher must have at least 2 entries with per-line currency and debit/credit (exchangeRate is optional for 2-line cross-currency pairs — auto-calculated).',
       });
     }
 
-    // Validate that debits equal credits
-    const totalDebits = parsedEntries.reduce((sum, entry) => {
-      const debit = typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0);
-      return sum + debit;
-    }, 0);
-    
-    const totalCredits = parsedEntries.reduce((sum, entry) => {
-      const credit = typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0);
-      return sum + credit;
-    }, 0);
-
-    if (Math.abs(totalDebits - totalCredits) > 0.01) {
-      return res.status(400).json({
+    const journalCheck = await validateSarafJournalEntries(parsedEntries);
+    if (!journalCheck.ok) {
+      return res.status(journalCheck.status).json({
         status: 'fail',
-        message: `Total debits (${totalDebits}) must equal total credits (${totalCredits})`,
-        totalDebits,
-        totalCredits,
+        message: journalCheck.message,
+        totalBaseDebits: journalCheck.totalBaseDebits,
+        totalBaseCredits: journalCheck.totalBaseCredits,
       });
     }
 
-    // Validate each entry
-    for (let i = 0; i < parsedEntries.length; i++) {
-      const entry = parsedEntries[i];
-      
-      // Check if entry is an object
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Entry ${i} is invalid. Each entry must be an object with account, accountModel, debit, and credit fields.`,
-          receivedEntry: entry,
-          example: {
-            account: "507f1f77bcf86cd799439011",
-            bankAccount: "507f1f77bcf86cd799439012",
-            accountModel: "BankAccount",
-            accountName: "Main Bank Account",
-            debit: 5000,
-            credit: 0,
-            description: "Entry description"
-          }
-        });
-      }
-
-      // accountModel first — needed to resolve bank line (bankAccount-only is valid for BankAccount)
-      let accountModel = entry.accountModel;
-      if (Array.isArray(accountModel)) {
-        accountModel = accountModel[0];
-      }
-
-      if (!accountModel || (typeof accountModel !== 'string' && !Array.isArray(entry.accountModel))) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Entry ${i} is missing the 'accountModel' field. Each entry must have an accountModel (string).`,
-          receivedEntry: entry,
-          example: {
-            account: "507f1f77bcf86cd799439011",
-            bankAccount: "507f1f77bcf86cd799439012",
-            accountModel: "BankAccount",
-            debit: 5000,
-            credit: 0
-          },
-          validAccountModels: ["BankAccount", "CashAccount", "Supplier", "Customer", "Expense", "Income", "Asset", "Liability", "Equity", "PartnershipAccount", "CashBook", "Capital", "Owner", "Employee", "PropertyAccount"]
-        });
-      }
-
-      normalizeJournalEntryAccountModel(entry);
-      resolveJournalEntryBankAccountRefs(entry);
-
-      if (!entry.account) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Entry ${i} is missing the 'account' field. For BankAccount lines you can send bankAccount only (it will be used as account).`,
-          receivedEntry: entry,
-          example: {
-            bankAccount: "507f1f77bcf86cd799439012",
-            accountModel: "BankAccount",
-            debit: 5000,
-            credit: 0
-          }
-        });
-      }
-
-      // Validate selected bankAccount in entry (optional)
-      if (entry.bankAccount) {
-        const bankAccountExists = await BankAccount.findById(entry.bankAccount);
-        if (!bankAccountExists) {
-          return res.status(404).json({
-            status: 'fail',
-            message: `Entry ${i} has invalid bank account. Bank account not found.`,
-          });
-        }
-      }
-
-      const debit = typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0);
-      const credit = typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0);
-      
-      if (debit < 0 || credit < 0) {
-        return res.status(400).json({
-          status: 'fail',
-          message: 'Debit and credit amounts cannot be negative',
-        });
-      }
-      
-      if (debit > 0 && credit > 0) {
-        return res.status(400).json({
-          status: 'fail',
-          message: 'An entry cannot have both debit and credit amounts',
-        });
-      }
-      
-      if (debit === 0 && credit === 0) {
-        return res.status(400).json({
-          status: 'fail',
-          message: 'An entry must have either a debit or credit amount',
-        });
-      }
-    }
-
-    // Handle file uploads for attachments
     let uploadedAttachments = [];
-    
-    // Helper function to parse attachments string
-    const parseAttachmentsString = (attachmentsStr) => {
-      if (!attachmentsStr || typeof attachmentsStr !== 'string') {
-        return [];
-      }
-      
-      try {
-        let cleanString = attachmentsStr.trim();
-        
-        if ((cleanString.startsWith('"') && cleanString.endsWith('"')) || 
-            (cleanString.startsWith("'") && cleanString.endsWith("'"))) {
-          cleanString = cleanString.slice(1, -1);
-        }
-        
-        cleanString = cleanString
-          .replace(/\\n/g, '')
-          .replace(/\\r/g, '')
-          .replace(/\\t/g, '')
-          .replace(/\\'/g, "'")
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, '\\');
-        
-        const parsed = JSON.parse(cleanString);
-        
-        if (Array.isArray(parsed)) {
-          return parsed;
-        } else if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          return [parsed];
-        }
-        
-        return [];
-      } catch (parseError) {
-        console.error('Error parsing attachments string:', parseError.message);
-        console.error('Raw attachments string:', attachmentsStr);
-        
-        try {
-          const jsonMatch = attachmentsStr.match(/\[[\s\S]*\]/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
-            return Array.isArray(parsed) ? parsed : [parsed];
-          }
-        } catch (e) {
-          console.error('Alternative parsing also failed:', e.message);
-        }
-        
-        return [];
-      }
-    };
-    
-    // If a file is uploaded via req.file (single file)
     if (req.file) {
       try {
-        const uploadResult = await new Promise((resolve, reject) => {
-          const stream = cloudinary.uploader.upload_stream(
-            { folder: 'journal-payment-vouchers' },
-            (error, result) => {
-              if (error) return reject(error);
-              resolve(result);
-            }
-          );
-          stream.end(req.file.buffer);
-        });
-        
-        uploadedAttachments.push({
-          url: String(uploadResult.secure_url || ''),
-          name: String(req.file.originalname || ''),
-          type: String(req.file.mimetype || '')
-        });
-        
-        console.log('File uploaded to Cloudinary, attachment added:', uploadedAttachments[0]);
+        uploadedAttachments.push(await uploadAttachmentFile(req.file, 'journal-payment-vouchers'));
       } catch (uploadError) {
         console.error('Error uploading file:', uploadError);
       }
     }
-    
-    // Handle attachments from req.body
-    if (attachments !== undefined && attachments !== null) {
-      let parsedAttachments = [];
-      
-      if (Array.isArray(attachments)) {
-        parsedAttachments = attachments;
-      } else if (typeof attachments === 'string') {
-        parsedAttachments = parseAttachmentsString(attachments);
-      } else if (typeof attachments === 'object' && !Array.isArray(attachments)) {
-        parsedAttachments = [attachments];
-      }
-      
-      const normalizedAttachments = parsedAttachments
-        .filter(att => {
-          if (!att || Array.isArray(att)) return false;
-          if (typeof att !== 'object') return false;
-          return att.url || att.name;
-        })
-        .map(att => ({
-          url: String(att.url || ''),
-          name: String(att.name || ''),
-          type: String(att.type || att.mimetype || '')
-        }));
-      
-      if (req.file && uploadedAttachments.length > 0) {
-        uploadedAttachments = [...uploadedAttachments, ...normalizedAttachments];
-      } else {
-        uploadedAttachments = normalizedAttachments;
-      }
-      
-      console.log('Final attachments to save:', uploadedAttachments);
-    }
+    uploadedAttachments = normalizeAttachmentsInput(attachments, req.file, uploadedAttachments);
 
-    // Validate user is authenticated
     if (!req.user || !req.user._id) {
       return res.status(401).json({
         status: 'fail',
@@ -757,27 +251,17 @@ const createJournalPaymentVoucher = async (req, res) => {
       });
     }
 
-    // Normalize entries (validation loop above already normalized; keep helpers in sync)
-    const normalizedEntries = parsedEntries.map(entry => {
-      normalizeJournalEntryAccountModel(entry);
-      resolveJournalEntryBankAccountRefs(entry);
-      return {
-        account: entry.account,
-        bankAccount: entry.bankAccount || undefined,
-        accountModel: entry.accountModel,
-        accountName: entry.accountName || '',
-        debit: typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0),
-        credit: typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0),
-        description: entry.description || '',
-      };
-    });
+    const voucherStatus = status || 'completed';
 
-    // Create voucher
     const voucherData = {
       voucherType: voucherType || 'journal_entry',
-      entries: normalizedEntries,
+      entries: mapNormalizedSarafEntries(parsedEntries),
       currency,
-      currencyExchangeRate: currencyExchangeRate ? (typeof currencyExchangeRate === 'string' ? parseFloat(currencyExchangeRate) : currencyExchangeRate) : 1,
+      currencyExchangeRate: currencyExchangeRate
+        ? typeof currencyExchangeRate === 'string'
+          ? parseFloat(currencyExchangeRate)
+          : currencyExchangeRate
+        : 1,
       referenceNumber,
       transactionId,
       relatedPurchase,
@@ -788,82 +272,69 @@ const createJournalPaymentVoucher = async (req, res) => {
       relatedCashPaymentVoucher,
       description,
       notes,
-      status: status || 'completed',
+      status: voucherStatus,
       attachments: uploadedAttachments,
       user: req.user._id,
     };
 
-    // Only set voucherDate if explicitly provided
     if (voucherDate) {
       const parsedDate = new Date(voucherDate);
       if (!isNaN(parsedDate.getTime())) {
         voucherData.voucherDate = parsedDate;
-      } else {
-        console.warn('Invalid voucherDate format, using default:', voucherDate);
       }
     }
 
-    // Only set voucherNumber if explicitly provided
     if (req.body.voucherNumber) {
       voucherData.voucherNumber = req.body.voucherNumber;
     }
 
-    // Final safety check: ensure attachments is always an array of proper objects
-    if (!Array.isArray(voucherData.attachments)) {
-      voucherData.attachments = [];
-    } else {
-      voucherData.attachments = voucherData.attachments
-        .filter(att => att && typeof att === 'object' && !Array.isArray(att))
-        .map(att => ({
-          url: String(att.url || ''),
-          name: String(att.name || ''),
-          type: String(att.type || '')
-        }));
-    }
-
-    console.log('Final voucherData.attachments before save:', voucherData.attachments);
-    console.log('Full voucherData before save:', JSON.stringify(voucherData, null, 2));
-
     const voucher = await JournalPaymentVoucher.create(voucherData);
 
-    // Create Payment (customer debit) and SupplierPayment (supplier credit) when status is completed
     let transactionResult = null;
-    let createdTransactions = null;
-    const voucherStatus = voucher.status || voucherData.status || status;
-    if (voucherStatus === 'completed' || voucherStatus === 'posted') {
-      transactionResult = await createTransactionsFromJournalEntries(voucher, req.user._id);
-      if (transactionResult.createdPayment || transactionResult.createdSupplierPayment || (transactionResult.createdFinancialPayments && transactionResult.createdFinancialPayments.length > 0)) {
-        createdTransactions = {
-          ...(transactionResult.createdPayment && {
-            payment: { type: 'Payment', id: transactionResult.createdPayment._id, paymentNumber: transactionResult.createdPayment.paymentNumber }
-          }),
-          ...(transactionResult.createdSupplierPayment && {
-            supplierPayment: { type: 'SupplierPayment', id: transactionResult.createdSupplierPayment._id, paymentNumber: transactionResult.createdSupplierPayment.paymentNumber }
-          }),
-          ...(transactionResult.createdFinancialPayments && transactionResult.createdFinancialPayments.length > 0 && {
-            financialPayments: transactionResult.createdFinancialPayments.map(fp => ({ type: 'FinancialPayment', id: fp._id, referCode: fp.referCode, amount: fp.amount, relatedModel: fp.relatedModel }))
-          }),
-        };
-      }
+    if (JOURNAL_PAYMENT_BANK_BALANCE_POSTED_STATUSES.includes(voucherStatus)) {
+      transactionResult = await applyJournalPostingSideEffects(voucher, req.user._id);
     }
 
-    if (JOURNAL_BANK_BALANCE_POSTED_STATUSES.includes(voucherStatus)) {
-      await applyBankBalanceForJournalVoucher(voucher._id);
-    }
-
-    // Populate before sending response (voucher may have been updated with relatedPayment/relatedSupplierPayment)
-    const populatedVoucher = await JournalPaymentVoucher.findById(voucher._id)
-      .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('user', 'name email')
-      .populate('relatedPayment', 'paymentNumber amount')
-      .populate('relatedSupplierPayment', 'paymentNumber amount')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
-      .select('-__v');
+    const populatedVoucher = await populateJournalVoucher(JournalPaymentVoucher.findById(voucher._id));
 
     const responseData = { voucher: populatedVoucher };
-    if (createdTransactions) responseData.createdTransactions = createdTransactions;
-    if (transactionResult && transactionResult.error) responseData.transactionError = transactionResult.error;
+    if (transactionResult) {
+      if (
+        transactionResult.createdPayment ||
+        transactionResult.createdSupplierPayment ||
+        (transactionResult.createdFinancialPayments && transactionResult.createdFinancialPayments.length > 0)
+      ) {
+        responseData.createdTransactions = {
+          ...(transactionResult.createdPayment && {
+            payment: {
+              type: 'Payment',
+              id: transactionResult.createdPayment._id,
+              paymentNumber: transactionResult.createdPayment.paymentNumber,
+            },
+          }),
+          ...(transactionResult.createdSupplierPayment && {
+            supplierPayment: {
+              type: 'SupplierPayment',
+              id: transactionResult.createdSupplierPayment._id,
+              paymentNumber: transactionResult.createdSupplierPayment.paymentNumber,
+            },
+          }),
+          ...(transactionResult.createdFinancialPayments &&
+            transactionResult.createdFinancialPayments.length > 0 && {
+              financialPayments: transactionResult.createdFinancialPayments.map((fp) => ({
+                type: 'FinancialPayment',
+                id: fp._id,
+                referCode: fp.referCode,
+                amount: fp.amount,
+                relatedModel: fp.relatedModel,
+              })),
+            }),
+        };
+      }
+      if (transactionResult.error) {
+        responseData.transactionError = transactionResult.error;
+      }
+    }
 
     res.status(201).json({
       status: 'success',
@@ -872,25 +343,21 @@ const createJournalPaymentVoucher = async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating journal payment voucher:', error);
-    console.error('Error name:', error.name);
-    console.error('Error message:', error.message);
-    
+
     if (error.name === 'ValidationError') {
-      console.error('Validation errors:', error.errors);
-      const validationErrors = Object.keys(error.errors).map(key => ({
+      const validationErrors = Object.keys(error.errors).map((key) => ({
         field: key,
         message: error.errors[key].message,
-        value: error.errors[key].value
+        value: error.errors[key].value,
       }));
-      console.error('Validation error details:', validationErrors);
-      
+
       return res.status(400).json({
         status: 'error',
         message: 'Validation failed',
         errors: validationErrors,
       });
     }
-    
+
     if (error.code === 11000) {
       const duplicateField = Object.keys(error.keyPattern)[0];
       return res.status(400).json({
@@ -899,7 +366,7 @@ const createJournalPaymentVoucher = async (req, res) => {
         field: duplicateField,
       });
     }
-    
+
     res.status(500).json({
       status: 'error',
       message: error.message,
@@ -922,15 +389,14 @@ const updateJournalPaymentVoucher = async (req, res) => {
       });
     }
 
-    const previousStatus = voucher.status;
-
-    // Prevent updates if status is completed, posted or cancelled
     if (['completed', 'posted', 'cancelled'].includes(voucher.status)) {
       return res.status(400).json({
         status: 'fail',
         message: 'Cannot update completed, posted or cancelled voucher',
       });
     }
+
+    const previousStatus = voucher.status;
 
     const {
       voucherDate,
@@ -952,242 +418,62 @@ const updateJournalPaymentVoucher = async (req, res) => {
       attachments,
     } = req.body;
 
-    console.log('Update - req.file:', req.file);
-    console.log('Update - attachments from req.body:', attachments);
-
-    // Validate entries if provided
-    if (entries !== undefined) {
-      // Parse entries if it comes as a string (from form-data)
-      let parsedEntries = entries;
-      
-      if (typeof entries === 'string') {
-        try {
-          let cleanString = entries.trim();
-          if ((cleanString.startsWith('"') && cleanString.endsWith('"')) || 
-              (cleanString.startsWith("'") && cleanString.endsWith("'"))) {
-            cleanString = cleanString.slice(1, -1);
-          }
-          cleanString = cleanString
-            .replace(/\\n/g, '')
-            .replace(/\\r/g, '')
-            .replace(/\\t/g, '')
-            .replace(/\\'/g, "'")
-            .replace(/\\"/g, '"')
-            .replace(/\\\\/g, '\\');
-          
-          const parsed = JSON.parse(cleanString);
-          if (Array.isArray(parsed)) {
-            parsedEntries = parsed;
-          }
-        } catch (parseError) {
-          console.error('Error parsing entries string:', parseError);
-          return res.status(400).json({
-            status: 'fail',
-            message: 'Invalid entries format. Entries must be a valid JSON array.',
-          });
-        }
-      }
-      
-      // Handle form-data array notation
-      if (!Array.isArray(parsedEntries) && typeof parsedEntries === 'object' && parsedEntries !== null) {
-        const keys = Object.keys(parsedEntries);
-        const numericKeys = keys.filter(key => /^\d+$/.test(key));
-        if (numericKeys.length > 0) {
-          parsedEntries = numericKeys
-            .sort((a, b) => parseInt(a) - parseInt(b))
-            .map(key => {
-              const entryValue = parsedEntries[key];
-              if (typeof entryValue === 'string') {
-                try {
-                  return JSON.parse(entryValue);
-                } catch (e) {
-                  return entryValue;
-                }
-              }
-              return entryValue;
-            });
-        }
-      }
-      
-      if (!Array.isArray(parsedEntries) || parsedEntries.length < 2) {
-        return res.status(400).json({
-          status: 'fail',
-          message: 'Journal voucher must have at least 2 entries',
-        });
-      }
-
-      const totalDebits = parsedEntries.reduce((sum, entry) => {
-        const debit = typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0);
-        return sum + debit;
-      }, 0);
-      
-      const totalCredits = parsedEntries.reduce((sum, entry) => {
-        const credit = typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0);
-        return sum + credit;
-      }, 0);
-
-      if (Math.abs(totalDebits - totalCredits) > 0.01) {
-        return res.status(400).json({
-          status: 'fail',
-          message: `Total debits (${totalDebits}) must equal total credits (${totalCredits})`,
-          totalDebits,
-          totalCredits,
-        });
-      }
-
-      for (let i = 0; i < parsedEntries.length; i++) {
-        const entry = parsedEntries[i];
-        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-          return res.status(400).json({
-            status: 'fail',
-            message: `Entry ${i} is invalid.`,
-          });
-        }
-        normalizeJournalEntryAccountModel(entry);
-        resolveJournalEntryBankAccountRefs(entry);
-        if (!entry.account) {
-          return res.status(400).json({
-            status: 'fail',
-            message: `Entry ${i} is missing the 'account' field. For BankAccount lines you can send bankAccount only.`,
-            receivedEntry: entry,
-          });
-        }
-        if (entry.bankAccount) {
-          const bankAccountExists = await BankAccount.findById(entry.bankAccount);
-          if (!bankAccountExists) {
-            return res.status(404).json({
-              status: 'fail',
-              message: `Entry ${i} has invalid bank account. Bank account not found.`,
-            });
-          }
-        }
-      }
-
-      const normalizedEntries = parsedEntries.map(entry => {
-        normalizeJournalEntryAccountModel(entry);
-        resolveJournalEntryBankAccountRefs(entry);
-        return {
-          account: entry.account,
-          bankAccount: entry.bankAccount || undefined,
-          accountModel: entry.accountModel,
-          accountName: entry.accountName || '',
-          debit: typeof entry.debit === 'string' ? parseFloat(entry.debit) : (entry.debit || 0),
-          credit: typeof entry.credit === 'string' ? parseFloat(entry.credit) : (entry.credit || 0),
-          description: entry.description || '',
-        };
+    const { error: entriesParseError, parsedEntries } = parseSarafEntriesInput(entries);
+    if (entriesParseError) {
+      return res.status(400).json({
+        status: 'fail',
+        message: entriesParseError,
       });
-
-      voucher.entries = normalizedEntries;
     }
 
-    // Handle attachments (similar to create)
-    const parseAttachmentsString = (attachmentsStr) => {
-      if (!attachmentsStr || typeof attachmentsStr !== 'string') {
-        return [];
+    if (entries !== undefined) {
+      if (!parsedEntries || !Array.isArray(parsedEntries) || parsedEntries.length < 2) {
+        return res.status(400).json({
+          status: 'fail',
+          message: 'Journal voucher must have at least 2 entries with per-line currency and debit/credit (exchangeRate is optional for 2-line cross-currency pairs — auto-calculated).',
+        });
       }
-      
-      try {
-        let cleanString = attachmentsStr.trim();
-        if ((cleanString.startsWith('"') && cleanString.endsWith('"')) || 
-            (cleanString.startsWith("'") && cleanString.endsWith("'"))) {
-          cleanString = cleanString.slice(1, -1);
-        }
-        cleanString = cleanString
-          .replace(/\\n/g, '')
-          .replace(/\\r/g, '')
-          .replace(/\\t/g, '')
-          .replace(/\\'/g, "'")
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, '\\');
-        
-        const parsed = JSON.parse(cleanString);
-        if (Array.isArray(parsed)) {
-          return parsed;
-        } else if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          return [parsed];
-        }
-        return [];
-      } catch (parseError) {
-        console.error('Error parsing attachments string:', parseError.message);
-        return [];
-      }
-    };
 
-    let uploadedAttachments = voucher.attachments || [];
-    
-    if (req.file) {
-      if (voucher.attachments && voucher.attachments.length > 0) {
-        for (const attachment of voucher.attachments) {
-          if (attachment.url) {
-            try {
-              const publicId = attachment.url.split('/').slice(-2).join('/').split('.')[0];
-              await cloudinary.uploader.destroy(`journal-payment-vouchers/${publicId}`);
-            } catch (error) {
-              console.error('Error deleting old attachment:', error);
+      const journalCheck = await validateSarafJournalEntries(parsedEntries);
+      if (!journalCheck.ok) {
+        return res.status(journalCheck.status).json({
+          status: 'fail',
+          message: journalCheck.message,
+          totalBaseDebits: journalCheck.totalBaseDebits,
+          totalBaseCredits: journalCheck.totalBaseCredits,
+        });
+      }
+
+      voucher.entries = mapNormalizedSarafEntries(parsedEntries);
+    }
+
+    if (attachments !== undefined || req.file) {
+      let uploadedAttachments = voucher.attachments || [];
+
+      if (req.file) {
+        if (voucher.attachments && voucher.attachments.length > 0) {
+          for (const attachment of voucher.attachments) {
+            if (attachment.url) {
+              try {
+                const publicId = attachment.url.split('/').slice(-2).join('/').split('.')[0];
+                await cloudinary.uploader.destroy(`journal-payment-vouchers/${publicId}`);
+              } catch (error) {
+                console.error('Error deleting old attachment:', error);
+              }
             }
           }
         }
-      }
 
-      uploadedAttachments = [];
-      try {
-        const uploadResult = await new Promise((resolve, reject) => {
-          const stream = cloudinary.uploader.upload_stream(
-            { folder: 'journal-payment-vouchers' },
-            (error, result) => {
-              if (error) return reject(error);
-              resolve(result);
-            }
-          );
-          stream.end(req.file.buffer);
-        });
-        
-        uploadedAttachments.push({
-          url: String(uploadResult.secure_url || ''),
-          name: String(req.file.originalname || ''),
-          type: String(req.file.mimetype || '')
-        });
-      } catch (uploadError) {
-        console.error('Error uploading file:', uploadError);
-        uploadedAttachments = voucher.attachments || [];
-      }
-    }
-    
-    if (attachments !== undefined) {
-      if (attachments === null) {
-        uploadedAttachments = [];
-      } else {
-        let parsedAttachments = [];
-        
-        if (Array.isArray(attachments)) {
-          parsedAttachments = attachments;
-        } else if (typeof attachments === 'string') {
-          parsedAttachments = parseAttachmentsString(attachments);
-        } else if (typeof attachments === 'object' && !Array.isArray(attachments)) {
-          parsedAttachments = [attachments];
-        }
-        
-        const normalizedAttachments = parsedAttachments
-          .filter(att => {
-            if (!att || Array.isArray(att)) return false;
-            if (typeof att !== 'object') return false;
-            return att.url || att.name;
-          })
-          .map(att => ({
-            url: String(att.url || ''),
-            name: String(att.name || ''),
-            type: String(att.type || att.mimetype || '')
-          }));
-        
-        if (req.file && uploadedAttachments.length > 0) {
-          uploadedAttachments = [...uploadedAttachments, ...normalizedAttachments];
-        } else {
-          uploadedAttachments = normalizedAttachments;
+        try {
+          uploadedAttachments = [await uploadAttachmentFile(req.file, 'journal-payment-vouchers')];
+        } catch {
+          uploadedAttachments = voucher.attachments || [];
         }
       }
+
+      voucher.attachments = normalizeAttachmentsInput(attachments, req.file, uploadedAttachments);
     }
 
-    // Update fields
     if (voucherDate !== undefined) {
       const parsedDate = new Date(voucherDate);
       if (!isNaN(parsedDate.getTime())) {
@@ -1196,7 +482,10 @@ const updateJournalPaymentVoucher = async (req, res) => {
     }
     if (voucherType !== undefined) voucher.voucherType = voucherType;
     if (currency !== undefined) voucher.currency = currency;
-    if (currencyExchangeRate !== undefined) voucher.currencyExchangeRate = typeof currencyExchangeRate === 'string' ? parseFloat(currencyExchangeRate) : currencyExchangeRate;
+    if (currencyExchangeRate !== undefined) {
+      voucher.currencyExchangeRate =
+        typeof currencyExchangeRate === 'string' ? parseFloat(currencyExchangeRate) : currencyExchangeRate;
+    }
     if (referenceNumber !== undefined) voucher.referenceNumber = referenceNumber;
     if (transactionId !== undefined) voucher.transactionId = transactionId;
     if (relatedPurchase !== undefined) voucher.relatedPurchase = relatedPurchase;
@@ -1208,42 +497,21 @@ const updateJournalPaymentVoucher = async (req, res) => {
     if (description !== undefined) voucher.description = description;
     if (notes !== undefined) voucher.notes = notes;
     if (status !== undefined) voucher.status = status;
-    if (attachments !== undefined || req.file) {
-      if (!Array.isArray(uploadedAttachments)) {
-        voucher.attachments = [];
-      } else {
-        voucher.attachments = uploadedAttachments
-          .filter(att => att && typeof att === 'object' && !Array.isArray(att))
-          .map(att => ({
-            url: String(att.url || ''),
-            name: String(att.name || ''),
-            type: String(att.type || '')
-          }));
-      }
-    }
 
     const updatedVoucher = await voucher.save();
 
-    const wasPosted = JOURNAL_BANK_BALANCE_POSTED_STATUSES.includes(previousStatus);
-    const isPosted = JOURNAL_BANK_BALANCE_POSTED_STATUSES.includes(updatedVoucher.status);
+    const wasPosted = JOURNAL_PAYMENT_BANK_BALANCE_POSTED_STATUSES.includes(previousStatus);
+    const isPosted = JOURNAL_PAYMENT_BANK_BALANCE_POSTED_STATUSES.includes(updatedVoucher.status);
     if (!wasPosted && isPosted) {
-      await applyBankBalanceForJournalVoucher(updatedVoucher._id);
+      await applyJournalPostingSideEffects(updatedVoucher, req.user._id);
     }
 
-    // Populate before sending response
-    const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
-      .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('user', 'name email')
-      .select('-__v');
+    const populatedVoucher = await populateJournalVoucher(JournalPaymentVoucher.findById(updatedVoucher._id));
 
     res.status(200).json({
       status: 'success',
       message: 'Journal payment voucher updated successfully',
-      data: {
-        voucher: populatedVoucher,
-      },
+      data: { voucher: populatedVoucher },
     });
   } catch (error) {
     res.status(500).json({
@@ -1281,21 +549,12 @@ const approveJournalPaymentVoucher = async (req, res) => {
     };
 
     const updatedVoucher = await voucher.save();
-
-    const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
-      .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('user', 'name email')
-      .populate('approvalStatus.approvedBy', 'name email')
-      .select('-__v');
+    const populatedVoucher = await populateJournalVoucher(JournalPaymentVoucher.findById(updatedVoucher._id));
 
     res.status(200).json({
       status: 'success',
       message: 'Journal payment voucher approved successfully',
-      data: {
-        voucher: populatedVoucher,
-      },
+      data: { voucher: populatedVoucher },
     });
   } catch (error) {
     res.status(500).json({
@@ -1311,7 +570,6 @@ const approveJournalPaymentVoucher = async (req, res) => {
 const rejectJournalPaymentVoucher = async (req, res) => {
   try {
     const { rejectionReason } = req.body;
-
     const voucher = await JournalPaymentVoucher.findById(req.params.id);
 
     if (!voucher) {
@@ -1336,21 +594,12 @@ const rejectJournalPaymentVoucher = async (req, res) => {
     };
 
     const updatedVoucher = await voucher.save();
-
-    const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
-      .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('user', 'name email')
-      .populate('approvalStatus.approvedBy', 'name email')
-      .select('-__v');
+    const populatedVoucher = await populateJournalVoucher(JournalPaymentVoucher.findById(updatedVoucher._id));
 
     res.status(200).json({
       status: 'success',
       message: 'Journal payment voucher rejected',
-      data: {
-        voucher: populatedVoucher,
-      },
+      data: { voucher: populatedVoucher },
     });
   } catch (error) {
     res.status(500).json({
@@ -1360,7 +609,60 @@ const rejectJournalPaymentVoucher = async (req, res) => {
   }
 };
 
-// @desc    Post journal payment voucher (mark as posted to ledger)
+// @desc    Complete journal payment voucher (same posting logic as saraf entry voucher)
+// @route   PUT /api/journal-payment-vouchers/:id/complete
+// @access  Private
+const completeJournalPaymentVoucher = async (req, res) => {
+  try {
+    const voucher = await JournalPaymentVoucher.findById(req.params.id);
+
+    if (!voucher) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Journal payment voucher not found',
+      });
+    }
+
+    if (voucher.status === 'completed') {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Voucher is already completed',
+      });
+    }
+
+    if (voucher.status === 'cancelled' || voucher.status === 'rejected') {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Cannot complete cancelled or rejected voucher',
+      });
+    }
+
+    voucher.status = 'completed';
+    voucher.completedAt = new Date();
+    voucher.completedBy = req.user._id;
+
+    const updatedVoucher = await voucher.save();
+
+    if (updatedVoucher.entries && updatedVoucher.entries.length >= 2) {
+      await applyJournalPostingSideEffects(updatedVoucher, req.user._id);
+    }
+
+    const populatedVoucher = await populateJournalVoucher(JournalPaymentVoucher.findById(updatedVoucher._id));
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Journal payment voucher completed successfully',
+      data: { voucher: populatedVoucher },
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
+// @desc    Post journal payment voucher to ledger (alias of complete with posted status)
 // @route   PUT /api/journal-payment-vouchers/:id/post
 // @access  Private
 const postJournalPaymentVoucher = async (req, res) => {
@@ -1374,10 +676,10 @@ const postJournalPaymentVoucher = async (req, res) => {
       });
     }
 
-    if (voucher.status === 'posted') {
+    if (voucher.status === 'posted' || voucher.status === 'completed') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Voucher is already posted',
+        message: 'Voucher is already posted or completed',
       });
     }
 
@@ -1394,28 +696,16 @@ const postJournalPaymentVoucher = async (req, res) => {
 
     const updatedVoucher = await voucher.save();
 
-    await applyBankBalanceForJournalVoucher(updatedVoucher._id);
+    if (updatedVoucher.entries && updatedVoucher.entries.length >= 2) {
+      await applyJournalPostingSideEffects(updatedVoucher, req.user._id);
+    }
 
-    // Create Payment/SupplierPayment from entries if not already created (e.g. when posting a draft)
-    await createTransactionsFromJournalEntries(updatedVoucher, req.user._id);
-
-    const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
-      .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('user', 'name email')
-      .populate('postedBy', 'name email')
-      .populate('relatedPayment', 'paymentNumber amount')
-      .populate('relatedSupplierPayment', 'paymentNumber amount')
-      .populate('relatedFinancialPayments', 'referCode amount paymentDate relatedModel relatedId')
-      .select('-__v');
+    const populatedVoucher = await populateJournalVoucher(JournalPaymentVoucher.findById(updatedVoucher._id));
 
     res.status(200).json({
       status: 'success',
       message: 'Journal payment voucher posted successfully',
-      data: {
-        voucher: populatedVoucher,
-      },
+      data: { voucher: populatedVoucher },
     });
   } catch (error) {
     res.status(500).json({
@@ -1456,20 +746,12 @@ const cancelJournalPaymentVoucher = async (req, res) => {
     voucher.status = 'cancelled';
 
     const updatedVoucher = await voucher.save();
-
-    const populatedVoucher = await JournalPaymentVoucher.findById(updatedVoucher._id)
-      .populate('currency', 'name code symbol')
-      .populate('entries.account')
-      .populate('entries.bankAccount', 'accountName accountNumber bankName')
-      .populate('user', 'name email')
-      .select('-__v');
+    const populatedVoucher = await populateJournalVoucher(JournalPaymentVoucher.findById(updatedVoucher._id));
 
     res.status(200).json({
       status: 'success',
       message: 'Journal payment voucher cancelled successfully',
-      data: {
-        voucher: populatedVoucher,
-      },
+      data: { voucher: populatedVoucher },
     });
   } catch (error) {
     res.status(500).json({
@@ -1493,7 +775,6 @@ const deleteJournalPaymentVoucher = async (req, res) => {
       });
     }
 
-    // Prevent deletion if status is completed or posted
     if (voucher.status === 'posted' || voucher.status === 'completed') {
       return res.status(400).json({
         status: 'fail',
@@ -1515,6 +796,76 @@ const deleteJournalPaymentVoucher = async (req, res) => {
   }
 };
 
+// @desc    Get journal payment vouchers by currency
+// @route   GET /api/journal-payment-vouchers/currency/:currencyId
+// @access  Private
+const getVouchersByCurrency = async (req, res) => {
+  try {
+    const { currencyId } = req.params;
+    const { page = 1, limit = 10, startDate, endDate, status } = req.query;
+
+    if (!mongoose.Types.ObjectId.isValid(currencyId)) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid currency ID format',
+      });
+    }
+
+    const currency = await Currency.findById(currencyId);
+    if (!currency) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Currency not found',
+      });
+    }
+
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+
+    const query = {
+      $or: [{ currency: currencyId }, { 'entries.currency': currencyId }],
+    };
+
+    if (status) {
+      query.status = status;
+    }
+
+    if (startDate && endDate) {
+      query.voucherDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    }
+
+    const totalVouchers = await JournalPaymentVoucher.countDocuments(query);
+
+    const vouchers = await populateJournalVoucher(
+      JournalPaymentVoucher.find(query).sort({ voucherDate: -1 }).skip(skip).limit(limitNum)
+    );
+
+    res.status(200).json({
+      status: 'success',
+      results: vouchers.length,
+      totalPages: Math.ceil(totalVouchers / limitNum),
+      currentPage: pageNum,
+      totalVouchers,
+      currency: {
+        _id: currency._id,
+        name: currency.name,
+        code: currency.code,
+        symbol: currency.symbol,
+      },
+      data: { vouchers },
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   getJournalPaymentVouchers,
   getJournalPaymentVoucherById,
@@ -1522,8 +873,9 @@ module.exports = {
   updateJournalPaymentVoucher,
   approveJournalPaymentVoucher,
   rejectJournalPaymentVoucher,
+  completeJournalPaymentVoucher,
   postJournalPaymentVoucher,
   cancelJournalPaymentVoucher,
   deleteJournalPaymentVoucher,
+  getVouchersByCurrency,
 };
-

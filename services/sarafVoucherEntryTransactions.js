@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const SarafEntryVoucher = require('../models/sarafEntryVoucherModel');
+const JournalPaymentVoucher = require('../models/journalPaymentVoucherModel');
 const BankAccount = require('../models/bankAccountModel');
 const SupplierPayment = require('../models/supplierPaymentModel');
 const Payment = require('../models/paymentModel');
@@ -131,8 +132,30 @@ function parseSarafEntriesInput(entries) {
   return { error: null, parsedEntries };
 }
 
-/** Saraf journal postings run when the voucher reaches a finalized ledger state (same idea as journal “posted/completed”). */
+/** Saraf journal postings run when the voucher reaches a finalized ledger state. */
 const SARAF_BANK_BALANCE_POSTED_STATUSES = ['completed'];
+
+/** Journal payment voucher uses the same posting rules as saraf (+ legacy posted status). */
+const JOURNAL_PAYMENT_BANK_BALANCE_POSTED_STATUSES = ['completed', 'posted'];
+
+const VOUCHER_KIND_CONFIG = {
+  saraf: {
+    Model: SarafEntryVoucher,
+    postedStatuses: SARAF_BANK_BALANCE_POSTED_STATUSES,
+    transactionIdPrefix: 'TRX-SEV',
+    voucherLabel: 'saraf voucher',
+  },
+  journal: {
+    Model: JournalPaymentVoucher,
+    postedStatuses: JOURNAL_PAYMENT_BANK_BALANCE_POSTED_STATUSES,
+    transactionIdPrefix: 'TRX-JV',
+    voucherLabel: 'journal voucher',
+  },
+};
+
+function getVoucherKindConfig(kind) {
+  return VOUCHER_KIND_CONFIG[kind] || VOUCHER_KIND_CONFIG.saraf;
+}
 
 function parseLineDebitCredit(entry) {
   const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
@@ -303,12 +326,13 @@ function computeSarafBankBalanceDelta(entryIndex, voucherEntries, bank, currency
   return delta;
 }
 
-async function applyBankBalanceForSarafVoucher(voucherId) {
+async function applyBankBalanceForJournalStyleVoucher(voucherId, kind = 'saraf') {
+  const { Model: VoucherModel, postedStatuses } = getVoucherKindConfig(kind);
   if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
 
-  const voucher = await SarafEntryVoucher.findById(voucherId);
+  const voucher = await VoucherModel.findById(voucherId);
   if (!voucher || voucher.bankBalanceApplied) return;
-  if (!SARAF_BANK_BALANCE_POSTED_STATUSES.includes(voucher.status)) return;
+  if (!postedStatuses.includes(voucher.status)) return;
   if (!Array.isArray(voucher.entries) || voucher.entries.length === 0) return;
 
   const entries = voucher.entries;
@@ -327,7 +351,7 @@ async function applyBankBalanceForSarafVoucher(voucherId) {
 
     const bank = await BankAccount.findById(entry.bankAccount);
     if (!bank) {
-      console.error('applyBankBalanceForSarafVoucher: bank account not found', entry.bankAccount);
+      console.error('applyBankBalanceForJournalStyleVoucher: bank account not found', entry.bankAccount);
       continue;
     }
 
@@ -341,15 +365,24 @@ async function applyBankBalanceForSarafVoucher(voucherId) {
   await voucher.save();
 }
 
+async function applyBankBalanceForSarafVoucher(voucherId) {
+  return applyBankBalanceForJournalStyleVoucher(voucherId, 'saraf');
+}
+
+async function applyBankBalanceForJournalPaymentVoucher(voucherId) {
+  return applyBankBalanceForJournalStyleVoucher(voucherId, 'journal');
+}
+
 /**
- * Create Payment, SupplierPayment, FinancialPayment from saraf journal-style entries (per-line currency).
+ * Create Payment, SupplierPayment, FinancialPayment from journal-style entries (per-line currency).
  */
-async function createTransactionsFromSarafEntries(voucher, userId) {
+async function createTransactionsFromJournalStyleEntries(voucher, userId, kind = 'saraf') {
+  const { Model: VoucherModel, transactionIdPrefix, voucherLabel } = getVoucherKindConfig(kind);
   if (!voucher || !voucher._id || !voucher.entries || !Array.isArray(voucher.entries)) {
     return { createdPayment: null, createdSupplierPayment: null, createdFinancialPayments: [], error: null };
   }
 
-  const freshVoucher = await SarafEntryVoucher.findById(voucher._id);
+  const freshVoucher = await VoucherModel.findById(voucher._id);
   if (!freshVoucher) return { createdPayment: null, createdSupplierPayment: null, createdFinancialPayments: [], error: null };
 
   let createdPayment = null;
@@ -362,7 +395,8 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
   const lineCurrency = (entry) => entry.currency || null;
 
   const transactionId =
-    freshVoucher.transactionId || `TRX-SEV-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+    freshVoucher.transactionId ||
+    `${transactionIdPrefix}-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
   const paymentDate = freshVoucher.voucherDate || new Date();
 
   const normalizeAccountModel = (m) => {
@@ -440,7 +474,7 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
           paymentDate,
           transactionId,
           status: 'completed',
-          notes: freshVoucher.notes || `Payment via saraf voucher ${freshVoucher.voucherNumber}`,
+          notes: freshVoucher.notes || `Payment via ${voucherLabel} ${freshVoucher.voucherNumber}`,
           attachments: freshVoucher.attachments || [],
           user: userId,
           isPartial: false,
@@ -457,7 +491,7 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
           paidAmount: newPaidAmount,
           remainingBalance: newRemainingBalance,
           changes: [],
-          notes: `Payment of ${amount} received via saraf voucher ${freshVoucher.voucherNumber}. ${isAdvancedPayment ? `Advanced: ${Math.abs(newRemainingBalance)}` : `Remaining: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`,
+          notes: `Payment of ${amount} received via ${voucherLabel} ${freshVoucher.voucherNumber}. ${isAdvancedPayment ? `Advanced: ${Math.abs(newRemainingBalance)}` : `Remaining: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`,
         });
 
         freshVoucher.relatedPayment = createdPayment._id;
@@ -499,7 +533,7 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
           paymentDate,
           transactionId,
           status: 'completed',
-          notes: freshVoucher.notes || `Payment via saraf voucher ${freshVoucher.voucherNumber}`,
+          notes: freshVoucher.notes || `Payment via ${voucherLabel} ${freshVoucher.voucherNumber}`,
           attachments: freshVoucher.attachments || [],
           user: userId,
           isPartial: false,
@@ -514,7 +548,7 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
           payment: { amount, method: paymentMethodForSupplier, date: paymentDate, status: 'completed', transactionId },
           paidAmount: newPaidAmount,
           remainingBalance: newRemainingBalance,
-          notes: `Payment of ${amount} to supplier via saraf voucher ${freshVoucher.voucherNumber}. ${isAdvancedPayment ? `Advanced: ${Math.abs(newRemainingBalance)}` : `Remaining: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`,
+          notes: `Payment of ${amount} to supplier via ${voucherLabel} ${freshVoucher.voucherNumber}. ${isAdvancedPayment ? `Advanced: ${Math.abs(newRemainingBalance)}` : `Remaining: ${newRemainingBalance}`}. ${freshVoucher.notes || ''}`,
         });
 
         freshVoucher.relatedSupplierPayment = createdSupplierPayment._id;
@@ -531,12 +565,12 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
     if (amount > 0 && FINANCIAL_ACCOUNT_MODELS.includes(normalizedModel)) {
       try {
         const fp = await FinancialPayment.create({
-          name: entry.accountName || `${normalizedModel} saraf entry`,
+          name: entry.accountName || `${normalizedModel} ${kind} entry`,
           mobileNo: null,
           code: freshVoucher.referenceNumber || freshVoucher.voucherNumber || null,
           description:
             (freshVoucher.description ||
-              `Saraf voucher ${freshVoucher.voucherNumber}: ${isDebit ? 'Debit' : 'Credit'} ${amount} to ${entry.accountName || normalizedModel}. ${freshVoucher.notes || ''}`).trim(),
+              `${kind === 'saraf' ? 'Saraf' : 'Journal'} voucher ${freshVoucher.voucherNumber}: ${isDebit ? 'Debit' : 'Credit'} ${amount} to ${entry.accountName || normalizedModel}. ${freshVoucher.notes || ''}`).trim(),
           amount,
           currency: resolved.lineCurrencyId || undefined,
           paymentDate,
@@ -561,6 +595,14 @@ async function createTransactionsFromSarafEntries(voucher, userId) {
   }
 
   return { createdPayment, createdSupplierPayment, createdFinancialPayments, error: errorDetails };
+}
+
+async function createTransactionsFromSarafEntries(voucher, userId) {
+  return createTransactionsFromJournalStyleEntries(voucher, userId, 'saraf');
+}
+
+async function createTransactionsFromJournalPaymentEntries(voucher, userId) {
+  return createTransactionsFromJournalStyleEntries(voucher, userId, 'journal');
 }
 
 function currencyIdString(c) {
@@ -606,7 +648,17 @@ function applyTwoLineCrossCurrencyBalance(entries) {
       : 1;
   if (!Number.isFinite(rC) || rC < 0) return;
 
-  // Anchor valuation on the credit line; solve for debit line rate
+  // Anchor valuation on the credit line; solve for debit line rate when not explicitly set
+  const rD =
+    debitRow.exchangeRate !== undefined && debitRow.exchangeRate !== null && debitRow.exchangeRate !== ''
+      ? typeof debitRow.exchangeRate === 'string'
+        ? parseFloat(debitRow.exchangeRate)
+        : debitRow.exchangeRate
+      : null;
+
+  const hasExplicitDebitRate = Number.isFinite(rD) && rD > 0 && rD !== 1;
+  if (hasExplicitDebitRate) return;
+
   debitRow.exchangeRate = (C * rC) / D;
 }
 
@@ -706,6 +758,8 @@ async function validateSarafJournalEntries(parsedEntries) {
 }
 
 function mapNormalizedSarafEntries(parsedEntries) {
+  applyTwoLineCrossCurrencyBalance(parsedEntries);
+
   return parsedEntries.map((entry) => {
     normalizeJournalEntryAccountModel(entry);
     resolveJournalEntryBankAccountRefs(entry);
@@ -737,6 +791,11 @@ module.exports = {
   normalizeJournalEntryAccountModel,
   resolveJournalEntryBankAccountRefs,
   createTransactionsFromSarafEntries,
+  createTransactionsFromJournalPaymentEntries,
   applyBankBalanceForSarafVoucher,
+  applyBankBalanceForJournalPaymentVoucher,
+  applyBankBalanceForJournalStyleVoucher,
+  createTransactionsFromJournalStyleEntries,
   SARAF_BANK_BALANCE_POSTED_STATUSES,
+  JOURNAL_PAYMENT_BANK_BALANCE_POSTED_STATUSES,
 };

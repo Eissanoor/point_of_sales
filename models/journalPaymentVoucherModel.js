@@ -53,6 +53,17 @@ const journalEntrySchema = new mongoose.Schema({
     type: String,
     trim: true,
   },
+  currency: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Currency',
+    required: true,
+  },
+  /** Weight for balancing: sum(debit×exchangeRate) must equal sum(credit×exchangeRate) across lines */
+  exchangeRate: {
+    type: Number,
+    default: 1,
+    min: 0,
+  },
 }, { _id: true });
 
 const journalPaymentVoucherSchema = new mongoose.Schema(
@@ -83,15 +94,18 @@ const journalPaymentVoucherSchema = new mongoose.Schema(
           if (!Array.isArray(v) || v.length < 2) {
             return false;
           }
-          
-          // Calculate total debits and credits
-          const totalDebits = v.reduce((sum, entry) => sum + (entry.debit || 0), 0);
-          const totalCredits = v.reduce((sum, entry) => sum + (entry.credit || 0), 0);
-          
-          // Debits must equal credits (double-entry bookkeeping)
-          return Math.abs(totalDebits - totalCredits) < 0.01; // Allow small floating point differences
+
+          if (v.length === 2) {
+            const { applyTwoLineCrossCurrencyBalance } = require('../services/sarafVoucherEntryTransactions');
+            applyTwoLineCrossCurrencyBalance(v);
+          }
+
+          const totalDebits = v.reduce((sum, e) => sum + (e.debit || 0) * (e.exchangeRate ?? 1), 0);
+          const totalCredits = v.reduce((sum, e) => sum + (e.credit || 0) * (e.exchangeRate ?? 1), 0);
+          return Math.abs(totalDebits - totalCredits) < 0.01;
         },
-        message: 'Journal entries must have at least 2 entries and total debits must equal total credits'
+        message:
+          'Journal entries need at least 2 lines and debit×exchangeRate must equal credit×exchangeRate in base terms'
       }
     },
     currency: {
@@ -172,6 +186,13 @@ const journalPaymentVoucherSchema = new mongoose.Schema(
       type: Date,
     },
     postedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+    },
+    completedAt: {
+      type: Date,
+    },
+    completedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
     },
@@ -327,14 +348,19 @@ journalPaymentVoucherSchema.pre('save', async function(next) {
       this.transactionId = `TRX-${prefix}-${timestamp}-${randomPart}`;
     }
 
-    // Validate entries balance (debits must equal credits)
     if (this.entries && Array.isArray(this.entries) && this.entries.length > 0) {
-      const totalDebits = this.entries.reduce((sum, entry) => sum + (entry.debit || 0), 0);
-      const totalCredits = this.entries.reduce((sum, entry) => sum + (entry.credit || 0), 0);
-      
-      // This validation is already done in the schema validator, but we can add additional checks here if needed
+      if (this.entries.length === 2) {
+        const { applyTwoLineCrossCurrencyBalance } = require('../services/sarafVoucherEntryTransactions');
+        applyTwoLineCrossCurrencyBalance(this.entries);
+        this.markModified('entries');
+      }
+
+      const totalDebits = this.entries.reduce((sum, e) => sum + (e.debit || 0) * (e.exchangeRate ?? 1), 0);
+      const totalCredits = this.entries.reduce((sum, e) => sum + (e.credit || 0) * (e.exchangeRate ?? 1), 0);
       if (Math.abs(totalDebits - totalCredits) > 0.01) {
-        return next(new Error(`Total debits (${totalDebits}) must equal total credits (${totalCredits})`));
+        return next(
+          new Error(`Total debits (${totalDebits}) must equal total credits (${totalCredits}) in base terms`)
+        );
       }
     }
 
@@ -358,6 +384,7 @@ journalPaymentVoucherSchema.index({ status: 1 });
 journalPaymentVoucherSchema.index({ voucherType: 1 });
 journalPaymentVoucherSchema.index({ 'entries.account': 1 });
 journalPaymentVoucherSchema.index({ 'entries.accountModel': 1 });
+journalPaymentVoucherSchema.index({ 'entries.currency': 1 });
 
 const JournalPaymentVoucher = mongoose.model('JournalPaymentVoucher', journalPaymentVoucherSchema);
 

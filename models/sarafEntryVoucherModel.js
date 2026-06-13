@@ -97,6 +97,10 @@ const sarafEntryVoucherSchema = new mongoose.Schema(
         validator: function (v) {
           if (!v || v.length === 0) return true;
           if (v.length < 2) return false;
+          if (v.length === 2) {
+            const { applyTwoLineCrossCurrencyBalance } = require('../services/sarafVoucherEntryTransactions');
+            applyTwoLineCrossCurrencyBalance(v);
+          }
           const totalDebits = v.reduce((sum, e) => sum + (e.debit || 0) * (e.exchangeRate ?? 1), 0);
           const totalCredits = v.reduce((sum, e) => sum + (e.credit || 0) * (e.exchangeRate ?? 1), 0);
           return Math.abs(totalDebits - totalCredits) < 0.01;

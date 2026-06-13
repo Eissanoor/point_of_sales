@@ -9,9 +9,11 @@ const {
   updateJournalPaymentVoucher,
   approveJournalPaymentVoucher,
   rejectJournalPaymentVoucher,
+  completeJournalPaymentVoucher,
   postJournalPaymentVoucher,
   cancelJournalPaymentVoucher,
   deleteJournalPaymentVoucher,
+  getVouchersByCurrency,
 } = require('../controllers/journalPaymentVoucherController');
 
 // @route   GET /api/journal-payment-vouchers
@@ -24,6 +26,11 @@ router.route('/').get(protect, getJournalPaymentVouchers);
 // @access  Private
 // @field   attachment - File field name for uploading a single attachment file
 router.route('/').post(protect, uploadSingleAttachment, createJournalPaymentVoucher);
+
+// @route   GET /api/journal-payment-vouchers/currency/:currencyId
+// @desc    Get journal payment vouchers by currency
+// @access  Private
+router.route('/currency/:currencyId').get(protect, getVouchersByCurrency);
 
 // @route   GET /api/journal-payment-vouchers/:id
 // @desc    Get journal payment voucher by ID
@@ -50,6 +57,11 @@ router.route('/:id/approve').put(protect, approveJournalPaymentVoucher);
 // @desc    Reject journal payment voucher
 // @access  Private
 router.route('/:id/reject').put(protect, rejectJournalPaymentVoucher);
+
+// @route   PUT /api/journal-payment-vouchers/:id/complete
+// @desc    Complete journal payment voucher (same posting logic as saraf entry voucher)
+// @access  Private
+router.route('/:id/complete').put(protect, completeJournalPaymentVoucher);
 
 // @route   PUT /api/journal-payment-vouchers/:id/post
 // @desc    Post journal payment voucher to ledger
