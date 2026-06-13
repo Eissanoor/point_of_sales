@@ -43,6 +43,21 @@ const shouldCreateCustomerPaymentForVoucher = (voucherType) =>
 const shouldCreateLedgerTransactionForStatus = (status) =>
   CASH_BALANCE_POSTED_STATUSES.includes(status);
 
+/**
+ * Bank-style voucher direction (same as bank payment voucher):
+ * - customer + payee => receipt (cash in, creates Payment + PaymentJourney)
+ * - supplier + payee => payment (cash out, creates SupplierPayment)
+ */
+const resolveCashPaymentVoucherType = (body, payeeType, normalizedPayee) => {
+  const requested = body.voucherType;
+  if (requested === 'transfer') return 'transfer';
+
+  if (payeeType === 'customer' && normalizedPayee) return 'receipt';
+  if (payeeType === 'supplier' && normalizedPayee) return 'payment';
+
+  return requested || 'payment';
+};
+
 /** Source cash book: receipt adds, payment/transfer subtracts. */
 const getSourceCashBookDelta = (voucherType, amount) => {
   const amt = typeof amount === 'number' ? amount : parseFloat(amount);
@@ -871,6 +886,19 @@ const createCashPaymentVoucher = async (req, res) => {
         ? undefined
         : payee;
 
+    const resolvedVoucherType = resolveCashPaymentVoucherType(
+      req.body,
+      payeeType,
+      normalizedPayee
+    );
+
+    if ((payeeType === 'supplier' || payeeType === 'customer') && !normalizedPayee) {
+      return res.status(400).json({
+        status: 'fail',
+        message: `payee is required when payeeType is ${payeeType}`,
+      });
+    }
+
     // Validate payee if provided and not "other"
     if (normalizedPayee && payeeType !== 'other') {
       let PayeeModel;
@@ -1079,7 +1107,7 @@ const createCashPaymentVoucher = async (req, res) => {
 
     let finalStatus = status || 'draft';
     if (!status) {
-      if ((payeeType === 'supplier' || payeeType === 'customer') && payee) {
+      if ((payeeType === 'supplier' || payeeType === 'customer') && normalizedPayee) {
         finalStatus = 'completed';
         console.log('Auto-setting status to "completed" because supplier/customer is selected');
       } else if (financialModels.includes(payeeType) && normalizedPayee) {
@@ -1088,10 +1116,10 @@ const createCashPaymentVoucher = async (req, res) => {
           `Auto-setting status to "completed" because payeeType "${payeeType}" is a financial model`
         );
       } else if (
-        (voucherType === 'payment' ||
-          voucherType === 'receipt' ||
-          voucherType === 'transfer' ||
-          voucherType === undefined) &&
+        (resolvedVoucherType === 'payment' ||
+          resolvedVoucherType === 'receipt' ||
+          resolvedVoucherType === 'transfer' ||
+          resolvedVoucherType === undefined) &&
         cashBook
       ) {
         const amountNum =
@@ -1106,7 +1134,7 @@ const createCashPaymentVoucher = async (req, res) => {
     }
 
     const voucherData = {
-      voucherType,
+      voucherType: resolvedVoucherType,
       cashBook,
       payeeType,
       // Only set payee when we actually have one and type is not "other"
