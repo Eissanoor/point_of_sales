@@ -251,6 +251,16 @@ function resolveLedgerAmountForTwoLineEntry(entryIndex, entries, currencyMap) {
     };
   }
 
+  // Same weight or unknown currency metadata — use sibling leg for cross-currency conversion
+  if (idA !== idB) {
+    return {
+      ledgerAmount: otherAbs,
+      ledgerCurrencyId: other.currency,
+      lineAmount: rawAmount,
+      lineCurrencyId: entry.currency,
+    };
+  }
+
   return {
     ledgerAmount: rawAmount,
     ledgerCurrencyId: entry.currency,
@@ -559,8 +569,14 @@ async function createTransactionsFromJournalStyleEntries(voucher, userId, kind =
       }
     }
 
-    // Financial payments should keep voucher line currency/amount per side.
-    const amount = resolved.lineAmount;
+    // Cross-currency lines book in functional currency (PKR/base), not raw foreign amount on credit side.
+    const isCrossCurrencyLine =
+      freshVoucher.entries.length === 2 &&
+      resolved.ledgerCurrencyId &&
+      resolved.lineCurrencyId &&
+      resolved.ledgerCurrencyId.toString() !== resolved.lineCurrencyId.toString();
+    const amount = isCrossCurrencyLine ? resolved.ledgerAmount : resolved.lineAmount;
+    const fpCurrency = isCrossCurrencyLine ? resolved.ledgerCurrencyId : resolved.lineCurrencyId;
     const isDebit = debit > 0;
     if (amount > 0 && FINANCIAL_ACCOUNT_MODELS.includes(normalizedModel)) {
       try {
@@ -572,7 +588,7 @@ async function createTransactionsFromJournalStyleEntries(voucher, userId, kind =
             (freshVoucher.description ||
               `${kind === 'saraf' ? 'Saraf' : 'Journal'} voucher ${freshVoucher.voucherNumber}: ${isDebit ? 'Debit' : 'Credit'} ${amount} to ${entry.accountName || normalizedModel}. ${freshVoucher.notes || ''}`).trim(),
           amount,
-          currency: resolved.lineCurrencyId || undefined,
+          currency: fpCurrency || undefined,
           paymentDate,
           method: 'other',
           effect: isDebit ? 'subtract' : 'add',
@@ -611,13 +627,52 @@ function currencyIdString(c) {
   return String(c);
 }
 
+function parseEntryExchangeRate(row, defaultVal = 1) {
+  if (!row) return defaultVal;
+  const raw =
+    row.exchangeRate !== undefined && row.exchangeRate !== null && row.exchangeRate !== ''
+      ? typeof row.exchangeRate === 'string'
+        ? parseFloat(row.exchangeRate)
+        : row.exchangeRate
+      : defaultVal;
+  return Number.isFinite(raw) && raw >= 0 ? raw : defaultVal;
+}
+
+function hasExplicitNonDefaultExchangeRate(row) {
+  const r = parseEntryExchangeRate(row, null);
+  return Number.isFinite(r) && r > 0 && r !== 1;
+}
+
+/**
+ * Pick functional (PKR/base-like) vs foreign leg for a 2-line FX pair.
+ * Uses currency metadata when available; otherwise the larger amount is treated as functional.
+ */
+function resolveFunctionalForeignRows(debitRow, creditRow, D, C, currencyMap = {}) {
+  const curD = currencyIdString(debitRow.currency);
+  const curC = currencyIdString(creditRow.currency);
+  const wD = currencyWeightFromDoc(currencyMap[curD]);
+  const wC = currencyWeightFromDoc(currencyMap[curC]);
+
+  if (wD > wC) {
+    return { functional: debitRow, foreign: creditRow, F: D, X: C };
+  }
+  if (wC > wD) {
+    return { functional: creditRow, foreign: debitRow, F: C, X: D };
+  }
+
+  // Fallback when currency weights are unknown or tied (e.g. sync model validation)
+  if (D >= C) {
+    return { functional: debitRow, foreign: creditRow, F: D, X: C };
+  }
+  return { functional: creditRow, foreign: debitRow, F: C, X: D };
+}
+
 /**
  * For exactly two lines with different currencies (one pure debit, one pure credit),
- * treat the amounts as one FX pair and set the debit line's exchangeRate so that
- * debit×rate = credit×rate on the credit line's rate (usually 1 on the USD/bank side).
- * This avoids forcing users to compute 0.252/70 manually when entering e.g. 70 PKR vs 0.252 USD.
+ * set the functional-currency line exchangeRate so debit×rate = credit×rate in base terms.
+ * Example: 70 PKR vs 0.252 USD — rate goes on the PKR line whether it is debit or credit.
  */
-function applyTwoLineCrossCurrencyBalance(entries) {
+function applyTwoLineCrossCurrencyBalance(entries, currencyMap = {}) {
   if (!Array.isArray(entries) || entries.length !== 2) return;
 
   const debitRow = entries.find((e) => {
@@ -637,29 +692,38 @@ function applyTwoLineCrossCurrencyBalance(entries) {
   if (!curD || !curC || curD === curC) return;
 
   const D = typeof debitRow.debit === 'string' ? parseFloat(debitRow.debit) : debitRow.debit || 0;
-  const C = typeof creditRow.credit === 'string' ? parseFloat(creditRow.credit) : creditRow.credit || 0;
-  if (!(D > 0) || !(C > 0)) return;
+  let C = typeof creditRow.credit === 'string' ? parseFloat(creditRow.credit) : creditRow.credit || 0;
+  if (!(D > 0)) return;
 
-  const rC =
-    creditRow.exchangeRate !== undefined && creditRow.exchangeRate !== null && creditRow.exchangeRate !== ''
-      ? typeof creditRow.exchangeRate === 'string'
-        ? parseFloat(creditRow.exchangeRate)
-        : creditRow.exchangeRate
-      : 1;
-  if (!Number.isFinite(rC) || rC < 0) return;
+  const { functional, foreign, F, X } = resolveFunctionalForeignRows(debitRow, creditRow, D, C, currencyMap);
+  let foreignAmount = X;
 
-  // Anchor valuation on the credit line; solve for debit line rate when not explicitly set
-  const rD =
-    debitRow.exchangeRate !== undefined && debitRow.exchangeRate !== null && debitRow.exchangeRate !== ''
-      ? typeof debitRow.exchangeRate === 'string'
-        ? parseFloat(debitRow.exchangeRate)
-        : debitRow.exchangeRate
-      : null;
+  // Auto-fill missing foreign-side amount from the functional leg (e.g. only PKR debit entered)
+  if (!(foreignAmount > 0) && F > 0) {
+    const rF = parseEntryExchangeRate(functional);
+    const rX = parseEntryExchangeRate(foreign);
+    if (hasExplicitNonDefaultExchangeRate(foreign)) {
+      foreignAmount = (F * rF) / rX;
+    } else if (hasExplicitNonDefaultExchangeRate(functional)) {
+      foreignAmount = (F * rF) / rX;
+    } else {
+      return;
+    }
 
-  const hasExplicitDebitRate = Number.isFinite(rD) && rD > 0 && rD !== 1;
-  if (hasExplicitDebitRate) return;
+    if (foreign === creditRow) {
+      creditRow.credit = foreignAmount;
+      C = foreignAmount;
+    } else {
+      debitRow.debit = foreignAmount;
+    }
+  }
 
-  debitRow.exchangeRate = (C * rC) / D;
+  if (!(F > 0) || !(foreignAmount > 0)) return;
+
+  if (hasExplicitNonDefaultExchangeRate(functional)) return;
+
+  const rX = parseEntryExchangeRate(foreign);
+  functional.exchangeRate = (foreignAmount * rX) / F;
 }
 
 /**
@@ -674,7 +738,7 @@ async function validateSarafJournalEntries(parsedEntries) {
     };
   }
 
-  applyTwoLineCrossCurrencyBalance(parsedEntries);
+  applyTwoLineCrossCurrencyBalance(parsedEntries, await buildCurrencyMapForEntries(parsedEntries));
 
   let totalBaseDebits = 0;
   let totalBaseCredits = 0;
