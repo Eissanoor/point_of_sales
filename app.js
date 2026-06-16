@@ -83,6 +83,16 @@ connectDB();
 
 // Register CashAccount model (used by cash vouchers, saraf entries, journal lines)
 require('./models/cashAccountModel');
+// refPath targets for FinancialPayment.populate('relatedId')
+require('./models/employeeModel');
+require('./models/assetModel');
+require('./models/incomeModel');
+require('./models/liabilityModel');
+require('./models/partnershipAccountModel');
+require('./models/cashBookModel');
+require('./models/capitalModel');
+require('./models/ownerModel');
+require('./models/propertyAccountModel');
 
 // Routes
 app.use('/api/users', userRoutes);

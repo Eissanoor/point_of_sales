@@ -2,6 +2,66 @@ const mongoose = require('mongoose');
 const autoIncrementPlugin = require('./autoIncrementPlugin');
 const { generateReferCode } = require('../utils/referCodeGenerator');
 
+const bankVoucherEntrySchema = new mongoose.Schema(
+  {
+    account: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      refPath: 'accountModel',
+    },
+    bankAccount: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'BankAccount',
+      required: false,
+    },
+    cashBook: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CashBook',
+      required: false,
+    },
+    accountModel: {
+      type: String,
+      required: true,
+      enum: [
+        'BankAccount',
+        'CashAccount',
+        'Supplier',
+        'Customer',
+        'Expense',
+        'Income',
+        'Asset',
+        'Liability',
+        'Equity',
+        'PartnershipAccount',
+        'CashBook',
+        'Capital',
+        'Owner',
+        'Employee',
+        'PropertyAccount',
+      ],
+    },
+    accountName: {
+      type: String,
+      trim: true,
+    },
+    debit: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    credit: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    description: {
+      type: String,
+      trim: true,
+    },
+  },
+  { _id: true }
+);
+
 const bankPaymentVoucherSchema = new mongoose.Schema(
   {
     voucherNumber: {
@@ -147,6 +207,14 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
     relatedFinancialPayment: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'FinancialPayment',
+    },
+    relatedFinancialPayments: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'FinancialPayment' }],
+      default: [],
+    },
+    entries: {
+      type: [bankVoucherEntrySchema],
+      default: [],
     },
     description: {
       type: String,
@@ -332,8 +400,6 @@ bankPaymentVoucherSchema.pre('save', async function(next) {
       this.payeeModel = 'Supplier';
     } else if (this.payeeType === 'customer') {
       this.payeeModel = 'Customer';
-    } else if (this.payeeType === 'employee') {
-      this.payeeModel = 'User'; // Employee uses User model
     }
 
     // Auto-set financialModel, financialId, and payeeModel when payeeType is a financial model
@@ -349,9 +415,11 @@ bankPaymentVoucherSchema.pre('save', async function(next) {
       'PropertyAccount',
     ];
     if (financialModels.includes(this.payeeType) && this.payee) {
-      this.payeeModel = this.payeeType; // Set payeeModel for refPath to work
+      this.payeeModel = this.payeeType;
       this.financialModel = this.payeeType;
       this.financialId = this.payee;
+    } else if (this.payeeType === 'employee') {
+      this.payeeModel = 'User';
     }
 
     next();

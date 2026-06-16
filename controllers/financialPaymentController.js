@@ -283,15 +283,21 @@ const getFinancialPaymentsByRelated = async (req, res) => {
       });
     }
 
+    const relatedObjectId = mongoose.Types.ObjectId.isValid(String(relatedId))
+      ? new mongoose.Types.ObjectId(String(relatedId))
+      : relatedId;
+
     const paymentQuery = {
       relatedModel,
-      relatedId,
+      relatedId: relatedObjectId,
       isActive: true,
     };
 
     if (requestedCurrencyId) {
+      const currencyObjectId = new mongoose.Types.ObjectId(String(requestedCurrencyId));
       paymentQuery.$or = [
-        { currency: requestedCurrencyId },
+        { currency: currencyObjectId },
+        { currency: String(requestedCurrencyId) },
         { currency: null },
         { currency: { $exists: false } },
       ];
@@ -303,12 +309,19 @@ const getFinancialPaymentsByRelated = async (req, res) => {
       .populate({
         path: 'relatedId',
         select: 'name code description',
+        strictPopulate: false,
       })
-      .sort({ paymentDate: -1 })
-      .select('-__v');
+      .sort({ createdAt: -1, paymentDate: -1 })
+      .select('-__v')
+      .lean();
+
+    const financialPayments = payments.map((payment) => ({
+      ...payment,
+      ledgerLabel: payment.effect === 'subtract' ? 'Debit' : 'Credit',
+    }));
 
     // Signed total based on effect: subtract => negative, add => positive
-    const totalAmount = payments.reduce((sum, payment) => {
+    const totalAmount = financialPayments.reduce((sum, payment) => {
       const amt = payment.amount || 0;
       const sign = payment.effect === 'subtract' ? -1 : 1;
       return sum + sign * amt;
@@ -316,9 +329,9 @@ const getFinancialPaymentsByRelated = async (req, res) => {
 
     res.status(200).json({
       status: 'success',
-      results: payments.length,
+      results: financialPayments.length,
       totalAmount,
-      data: { financialPayments: payments },
+      data: { financialPayments },
     });
   } catch (error) {
     res.status(500).json({
