@@ -2,6 +2,66 @@ const mongoose = require('mongoose');
 const autoIncrementPlugin = require('./autoIncrementPlugin');
 const { generateReferCode } = require('../utils/referCodeGenerator');
 
+const bankVoucherEntrySchema = new mongoose.Schema(
+  {
+    account: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      refPath: 'accountModel',
+    },
+    bankAccount: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'BankAccount',
+      required: false,
+    },
+    cashBook: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CashBook',
+      required: false,
+    },
+    accountModel: {
+      type: String,
+      required: true,
+      enum: [
+        'BankAccount',
+        'CashAccount',
+        'Supplier',
+        'Customer',
+        'Expense',
+        'Income',
+        'Asset',
+        'Liability',
+        'Equity',
+        'PartnershipAccount',
+        'CashBook',
+        'Capital',
+        'Owner',
+        'Employee',
+        'PropertyAccount',
+      ],
+    },
+    accountName: {
+      type: String,
+      trim: true,
+    },
+    debit: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    credit: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    description: {
+      type: String,
+      trim: true,
+    },
+  },
+  { _id: true }
+);
+
 const bankPaymentVoucherSchema = new mongoose.Schema(
   {
     voucherNumber: {
@@ -147,6 +207,15 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
     relatedFinancialPayment: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'FinancialPayment',
+    },
+    relatedFinancialPayments: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'FinancialPayment' }],
+      default: [],
+    },
+    /** Double-entry journal lines (debit/credit). When omitted, legacy payee fields are used. */
+    entries: {
+      type: [bankVoucherEntrySchema],
+      default: [],
     },
     description: {
       type: String,
