@@ -1,6 +1,7 @@
 const FinancialPayment = require('../models/financialPaymentModel');
 const APIFeatures = require('../utils/apiFeatures');
 const mongoose = require('mongoose');
+const { getFinancialAccountDetails } = require('../services/financialAccountDetailsService');
 
 // @desc    Create a new financial payment
 // @route   POST /api/financial-payments
@@ -242,13 +243,14 @@ const deleteFinancialPayment = async (req, res) => {
   }
 };
 
-// @desc    Get financial payments by related model and id
+// @desc    Get financial account details with ledger (same shape as bank account details)
 // @route   GET /api/financial-payments/related/:relatedModel/:relatedId
 // @access  Private
 const getFinancialPaymentsByRelated = async (req, res) => {
   try {
     const { relatedModel, relatedId } = req.params;
-    const { currency, currencyId } = req.query;
+    const { currency, currencyId, startDate, endDate, page, limit, includeTransactions } =
+      req.query;
 
     const allowedModels = [
       'Asset',
@@ -266,9 +268,14 @@ const getFinancialPaymentsByRelated = async (req, res) => {
     if (!allowedModels.includes(relatedModel)) {
       return res.status(400).json({
         status: 'fail',
-        message: `Invalid relatedModel. Allowed values: ${allowedModels.join(
-          ', '
-        )}`,
+        message: `Invalid relatedModel. Allowed values: ${allowedModels.join(', ')}`,
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(String(relatedId))) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Invalid related id format',
       });
     }
 
@@ -283,55 +290,25 @@ const getFinancialPaymentsByRelated = async (req, res) => {
       });
     }
 
-    const relatedObjectId = mongoose.Types.ObjectId.isValid(String(relatedId))
-      ? new mongoose.Types.ObjectId(String(relatedId))
-      : relatedId;
+    const details = await getFinancialAccountDetails(relatedModel, relatedId, {
+      currencyId: requestedCurrencyId,
+      startDate,
+      endDate,
+      page,
+      limit,
+      includeTransactions: includeTransactions !== 'false',
+    });
 
-    const paymentQuery = {
-      relatedModel,
-      relatedId: relatedObjectId,
-      isActive: true,
-    };
-
-    if (requestedCurrencyId) {
-      const currencyObjectId = new mongoose.Types.ObjectId(String(requestedCurrencyId));
-      paymentQuery.$or = [
-        { currency: currencyObjectId },
-        { currency: String(requestedCurrencyId) },
-        { currency: null },
-        { currency: { $exists: false } },
-      ];
+    if (!details) {
+      return res.status(404).json({
+        status: 'fail',
+        message: `${relatedModel} not found`,
+      });
     }
-
-    const payments = await FinancialPayment.find(paymentQuery)
-      .populate('user', 'name email')
-      .populate('currency')
-      .populate({
-        path: 'relatedId',
-        select: 'name code description',
-        strictPopulate: false,
-      })
-      .sort({ createdAt: -1, paymentDate: -1 })
-      .select('-__v')
-      .lean();
-
-    const financialPayments = payments.map((payment) => ({
-      ...payment,
-      ledgerLabel: payment.effect === 'subtract' ? 'Debit' : 'Credit',
-    }));
-
-    // Signed total based on effect: subtract => negative, add => positive
-    const totalAmount = financialPayments.reduce((sum, payment) => {
-      const amt = payment.amount || 0;
-      const sign = payment.effect === 'subtract' ? -1 : 1;
-      return sum + sign * amt;
-    }, 0);
 
     res.status(200).json({
       status: 'success',
-      results: financialPayments.length,
-      totalAmount,
-      data: { financialPayments },
+      data: details,
     });
   } catch (error) {
     res.status(500).json({
