@@ -110,7 +110,7 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
     paymentMethod: {
       type: String,
       required: true,
-      enum: ['bank_transfer', 'check', 'online_payment', 'wire_transfer', 'dd', 'other'],
+      enum: ['bank', 'bank_transfer', 'check', 'online_payment', 'wire_transfer', 'dd', 'other'],
       default: 'bank_transfer',
     },
     checkNumber: {

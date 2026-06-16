@@ -224,12 +224,13 @@ const createTransactionFromVoucher = async (voucher, userId) => {
   // Map voucher paymentMethod to supplier/customer payment method
   const mapPaymentMethod = (voucherMethod) => {
     const methodMap = {
-      'bank_transfer': 'bank_transfer',
-      'check': 'check',
-      'online_payment': 'online_payment',
-      'wire_transfer': 'bank_transfer',
-      'dd': 'bank_transfer',
-      'other': 'other'
+      bank: 'bank_transfer',
+      bank_transfer: 'bank_transfer',
+      check: 'check',
+      online_payment: 'online_payment',
+      wire_transfer: 'bank_transfer',
+      dd: 'bank_transfer',
+      other: 'other',
     };
     return methodMap[voucherMethod] || 'bank_transfer';
   };
@@ -576,6 +577,7 @@ const createTransactionFromVoucher = async (voucher, userId) => {
     const targetFinancialId = freshVoucher.financialId || freshVoucher.payee;
     try {
       const methodMapForFinancial = {
+        bank: 'bank_transfer',
         bank_transfer: 'bank_transfer',
         check: 'check',
         online_payment: 'online',
