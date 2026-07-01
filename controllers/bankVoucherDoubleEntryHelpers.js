@@ -48,6 +48,7 @@ const PAYEE_TYPE_TO_ACCOUNT_MODEL = {
   customer: 'Customer',
   employee: 'Employee',
   Asset: 'Asset',
+  Expense: 'Expense',
   Income: 'Income',
   Liability: 'Liability',
   PartnershipAccount: 'PartnershipAccount',
@@ -56,6 +57,13 @@ const PAYEE_TYPE_TO_ACCOUNT_MODEL = {
   Owner: 'Owner',
   Employee: 'Employee',
   PropertyAccount: 'PropertyAccount',
+  procurement: 'Expense',
+  logistics: 'Expense',
+  warehouse: 'Expense',
+  sales_distribution: 'Expense',
+  financial: 'Expense',
+  operational: 'Expense',
+  miscellaneous: 'Expense',
 };
 
 const parseLineAmount = (value) => {

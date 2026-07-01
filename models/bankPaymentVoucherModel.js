@@ -93,6 +93,7 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
         'customer',
         'employee',
         'Asset',
+        'Expense',
         'Income',
         'Liability',
         'PartnershipAccount',
@@ -101,6 +102,13 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
         'Owner',
         'Employee',
         'PropertyAccount',
+        'procurement',
+        'logistics',
+        'warehouse',
+        'sales_distribution',
+        'financial',
+        'operational',
+        'miscellaneous',
         'other',
       ],
       default: 'other',
@@ -118,6 +126,7 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
         'Customer',
         'User',
         'Asset',
+        'Expense',
         'Income',
         'Liability',
         'PartnershipAccount',
@@ -138,6 +147,7 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
       type: String,
       enum: [
         'Asset',
+        'Expense',
         'Income',
         'Liability',
         'PartnershipAccount',
@@ -211,6 +221,10 @@ const bankPaymentVoucherSchema = new mongoose.Schema(
     relatedFinancialPayments: {
       type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'FinancialPayment' }],
       default: [],
+    },
+    relatedExpense: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Expense',
     },
     entries: {
       type: [bankVoucherEntrySchema],
@@ -402,9 +416,20 @@ bankPaymentVoucherSchema.pre('save', async function(next) {
       this.payeeModel = 'Customer';
     }
 
+    const expenseCategoryTypes = [
+      'procurement',
+      'logistics',
+      'warehouse',
+      'sales_distribution',
+      'financial',
+      'operational',
+      'miscellaneous',
+    ];
+
     // Auto-set financialModel, financialId, and payeeModel when payeeType is a financial model
     const financialModels = [
       'Asset',
+      'Expense',
       'Income',
       'Liability',
       'PartnershipAccount',
@@ -418,6 +443,14 @@ bankPaymentVoucherSchema.pre('save', async function(next) {
       this.payeeModel = this.payeeType;
       this.financialModel = this.payeeType;
       this.financialId = this.payee;
+      if (this.payeeType === 'Expense') {
+        this.relatedExpense = this.payee;
+      }
+    } else if (expenseCategoryTypes.includes(this.payeeType) && this.payee) {
+      this.payeeModel = 'Expense';
+      this.financialModel = 'Expense';
+      this.financialId = this.payee;
+      this.relatedExpense = this.payee;
     } else if (this.payeeType === 'employee') {
       this.payeeModel = 'User';
     }
