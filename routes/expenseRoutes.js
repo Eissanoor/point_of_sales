@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
   getExpenses,
+  getExpenseDetailsById,
   getExpenseById,
   createExpense,
   updateExpense,
@@ -22,6 +23,11 @@ router.get('/', getExpenses);
 // @desc    Get expense analytics and summary
 // @access  Private
 router.get('/analytics', getExpenseAnalytics);
+
+// @route   GET /api/expenses/:id/details
+// @desc    Get full expense transaction details (category + vouchers + payments)
+// @access  Private
+router.get('/:id/details', getExpenseDetailsById);
 
 // @route   GET /api/expenses/:id
 // @desc    Get single expense by ID

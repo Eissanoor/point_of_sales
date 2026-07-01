@@ -7,6 +7,7 @@ const FinancialExpense = require('../models/financialExpenseModel');
 const OperationalExpense = require('../models/operationalExpenseModel');
 const MiscellaneousExpense = require('../models/miscellaneousExpenseModel');
 const Currency = require('../models/currencyModel');
+const { getExpenseDetails } = require('../services/expenseDetailsService');
 
 // Helper function to get expense model based on type
 const getExpenseModel = (expenseType) => {
@@ -70,6 +71,34 @@ const getExpenses = async (req, res) => {
     res.status(500).json({
       status: 'error',
       message: error.message
+    });
+  }
+};
+
+// @desc    Get full expense transaction details (all categories + vouchers)
+// @route   GET /api/expenses/:id/details
+// @access  Private
+const getExpenseDetailsById = async (req, res) => {
+  try {
+    const details = await getExpenseDetails(req.params.id, {
+      expenseType: req.query.expenseType,
+    });
+
+    if (!details) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Expense not found',
+      });
+    }
+
+    res.status(200).json({
+      status: 'success',
+      data: details,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
     });
   }
 };
@@ -373,6 +402,7 @@ const getExpenseAnalytics = async (req, res) => {
 
 module.exports = {
   getExpenses,
+  getExpenseDetailsById,
   getExpenseById,
   createExpense,
   updateExpense,
