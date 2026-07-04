@@ -1,6 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const OperationalExpense = require('../models/operationalExpenseModel');
 const APIFeatures = require('../utils/apiFeatures');
+const { enrichCategoryExpenseList } = require('../services/expenseDetailsService');
 
 // @desc    Create a new operational expense
 // @route   POST /api/expenses/operational
@@ -59,10 +60,12 @@ const getOperationalExpenses = asyncHandler(async (req, res) => {
   const operationalExpenses = await features.query
     .populate('currency', 'code symbol');
 
+  const enrichedData = await enrichCategoryExpenseList('operational', operationalExpenses);
+
   res.status(200).json({
     success: true,
-    count: operationalExpenses.length,
-    data: operationalExpenses
+    count: enrichedData.length,
+    data: enrichedData
   });
 });
 
@@ -78,9 +81,11 @@ const getOperationalExpense = asyncHandler(async (req, res) => {
     throw new Error('Operational expense not found');
   }
 
+  const [enrichedExpense] = await enrichCategoryExpenseList('operational', [operationalExpense]);
+
   res.status(200).json({
     success: true,
-    data: operationalExpense
+    data: enrichedExpense
   });
 });
 

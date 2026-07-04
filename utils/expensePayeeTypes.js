@@ -153,28 +153,9 @@ const markExpensePaidFromVoucher = async (voucher) => {
     return null;
   }
 
-  const expense = resolved.expense;
-
-  if (expense.status !== 'paid') {
-    expense.status = 'paid';
-    await expense.save();
-  }
-
-  const CategoryModel = EXPENSE_CATEGORY_MODELS[expense.expenseType];
-  if (CategoryModel && expense.referenceId) {
-    const detail = await CategoryModel.findById(expense.referenceId);
-    if (detail) {
-      if (detail.paymentStatus !== undefined && detail.paymentStatus !== 'paid') {
-        detail.paymentStatus = 'paid';
-      }
-      if (detail.paidDate !== undefined) {
-        detail.paidDate = voucher.voucherDate || new Date();
-      }
-      await detail.save();
-    }
-  }
-
-  return expense;
+  const { syncExpensePaymentAmounts } = require('../services/expenseDetailsService');
+  const result = await syncExpensePaymentAmounts(resolved.expense._id);
+  return result?.expense || resolved.expense;
 };
 
 module.exports = {

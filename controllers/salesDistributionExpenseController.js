@@ -1,5 +1,6 @@
 const SalesDistributionExpense = require('../models/salesDistributionExpenseModel');
 const Currency = require('../models/currencyModel');
+const { enrichCategoryExpenseList } = require('../services/expenseDetailsService');
 
 // @desc    Fetch all sales distribution expenses
 // @route   GET /api/sales-distribution-expenses
@@ -43,14 +44,15 @@ const getSalesDistributionExpenses = async (req, res) => {
       .skip((page - 1) * limit);
     
     const total = await SalesDistributionExpense.countDocuments(query);
+    const enrichedData = await enrichCategoryExpenseList('sales_distribution', expenses);
     
     res.json({
       status: 'success',
-      results: expenses.length,
+      results: enrichedData.length,
       total,
       page: parseInt(page),
       pages: Math.ceil(total / limit),
-      data: expenses
+      data: enrichedData
     });
   } catch (error) {
     res.status(500).json({
@@ -78,9 +80,11 @@ const getSalesDistributionExpenseById = async (req, res) => {
       });
     }
     
+    const [enrichedExpense] = await enrichCategoryExpenseList('sales_distribution', [expense]);
+    
     res.json({
       status: 'success',
-      data: expense
+      data: enrichedExpense
     });
   } catch (error) {
     res.status(500).json({

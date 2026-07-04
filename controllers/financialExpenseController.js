@@ -1,5 +1,6 @@
 const FinancialExpense = require('../models/financialExpenseModel');
 const APIFeatures = require('../utils/apiFeatures');
+const { enrichCategoryExpenseList } = require('../services/expenseDetailsService');
 
 // @desc    Fetch all financial expenses
 // @route   GET /api/expenses/financial
@@ -16,11 +17,13 @@ const getFinancialExpenses = async (req, res) => {
       .populate('currency', 'name code symbol')
       .populate('linkedBankAccount', 'accountName accountNumber');
 
+    const enrichedData = await enrichCategoryExpenseList('financial', expenses);
+
     res.status(200).json({
       status: 'success',
-      results: expenses.length,
+      results: enrichedData.length,
       data: {
-        expenses
+        expenses: enrichedData
       }
     });
   } catch (error) {
@@ -47,10 +50,12 @@ const getFinancialExpenseById = async (req, res) => {
       });
     }
 
+    const [enrichedExpense] = await enrichCategoryExpenseList('financial', [expense]);
+
     res.status(200).json({
       status: 'success',
       data: {
-        expense
+        expense: enrichedExpense
       }
     });
   } catch (error) {

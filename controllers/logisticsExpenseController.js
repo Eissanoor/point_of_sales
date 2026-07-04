@@ -3,6 +3,7 @@ const Transporter = require('../models/transporterModel');
 const Warehouse = require('../models/warehouseModel');
 const Shipment = require('../models/shipmentModel');
 const Currency = require('../models/currencyModel');
+const { enrichCategoryExpenseList } = require('../services/expenseDetailsService');
 
 // @desc    Fetch all logistics expenses
 // @route   GET /api/logistics-expenses
@@ -27,14 +28,15 @@ const getLogisticsExpenses = async (req, res) => {
       .skip((page - 1) * limit);
     
     const total = await LogisticsExpense.countDocuments(query);
+    const enrichedData = await enrichCategoryExpenseList('logistics', expenses);
     
     res.json({
       status: 'success',
-      results: expenses.length,
+      results: enrichedData.length,
       total,
       page: parseInt(page),
       pages: Math.ceil(total / limit),
-      data: expenses
+      data: enrichedData
     });
   } catch (error) {
     res.status(500).json({
@@ -62,9 +64,11 @@ const getLogisticsExpenseById = async (req, res) => {
       });
     }
     
+    const [enrichedExpense] = await enrichCategoryExpenseList('logistics', [expense]);
+    
     res.json({
       status: 'success',
-      data: expense
+      data: enrichedExpense
     });
   } catch (error) {
     res.status(500).json({

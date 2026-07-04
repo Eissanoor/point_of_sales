@@ -48,9 +48,19 @@ const expenseSchema = new mongoose.Schema(
       type: String,
       default: 'pending',
       enum: {
-        values: ['pending', 'approved', 'paid', 'cancelled'],
+        values: ['pending', 'approved', 'partial', 'paid', 'cancelled'],
         message: 'Invalid status'
       }
+    },
+    paidAmount: {
+      type: Number,
+      default: 0,
+      min: [0, 'Paid amount cannot be negative']
+    },
+    remainingBalance: {
+      type: Number,
+      default: 0,
+      min: [0, 'Remaining balance cannot be negative']
     },
     expenseDate: {
       type: Date,

@@ -1,6 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const MiscellaneousExpense = require('../models/miscellaneousExpenseModel');
 const APIFeatures = require('../utils/apiFeatures');
+const { enrichCategoryExpenseList } = require('../services/expenseDetailsService');
 
 // @desc    Create a new miscellaneous expense
 // @route   POST /api/expenses/miscellaneous
@@ -63,10 +64,12 @@ const getMiscellaneousExpenses = asyncHandler(async (req, res) => {
   const miscellaneousExpenses = await features.query
     .populate('currency', 'code symbol');
 
+  const enrichedData = await enrichCategoryExpenseList('miscellaneous', miscellaneousExpenses);
+
   res.status(200).json({
     success: true,
-    count: miscellaneousExpenses.length,
-    data: miscellaneousExpenses
+    count: enrichedData.length,
+    data: enrichedData
   });
 });
 
@@ -82,9 +85,11 @@ const getMiscellaneousExpense = asyncHandler(async (req, res) => {
     throw new Error('Miscellaneous expense not found');
   }
 
+  const [enrichedExpense] = await enrichCategoryExpenseList('miscellaneous', [miscellaneousExpense]);
+
   res.status(200).json({
     success: true,
-    data: miscellaneousExpense
+    data: enrichedExpense
   });
 });
 

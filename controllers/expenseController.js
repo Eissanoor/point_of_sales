@@ -7,7 +7,7 @@ const FinancialExpense = require('../models/financialExpenseModel');
 const OperationalExpense = require('../models/operationalExpenseModel');
 const MiscellaneousExpense = require('../models/miscellaneousExpenseModel');
 const Currency = require('../models/currencyModel');
-const { getExpenseDetails } = require('../services/expenseDetailsService');
+const { getExpenseDetails, enrichMasterExpenseList } = require('../services/expenseDetailsService');
 
 // Helper function to get expense model based on type
 const getExpenseModel = (expenseType) => {
@@ -58,14 +58,15 @@ const getExpenses = async (req, res) => {
       .skip((page - 1) * limit);
     
     const total = await Expense.countDocuments(query);
+    const enrichedData = await enrichMasterExpenseList(expenses);
     
     res.json({
       status: 'success',
-      results: expenses.length,
+      results: enrichedData.length,
       total,
       page: parseInt(page),
       pages: Math.ceil(total / limit),
-      data: expenses
+      data: enrichedData
     });
   } catch (error) {
     res.status(500).json({

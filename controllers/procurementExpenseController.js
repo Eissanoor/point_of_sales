@@ -3,6 +3,7 @@ const Supplier = require('../models/supplierModel');
 const Product = require('../models/productModel');
 const Category = require('../models/categoryModel');
 const Currency = require('../models/currencyModel');
+const { enrichCategoryExpenseList } = require('../services/expenseDetailsService');
 
 // @desc    Fetch all procurement expenses
 // @route   GET /api/procurement-expenses
@@ -27,14 +28,15 @@ const getProcurementExpenses = async (req, res) => {
       .skip((page - 1) * limit);
     
     const total = await ProcurementExpense.countDocuments(query);
+    const enrichedData = await enrichCategoryExpenseList('procurement', expenses);
     
     res.json({
       status: 'success',
-      results: expenses.length,
+      results: enrichedData.length,
       total,
       page: parseInt(page),
       pages: Math.ceil(total / limit),
-      data: expenses
+      data: enrichedData
     });
   } catch (error) {
     res.status(500).json({
@@ -63,9 +65,11 @@ const getProcurementExpenseById = async (req, res) => {
       });
     }
     
+    const [enrichedExpense] = await enrichCategoryExpenseList('procurement', [expense]);
+    
     res.json({
       status: 'success',
-      data: expense
+      data: enrichedExpense
     });
   } catch (error) {
     res.status(500).json({
@@ -269,13 +273,22 @@ const getProcurementExpensesBySupplier = async (req, res) => {
       .populate('currency', 'name code symbol')
       .sort({ createdAt: -1 });
     
-    const totalAmount = expenses.reduce((sum, expense) => sum + expense.amountInPKR, 0);
+    const enrichedData = await enrichCategoryExpenseList('procurement', expenses);
+    const totalAmount = enrichedData.reduce(
+      (sum, expense) => sum + (expense.paymentInfo?.expenseAmount || expense.amountInPKR || 0),
+      0
+    );
+    const totalPaid = enrichedData.reduce(
+      (sum, expense) => sum + (expense.paymentInfo?.paidAmount || 0),
+      0
+    );
     
     res.json({
       status: 'success',
-      results: expenses.length,
+      results: enrichedData.length,
       totalAmount,
-      data: expenses
+      totalPaid,
+      data: enrichedData
     });
   } catch (error) {
     res.status(500).json({

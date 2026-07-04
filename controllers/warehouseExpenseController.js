@@ -1,6 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const WarehouseExpense = require('../models/warehouseExpenseModel');
 const APIFeatures = require('../utils/apiFeatures');
+const { enrichCategoryExpenseList } = require('../services/expenseDetailsService');
 
 // @desc    Create a new warehouse expense
 // @route   POST /api/warehouse-expenses
@@ -67,10 +68,12 @@ const getWarehouseExpenses = asyncHandler(async (req, res) => {
     .populate('currency', 'code symbol')
     .populate('linkedStock', 'name code');
 
+  const enrichedData = await enrichCategoryExpenseList('warehouse', warehouseExpenses);
+
   res.status(200).json({
     success: true,
-    count: warehouseExpenses.length,
-    data: warehouseExpenses
+    count: enrichedData.length,
+    data: enrichedData
   });
 });
 
@@ -88,9 +91,11 @@ const getWarehouseExpense = asyncHandler(async (req, res) => {
     throw new Error('Warehouse expense not found');
   }
 
+  const [enrichedExpense] = await enrichCategoryExpenseList('warehouse', [warehouseExpense]);
+
   res.status(200).json({
     success: true,
-    data: warehouseExpense
+    data: enrichedExpense
   });
 });
 

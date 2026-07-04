@@ -155,6 +155,178 @@ async function loadCategoryDetails(expenseType, referenceId) {
   return query.select('-__v').lean();
 }
 
+async function fetchBankPaymentVouchersLean(payeeIds) {
+  const objectIds = payeeIds
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  if (objectIds.length === 0) return [];
+
+  return BankPaymentVoucher.find({
+    $or: [
+      { relatedExpense: { $in: objectIds } },
+      {
+        payee: { $in: objectIds },
+        payeeType: { $in: EXPENSE_PAYEE_TYPES },
+      },
+      {
+        financialModel: 'Expense',
+        financialId: { $in: objectIds },
+      },
+    ],
+  })
+    .select('voucherNumber voucherDate amount status payee relatedExpense financialId financialModel')
+    .sort({ voucherDate: -1, createdAt: -1 })
+    .lean();
+}
+
+async function fetchFinancialPaymentsLean(payeeIds) {
+  const objectIds = payeeIds
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  if (objectIds.length === 0) return [];
+
+  return FinancialPayment.find({
+    relatedModel: 'Expense',
+    relatedId: { $in: objectIds },
+  })
+    .select('referCode amount paymentDate method effect isActive relatedId')
+    .sort({ paymentDate: -1, createdAt: -1 })
+    .lean();
+}
+
+function matchTransactionsForPayeeIds(allVouchers, allPayments, payeeIds) {
+  const idSet = new Set(payeeIds.map(String));
+  const seenVoucherIds = new Set();
+  const vouchers = [];
+
+  for (const voucher of allVouchers) {
+    const voucherId = String(voucher._id);
+    if (seenVoucherIds.has(voucherId)) continue;
+
+    const matches =
+      idSet.has(String(voucher.payee)) ||
+      idSet.has(String(voucher.relatedExpense)) ||
+      (voucher.financialModel === 'Expense' &&
+        idSet.has(String(voucher.financialId)));
+
+    if (matches) {
+      seenVoucherIds.add(voucherId);
+      vouchers.push(voucher);
+    }
+  }
+
+  const payments = allPayments.filter((payment) =>
+    idSet.has(String(payment.relatedId))
+  );
+
+  return { vouchers, payments };
+}
+
+function readCategoryExpenseAmount(categoryItem) {
+  if (categoryItem?.amountInPKR != null) return categoryItem.amountInPKR;
+  if (categoryItem?.totalCost != null && categoryItem?.exchangeRate != null) {
+    return round2(categoryItem.totalCost * categoryItem.exchangeRate);
+  }
+  return categoryItem?.totalCost || 0;
+}
+
+async function syncExpensePaymentAmounts(expenseId) {
+  const expense = await Expense.findById(expenseId);
+  if (!expense || !expense.isActive) return null;
+
+  const payeeIds = collectPayeeIds(expense._id, expense);
+  const [vouchers, payments] = await Promise.all([
+    fetchBankPaymentVouchersLean(payeeIds),
+    fetchFinancialPaymentsLean(payeeIds),
+  ]);
+
+  const summary = buildPaymentSummary(expense, vouchers, payments);
+
+  expense.paidAmount = summary.paidAmount;
+  expense.remainingBalance = summary.remainingBalance;
+
+  if (expense.status !== 'cancelled') {
+    if (summary.paymentStatus === 'paid') expense.status = 'paid';
+    else if (summary.paymentStatus === 'partial') expense.status = 'partial';
+  }
+
+  await expense.save();
+
+  const CategoryModel = EXPENSE_CATEGORY_MODELS[expense.expenseType];
+  if (CategoryModel && expense.referenceId) {
+    const detail = await CategoryModel.findById(expense.referenceId);
+    if (detail) {
+      if (detail.paymentStatus !== undefined) {
+        detail.paymentStatus = summary.paymentStatus;
+      }
+      if (detail.paidDate !== undefined && summary.paymentStatus === 'paid') {
+        const lastVoucher = vouchers.find((v) => v.status !== 'cancelled');
+        detail.paidDate = lastVoucher?.voucherDate || new Date();
+      }
+      await detail.save();
+    }
+  }
+
+  return { expense, summary };
+}
+
+async function enrichCategoryExpenseList(expenseType, categoryExpenses) {
+  if (!Array.isArray(categoryExpenses) || categoryExpenses.length === 0) {
+    return [];
+  }
+
+  const items = categoryExpenses.map((item) =>
+    typeof item.toObject === 'function' ? item.toObject() : { ...item }
+  );
+  const referenceIds = items.map((item) => item._id);
+
+  const masterExpenses = await Expense.find({
+    referenceId: { $in: referenceIds },
+    expenseType,
+    isActive: true,
+  })
+    .select('_id referCode referenceId totalAmount amountInPKR status paidAmount remainingBalance')
+    .lean();
+
+  const masterByReference = new Map(
+    masterExpenses.map((expense) => [String(expense.referenceId), expense])
+  );
+
+  const allPayeeIds = new Set();
+  for (const item of items) {
+    allPayeeIds.add(String(item._id));
+    const master = masterByReference.get(String(item._id));
+    if (master?._id) allPayeeIds.add(String(master._id));
+  }
+
+  const [allVouchers, allPayments] = await Promise.all([
+    fetchBankPaymentVouchersLean([...allPayeeIds]),
+    fetchFinancialPaymentsLean([...allPayeeIds]),
+  ]);
+
+  return items.map((item) => {
+    const masterExpense = masterByReference.get(String(item._id));
+    const payeeIds = collectPayeeIds(item._id, masterExpense);
+    const { vouchers, payments } = matchTransactionsForPayeeIds(
+      allVouchers,
+      allPayments,
+      payeeIds
+    );
+
+    const expenseAmount =
+      masterExpense?.amountInPKR ?? readCategoryExpenseAmount(item);
+    const paymentInfo = buildPaymentSummary(expenseAmount, vouchers, payments);
+
+    return {
+      ...item,
+      masterExpense: masterExpense || null,
+      paymentInfo,
+    };
+  });
+}
+
 async function fetchBankPaymentVouchers(payeeIds) {
   const objectIds = payeeIds
     .filter((id) => mongoose.Types.ObjectId.isValid(id))
@@ -201,8 +373,11 @@ async function fetchFinancialPayments(payeeIds) {
     .lean();
 }
 
-function buildPaymentSummary(expense, bankPaymentVouchers, financialPayments) {
-  const expenseAmount = expense?.amountInPKR ?? expense?.totalAmount ?? 0;
+function buildPaymentSummary(expenseOrAmount, bankPaymentVouchers, financialPayments) {
+  const expenseAmount =
+    typeof expenseOrAmount === 'number'
+      ? expenseOrAmount
+      : expenseOrAmount?.amountInPKR ?? expenseOrAmount?.totalAmount ?? 0;
   let paidViaVouchers = 0;
   let paidViaFinancialPayments = 0;
 
@@ -222,15 +397,26 @@ function buildPaymentSummary(expense, bankPaymentVouchers, financialPayments) {
   const totalPaid = round2(paidViaVouchers + paidViaFinancialPayments);
   const remainingBalance = round2(Math.max(0, expenseAmount - totalPaid));
 
+  let paymentStatus = 'pending';
+  if (totalPaid > 0 && remainingBalance > 0) paymentStatus = 'partial';
+  if (remainingBalance <= 0 && totalPaid > 0) paymentStatus = 'paid';
+
   return {
     expenseAmount: round2(expenseAmount),
     paidViaVouchers,
     paidViaFinancialPayments,
+    paidAmount: totalPaid,
     totalPaid,
     remainingBalance,
     bankPaymentVoucherCount: bankPaymentVouchers.length,
     financialPaymentCount: financialPayments.length,
-    paymentStatus: expense?.status || 'unknown',
+    paymentStatus,
+    masterStatus:
+      paymentStatus === 'paid'
+        ? 'paid'
+        : paymentStatus === 'partial'
+          ? 'partial'
+          : expenseOrAmount?.status || 'pending',
   };
 }
 
@@ -271,7 +457,45 @@ async function getExpenseDetails(id, options = {}) {
   };
 }
 
+async function enrichMasterExpenseList(expenses) {
+  if (!Array.isArray(expenses) || expenses.length === 0) return [];
+
+  const items = expenses.map((item) =>
+    typeof item.toObject === 'function' ? item.toObject() : { ...item }
+  );
+
+  const allPayeeIds = new Set();
+  for (const item of items) {
+    allPayeeIds.add(String(item._id));
+    if (item.referenceId) allPayeeIds.add(String(item.referenceId));
+  }
+
+  const [allVouchers, allPayments] = await Promise.all([
+    fetchBankPaymentVouchersLean([...allPayeeIds]),
+    fetchFinancialPaymentsLean([...allPayeeIds]),
+  ]);
+
+  return items.map((item) => {
+    const payeeIds = collectPayeeIds(item._id, item);
+    const { vouchers, payments } = matchTransactionsForPayeeIds(
+      allVouchers,
+      allPayments,
+      payeeIds
+    );
+    const paymentInfo = buildPaymentSummary(item, vouchers, payments);
+
+    return {
+      ...item,
+      paymentInfo,
+    };
+  });
+}
+
 module.exports = {
   getExpenseDetails,
   resolveExpenseRecord,
+  syncExpensePaymentAmounts,
+  enrichCategoryExpenseList,
+  enrichMasterExpenseList,
+  buildPaymentSummary,
 };
