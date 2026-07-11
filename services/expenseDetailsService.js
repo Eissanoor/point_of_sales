@@ -6,6 +6,8 @@ const {
   EXPENSE_CATEGORY_PAYEE_TYPES,
   EXPENSE_CATEGORY_MODELS,
 } = require('../utils/expensePayeeTypes');
+const { paymentToLedgerRow } = require('./financialAccountDetailsService');
+const { getEffectiveBankVoucherEntries } = require('../controllers/bankVoucherDoubleEntryHelpers');
 
 require('../models/userModel');
 require('../models/currencyModel');
@@ -81,6 +83,370 @@ const BANK_VOUCHER_POPULATE = [
 ];
 
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+const parseDate = (value) => {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const inDateRange = (date, startDate, endDate) => {
+  if (!date) return true;
+  const d = new Date(date);
+  if (startDate && d < startDate) return false;
+  if (endDate && d > endDate) return false;
+  return true;
+};
+
+const normalizeEntryAccountModel = (accountModel) => {
+  const s = (accountModel || '').trim().toLowerCase();
+  if (s === 'expense') return 'Expense';
+  return accountModel && accountModel.trim ? accountModel.trim() : '';
+};
+
+const emptyLedgerSourceSummary = () => ({ debit: 0, credit: 0, count: 0 });
+
+const makeExpenseLedgerRow = ({
+  date,
+  source,
+  sourceId,
+  reference,
+  description,
+  debit,
+  credit,
+  status = '',
+  voucherType = '',
+  counterpart = null,
+  balanceApplied = true,
+  ledgerLabel = '',
+  metadata = {},
+}) => {
+  const debitAmount = round2(debit || 0);
+  const creditAmount = round2(credit || 0);
+  return {
+    date,
+    source,
+    sourceId,
+    reference: reference || '',
+    description: description || '',
+    debit: debitAmount,
+    credit: creditAmount,
+    amount: round2(Math.max(debitAmount, creditAmount)),
+    ledgerLabel: ledgerLabel || (debitAmount > 0 ? 'Debit' : 'Credit'),
+    status,
+    voucherType,
+    counterpart,
+    balanceApplied,
+    metadata,
+  };
+};
+
+const paginateLedgerRows = (items, page, limit) => {
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+  const skip = (pageNum - 1) * limitNum;
+  const total = items.length;
+
+  return {
+    page: pageNum,
+    limit: limitNum,
+    total,
+    totalPages: Math.ceil(total / limitNum) || 1,
+    results: items.slice(skip, skip + limitNum),
+  };
+};
+
+const attachExpenseRunningBalance = (transactions) => {
+  const asc = [...transactions].sort((a, b) => new Date(a.date) - new Date(b.date));
+  let running = 0;
+
+  for (const row of asc) {
+    if (row.balanceApplied !== false) {
+      running = round2(running + row.credit - row.debit);
+    }
+    row.runningBalance = running;
+    row.outstandingBalance = round2(Math.max(0, -running));
+  }
+
+  return asc.sort((a, b) => new Date(b.date) - new Date(a.date));
+};
+
+function readCategoryExpenseAmount(categoryItem) {
+  if (categoryItem?.amountInPKR != null) return categoryItem.amountInPKR;
+  if (categoryItem?.totalCost != null && categoryItem?.exchangeRate != null) {
+    return round2(categoryItem.totalCost * categoryItem.exchangeRate);
+  }
+  return categoryItem?.totalCost || 0;
+}
+
+function buildExpenseIncurredLedgerRow(masterExpense, categoryDetails) {
+  const amount =
+    masterExpense?.amountInPKR ??
+    (categoryDetails ? readCategoryExpenseAmount(categoryDetails) : 0);
+  if (!amount) return null;
+
+  const date =
+    masterExpense?.expenseDate ||
+    masterExpense?.createdAt ||
+    categoryDetails?.createdAt ||
+    new Date();
+
+  return makeExpenseLedgerRow({
+    date,
+    source: 'expense',
+    sourceId: masterExpense?._id || categoryDetails?._id,
+    reference: masterExpense?.referCode || categoryDetails?.invoiceNo || '',
+    description:
+      masterExpense?.description ||
+      categoryDetails?.notes ||
+      'Expense incurred',
+    debit: amount,
+    credit: 0,
+    ledgerLabel: 'Debit',
+    status: masterExpense?.status || 'active',
+    metadata: {
+      expenseType: masterExpense?.expenseType,
+      referenceId: masterExpense?.referenceId || categoryDetails?._id,
+    },
+  });
+}
+
+function voucherMatchesPayeeIds(voucher, payeeIdSet) {
+  return (
+    payeeIdSet.has(String(voucher.payee)) ||
+    payeeIdSet.has(String(voucher.relatedExpense)) ||
+    (voucher.financialModel === 'Expense' &&
+      payeeIdSet.has(String(voucher.financialId)))
+  );
+}
+
+function buildBankVoucherExpenseLedgerRows(bankPaymentVouchers, payeeIds) {
+  const payeeIdSet = new Set(payeeIds.map(String));
+  const rows = [];
+
+  for (const voucher of bankPaymentVouchers) {
+    const balanceApplied =
+      voucher.status !== 'cancelled' && voucher.bankBalanceApplied !== false;
+    const entries = getEffectiveBankVoucherEntries(voucher);
+    let matchedFromEntries = false;
+
+    for (const entry of entries) {
+      if (normalizeEntryAccountModel(entry.accountModel) !== 'Expense') continue;
+      if (!payeeIdSet.has(String(entry.account))) continue;
+
+      const debit =
+        typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
+      const credit =
+        typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
+      if ((!Number.isFinite(debit) || debit <= 0) && (!Number.isFinite(credit) || credit <= 0)) {
+        continue;
+      }
+
+      matchedFromEntries = true;
+      rows.push(
+        makeExpenseLedgerRow({
+          date: voucher.voucherDate || voucher.createdAt,
+          source: 'bankPaymentVoucher',
+          sourceId: voucher._id,
+          reference: voucher.voucherNumber || '',
+          description:
+            entry.description ||
+            voucher.description ||
+            voucher.notes ||
+            `Bank ${voucher.voucherType || 'payment'} - ${voucher.payeeName || 'Expense'}`,
+          debit: debit > 0 ? debit : 0,
+          credit: credit > 0 ? credit : 0,
+          status: voucher.status,
+          voucherType: voucher.voucherType,
+          counterpart: voucher.bankAccount?.accountName || voucher.payeeName || null,
+          balanceApplied,
+          metadata: {
+            bankAccount: voucher.bankAccount,
+            payeeType: voucher.payeeType,
+            paymentMethod: voucher.paymentMethod,
+          },
+        })
+      );
+    }
+
+    if (!matchedFromEntries && voucherMatchesPayeeIds(voucher, payeeIdSet)) {
+      const amount =
+        typeof voucher.amount === 'number' ? voucher.amount : parseFloat(voucher.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+
+      const isReceipt = voucher.voucherType === 'receipt';
+      rows.push(
+        makeExpenseLedgerRow({
+          date: voucher.voucherDate || voucher.createdAt,
+          source: 'bankPaymentVoucher',
+          sourceId: voucher._id,
+          reference: voucher.voucherNumber || '',
+          description:
+            voucher.description ||
+            voucher.notes ||
+            `Bank ${voucher.voucherType || 'payment'} - ${voucher.payeeName || 'Expense'}`,
+          debit: isReceipt ? amount : 0,
+          credit: isReceipt ? 0 : amount,
+          status: voucher.status,
+          voucherType: voucher.voucherType,
+          counterpart: voucher.bankAccount?.accountName || voucher.payeeName || null,
+          balanceApplied,
+          metadata: {
+            bankAccount: voucher.bankAccount,
+            payeeType: voucher.payeeType,
+            paymentMethod: voucher.paymentMethod,
+          },
+        })
+      );
+    }
+  }
+
+  return rows;
+}
+
+function collectLinkedFinancialPaymentIds(bankPaymentVouchers) {
+  const ids = new Set();
+  for (const voucher of bankPaymentVouchers) {
+    if (voucher.relatedFinancialPayment) {
+      const fpId = voucher.relatedFinancialPayment._id || voucher.relatedFinancialPayment;
+      ids.add(String(fpId));
+    }
+    if (Array.isArray(voucher.relatedFinancialPayments)) {
+      for (const fp of voucher.relatedFinancialPayments) {
+        const fpId = fp?._id || fp;
+        if (fpId) ids.add(String(fpId));
+      }
+    }
+  }
+  return ids;
+}
+
+function buildFinancialPaymentExpenseLedgerRows(
+  financialPayments,
+  linkedFinancialPaymentIds = new Set()
+) {
+  const rows = [];
+
+  for (const payment of financialPayments) {
+    if (linkedFinancialPaymentIds.has(String(payment._id))) continue;
+
+    const row = paymentToLedgerRow(payment);
+    rows.push(
+      makeExpenseLedgerRow({
+        date: row.date,
+        source: 'financialPayment',
+        sourceId: row.sourceId,
+        reference: row.reference || row.referCode || '',
+        description: row.description,
+        debit: row.debit,
+        credit: row.credit,
+        ledgerLabel: row.ledgerLabel,
+        status: row.status,
+        voucherType: row.voucherType,
+        counterpart: row.counterpart,
+        balanceApplied: row.balanceApplied,
+        metadata: row.metadata,
+      })
+    );
+  }
+
+  return rows;
+}
+
+function summarizeExpenseLedgerRows(rows) {
+  const bySource = {
+    expense: emptyLedgerSourceSummary(),
+    bankPaymentVoucher: emptyLedgerSourceSummary(),
+    financialPayment: emptyLedgerSourceSummary(),
+  };
+
+  let totalDebit = 0;
+  let totalCredit = 0;
+  let transactionCount = 0;
+
+  for (const row of rows) {
+    if (row.balanceApplied === false) continue;
+    totalDebit = round2(totalDebit + (row.debit || 0));
+    totalCredit = round2(totalCredit + (row.credit || 0));
+    transactionCount += 1;
+
+    const bucket = bySource[row.source] || emptyLedgerSourceSummary();
+    bucket.debit = round2(bucket.debit + (row.debit || 0));
+    bucket.credit = round2(bucket.credit + (row.credit || 0));
+    bucket.count += 1;
+    bySource[row.source] = bucket;
+  }
+
+  return {
+    totalDebit,
+    totalCredit,
+    netMovement: round2(totalCredit - totalDebit),
+    transactionCount,
+    bySource,
+  };
+}
+
+function buildExpenseLedger({
+  masterExpense,
+  categoryDetails,
+  bankPaymentVouchers,
+  financialPayments,
+  payeeIds,
+  paymentSummary,
+  startDate,
+  endDate,
+  page,
+  limit,
+  includeTransactions = true,
+}) {
+  const incurredRow = buildExpenseIncurredLedgerRow(masterExpense, categoryDetails);
+  const voucherRows = buildBankVoucherExpenseLedgerRows(bankPaymentVouchers, payeeIds);
+  const linkedFinancialPaymentIds = collectLinkedFinancialPaymentIds(bankPaymentVouchers);
+  const paymentRows = buildFinancialPaymentExpenseLedgerRows(
+    financialPayments,
+    linkedFinancialPaymentIds
+  );
+
+  const allRows = [incurredRow, ...voucherRows, ...paymentRows]
+    .filter(Boolean)
+    .filter((row) => inDateRange(row.date, startDate, endDate));
+
+  const ledgerSummary = summarizeExpenseLedgerRows(allRows);
+  const transactionsWithBalance = attachExpenseRunningBalance(allRows);
+  const expenseAmount = paymentSummary?.expenseAmount ?? ledgerSummary.totalDebit;
+  const paidAmount = paymentSummary?.paidAmount ?? ledgerSummary.totalCredit;
+  const remainingBalance =
+    paymentSummary?.remainingBalance ??
+    round2(Math.max(0, expenseAmount - paidAmount));
+
+  const response = {
+    summary: {
+      expenseAmount: round2(expenseAmount),
+      totalDebit: ledgerSummary.totalDebit,
+      totalCredit: ledgerSummary.totalCredit,
+      paidAmount: round2(paidAmount),
+      remainingBalance,
+      netMovement: ledgerSummary.netMovement,
+      transactionCount: ledgerSummary.transactionCount,
+      paymentStatus: paymentSummary?.paymentStatus || 'pending',
+      bySource: ledgerSummary.bySource,
+    },
+    recentTransactions: transactionsWithBalance.slice(0, 5),
+  };
+
+  if (includeTransactions) {
+    const pagination = paginateLedgerRows(transactionsWithBalance, page, limit);
+    response.transactions = pagination.results;
+    response.pagination = {
+      page: pagination.page,
+      limit: pagination.limit,
+      total: pagination.total,
+      totalPages: pagination.totalPages,
+    };
+  }
+
+  return response;
+}
 
 const collectPayeeIds = (inputId, expense) => {
   const ids = new Set();
@@ -222,14 +588,6 @@ function matchTransactionsForPayeeIds(allVouchers, allPayments, payeeIds) {
   );
 
   return { vouchers, payments };
-}
-
-function readCategoryExpenseAmount(categoryItem) {
-  if (categoryItem?.amountInPKR != null) return categoryItem.amountInPKR;
-  if (categoryItem?.totalCost != null && categoryItem?.exchangeRate != null) {
-    return round2(categoryItem.totalCost * categoryItem.exchangeRate);
-  }
-  return categoryItem?.totalCost || 0;
 }
 
 async function syncExpensePaymentAmounts(expenseId) {
@@ -421,7 +779,19 @@ function buildPaymentSummary(expenseOrAmount, bankPaymentVouchers, financialPaym
 }
 
 async function getExpenseDetails(id, options = {}) {
-  const { expenseType: expenseTypeHint } = options;
+  const {
+    expenseType: expenseTypeHint,
+    startDate: startDateRaw,
+    endDate: endDateRaw,
+    page,
+    limit,
+    includeLedger = true,
+    includeTransactions = true,
+  } = options;
+
+  const startDate = parseDate(startDateRaw);
+  const endDate = parseDate(endDateRaw);
+  if (endDate) endDate.setHours(23, 59, 59, 999);
 
   const resolved = await resolveExpenseRecord(id, expenseTypeHint);
   if (!resolved) return null;
@@ -445,7 +815,7 @@ async function getExpenseDetails(id, options = {}) {
     financialPayments
   );
 
-  return {
+  const response = {
     expenseType,
     expense: masterExpense,
     categoryDetails,
@@ -455,6 +825,24 @@ async function getExpenseDetails(id, options = {}) {
     },
     summary,
   };
+
+  if (includeLedger) {
+    response.ledger = buildExpenseLedger({
+      masterExpense,
+      categoryDetails,
+      bankPaymentVouchers,
+      financialPayments,
+      payeeIds,
+      paymentSummary: summary,
+      startDate,
+      endDate,
+      page,
+      limit,
+      includeTransactions,
+    });
+  }
+
+  return response;
 }
 
 async function enrichMasterExpenseList(expenses) {
@@ -498,4 +886,5 @@ module.exports = {
   enrichCategoryExpenseList,
   enrichMasterExpenseList,
   buildPaymentSummary,
+  buildExpenseLedger,
 };

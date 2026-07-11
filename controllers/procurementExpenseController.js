@@ -3,7 +3,50 @@ const Supplier = require('../models/supplierModel');
 const Product = require('../models/productModel');
 const Category = require('../models/categoryModel');
 const Currency = require('../models/currencyModel');
-const { enrichCategoryExpenseList } = require('../services/expenseDetailsService');
+const { enrichCategoryExpenseList, getExpenseDetails } = require('../services/expenseDetailsService');
+
+// @desc    Get procurement expense transaction details with debit/credit ledger
+// @route   GET /api/expenses/procurement/:id/transaction-details
+// @access  Private
+const getProcurementTransactionDetails = async (req, res) => {
+  try {
+    const {
+      startDate,
+      endDate,
+      page,
+      limit,
+      includeLedger,
+      includeTransactions,
+    } = req.query;
+
+    const details = await getExpenseDetails(req.params.id, {
+      expenseType: 'procurement',
+      startDate,
+      endDate,
+      page,
+      limit,
+      includeLedger: includeLedger !== 'false',
+      includeTransactions: includeTransactions !== 'false',
+    });
+
+    if (!details) {
+      return res.status(404).json({
+        status: 'fail',
+        message: 'Procurement expense not found',
+      });
+    }
+
+    res.status(200).json({
+      status: 'success',
+      data: details,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+};
 
 // @desc    Fetch all procurement expenses
 // @route   GET /api/procurement-expenses
@@ -305,5 +348,6 @@ module.exports = {
   updateProcurementExpense,
   deleteProcurementExpense,
   updatePaymentStatus,
-  getProcurementExpensesBySupplier
+  getProcurementExpensesBySupplier,
+  getProcurementTransactionDetails,
 };

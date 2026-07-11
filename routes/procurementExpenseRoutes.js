@@ -7,7 +7,8 @@ const {
   updateProcurementExpense,
   deleteProcurementExpense,
   updatePaymentStatus,
-  getProcurementExpensesBySupplier
+  getProcurementExpensesBySupplier,
+  getProcurementTransactionDetails,
 } = require('../controllers/procurementExpenseController');
 
 // @route   GET /api/procurement-expenses
@@ -19,6 +20,11 @@ router.get('/', getProcurementExpenses);
 // @desc    Get procurement expenses by supplier
 // @access  Private
 router.get('/supplier/:supplierId', getProcurementExpensesBySupplier);
+
+// @route   GET /api/expenses/procurement/:id/transaction-details
+// @desc    Get procurement expense transaction details with debit/credit ledger
+// @access  Private
+router.get('/:id/transaction-details', getProcurementTransactionDetails);
 
 // @route   GET /api/procurement-expenses/:id
 // @desc    Get single procurement expense by ID

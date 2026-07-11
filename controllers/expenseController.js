@@ -81,8 +81,24 @@ const getExpenses = async (req, res) => {
 // @access  Private
 const getExpenseDetailsById = async (req, res) => {
   try {
+    const {
+      expenseType,
+      startDate,
+      endDate,
+      page,
+      limit,
+      includeLedger,
+      includeTransactions,
+    } = req.query;
+
     const details = await getExpenseDetails(req.params.id, {
-      expenseType: req.query.expenseType,
+      expenseType,
+      startDate,
+      endDate,
+      page,
+      limit,
+      includeLedger: includeLedger !== 'false',
+      includeTransactions: includeTransactions !== 'false',
     });
 
     if (!details) {
