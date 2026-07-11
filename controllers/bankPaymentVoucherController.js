@@ -650,7 +650,7 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         targetFinancialModel,
         targetFinancialId
       );
-      const ledgerLabel = getFinancialPaymentLedgerLabel(payeeEffect);
+      const ledgerLabel = getFinancialPaymentLedgerLabel(payeeEffect, targetFinancialModel);
       const voucherTypeLabel =
         freshVoucher.voucherType === 'receipt' ? 'Receipt' : 'Payment';
 

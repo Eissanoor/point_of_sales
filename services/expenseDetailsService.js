@@ -8,6 +8,7 @@ const {
 } = require('../utils/expensePayeeTypes');
 const { paymentToLedgerRow } = require('./financialAccountDetailsService');
 const { getEffectiveBankVoucherEntries } = require('../controllers/bankVoucherDoubleEntryHelpers');
+const { computeLedgerBalanceDelta } = require('../utils/accountDebitCreditRules');
 
 require('../models/userModel');
 require('../models/currencyModel');
@@ -162,10 +163,12 @@ const attachExpenseRunningBalance = (transactions) => {
 
   for (const row of asc) {
     if (row.balanceApplied !== false) {
-      running = round2(running + row.credit - row.debit);
+      running = round2(
+        running + computeLedgerBalanceDelta(row.debit, row.credit, 'Expense')
+      );
     }
     row.runningBalance = running;
-    row.outstandingBalance = round2(Math.max(0, -running));
+    row.outstandingBalance = round2(Math.max(0, running));
   }
 
   return asc.sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -364,10 +367,15 @@ function summarizeExpenseLedgerRows(rows) {
   let totalCredit = 0;
   let transactionCount = 0;
 
+  let netMovement = 0;
+
   for (const row of rows) {
     if (row.balanceApplied === false) continue;
     totalDebit = round2(totalDebit + (row.debit || 0));
     totalCredit = round2(totalCredit + (row.credit || 0));
+    netMovement = round2(
+      netMovement + computeLedgerBalanceDelta(row.debit, row.credit, 'Expense')
+    );
     transactionCount += 1;
 
     const bucket = bySource[row.source] || emptyLedgerSourceSummary();
@@ -380,7 +388,7 @@ function summarizeExpenseLedgerRows(rows) {
   return {
     totalDebit,
     totalCredit,
-    netMovement: round2(totalCredit - totalDebit),
+    netMovement,
     transactionCount,
     bySource,
   };
@@ -746,10 +754,12 @@ function buildPaymentSummary(expenseOrAmount, bankPaymentVouchers, financialPaym
 
   for (const payment of financialPayments) {
     if (payment.isActive === false) continue;
-    if (payment.effect === 'subtract') continue;
-    paidViaFinancialPayments = round2(
-      paidViaFinancialPayments + (payment.amount || 0)
-    );
+    // Expense payments use reversed rules: credit-side (subtract) reduces owed balance
+    if (payment.effect === 'subtract') {
+      paidViaFinancialPayments = round2(
+        paidViaFinancialPayments + (payment.amount || 0)
+      );
+    }
   }
 
   const totalPaid = round2(paidViaVouchers + paidViaFinancialPayments);

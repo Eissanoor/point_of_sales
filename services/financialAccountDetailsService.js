@@ -1,5 +1,10 @@
 const mongoose = require('mongoose');
 const FinancialPayment = require('../models/financialPaymentModel');
+const {
+  computeLedgerBalanceDelta,
+  paymentEffectToDebitCredit,
+  attachRunningBalanceForAccount,
+} = require('../utils/accountDebitCreditRules');
 require('../models/userModel');
 require('../models/currencyModel');
 
@@ -46,25 +51,48 @@ const paginateArray = (items, page, limit) => {
   };
 };
 
-const attachRunningBalance = (transactions, openingBalance) => {
-  const asc = [...transactions].sort((a, b) => new Date(a.date) - new Date(b.date));
-  let running = round2(openingBalance || 0);
+const attachRunningBalance = (transactions, openingBalance, relatedModel) =>
+  attachRunningBalanceForAccount(transactions, openingBalance, relatedModel);
 
-  for (const row of asc) {
-    if (row.balanceApplied !== false) {
-      running = round2(running + row.credit - row.debit);
-    }
-    row.runningBalance = running;
+const summarizeLedgerRows = (rows, relatedModel) => {
+  let totalDebit = 0;
+  let totalCredit = 0;
+  let transactionCount = 0;
+  let netMovement = 0;
+
+  for (const row of rows) {
+    if (row.balanceApplied === false) continue;
+    totalDebit = round2(totalDebit + (row.debit || 0));
+    totalCredit = round2(totalCredit + (row.credit || 0));
+    netMovement = round2(
+      netMovement + computeLedgerBalanceDelta(row.debit, row.credit, relatedModel)
+    );
+    transactionCount += 1;
   }
 
-  return asc.sort((a, b) => new Date(b.date) - new Date(a.date));
+  return {
+    totalDebit,
+    totalCredit,
+    netMovement,
+    transactionCount,
+    bySource: {
+      financialPayment: {
+        debit: totalDebit,
+        credit: totalCredit,
+        count: transactionCount,
+      },
+    },
+  };
 };
 
 const paymentToLedgerRow = (payment) => {
   const amount = typeof payment.amount === 'number' ? payment.amount : parseFloat(payment.amount || 0);
-  const isCredit = payment.effect !== 'subtract';
-  const debit = isCredit ? 0 : round2(amount);
-  const credit = isCredit ? round2(amount) : 0;
+  const relatedModel = payment.relatedModel || '';
+  const { debit, credit, ledgerLabel } = paymentEffectToDebitCredit(
+    amount,
+    payment.effect,
+    relatedModel
+  );
 
   return {
     date: payment.paymentDate || payment.createdAt,
@@ -77,7 +105,7 @@ const paymentToLedgerRow = (payment) => {
     credit,
     amount: round2(amount),
     effect: payment.effect || 'add',
-    ledgerLabel: isCredit ? 'Credit' : 'Debit',
+    ledgerLabel,
     method: payment.method || '',
     status: payment.isActive === false ? 'inactive' : 'active',
     voucherType: '',
@@ -92,33 +120,6 @@ const paymentToLedgerRow = (payment) => {
       relatedId: payment.relatedId,
       paymentDate: payment.paymentDate,
       createdAt: payment.createdAt,
-    },
-  };
-};
-
-const summarizeLedgerRows = (rows) => {
-  let totalDebit = 0;
-  let totalCredit = 0;
-  let transactionCount = 0;
-
-  for (const row of rows) {
-    if (row.balanceApplied === false) continue;
-    totalDebit = round2(totalDebit + (row.debit || 0));
-    totalCredit = round2(totalCredit + (row.credit || 0));
-    transactionCount += 1;
-  }
-
-  return {
-    totalDebit,
-    totalCredit,
-    netMovement: round2(totalCredit - totalDebit),
-    transactionCount,
-    bySource: {
-      financialPayment: {
-        debit: totalDebit,
-        credit: totalCredit,
-        count: transactionCount,
-      },
     },
   };
 };
@@ -210,14 +211,18 @@ async function getFinancialAccountDetails(relatedModel, relatedId, options = {})
   });
 
   const balanceAppliedRows = allRows.filter((r) => r.balanceApplied !== false);
-  const summary = summarizeLedgerRows(allRows);
+  const summary = summarizeLedgerRows(allRows, relatedModel);
   const { openingBalance, currentBalance: storedBalance } = readStoredBalances(account);
   const calculatedBalance = round2(openingBalance + summary.netMovement);
   const currentBalance = storedBalance !== null ? storedBalance : calculatedBalance;
   const balanceDifference =
     storedBalance !== null ? round2(storedBalance - calculatedBalance) : 0;
 
-  const transactionsWithBalance = attachRunningBalance(balanceAppliedRows, openingBalance);
+  const transactionsWithBalance = attachRunningBalance(
+    balanceAppliedRows,
+    openingBalance,
+    relatedModel
+  );
 
   let currency = null;
   if (currencyId && mongoose.Types.ObjectId.isValid(String(currencyId))) {

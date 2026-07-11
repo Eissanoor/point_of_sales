@@ -9,6 +9,12 @@ const SupplierJourney = require('../models/supplierJourneyModel');
 const PaymentJourney = require('../models/paymentJourneyModel');
 const Purchase = require('../models/purchaseModel');
 const FinancialPayment = require('../models/financialPaymentModel');
+const {
+  isDebitNormalAccount,
+  isAssetAccount,
+  resolveFinancialPaymentEffectFromEntry,
+  getFinancialPaymentLedgerLabel,
+} = require('../utils/accountDebitCreditRules');
 
 const FINANCIAL_ACCOUNT_MODELS = [
   'Asset',
@@ -369,9 +375,9 @@ const parseVoucherAmount = (amount) => {
 };
 
 /**
- * Build balanced journal lines from legacy bankAccount + payee fields.
- * Payment: 1st account (bank) debit (-), 2nd account (payee) credit (+).
- * Receipt:  1st account (bank) credit (+), 2nd account (payee) debit (-).
+ * Build journal lines from legacy bankAccount + payee fields.
+ * Bank always uses base rules (debit = subtract, credit = add).
+ * Asset/Expense payees use reversed rules (debit = add, credit = subtract).
  */
 const buildLegacyEntriesFromBankVoucher = (voucher) => {
   const amt = parseVoucherAmount(voucher.amount);
@@ -416,10 +422,34 @@ const buildLegacyEntriesFromBankVoucher = (voucher) => {
     payeeLine.cashBook = payeeId;
   }
 
+  const payeeUsesDebitNormal = isDebitNormalAccount(payeeModel);
+
   if (voucher.voucherType === 'receipt') {
+    if (payeeUsesDebitNormal) {
+      // Bank credit (+), payee credit (-) for asset/expense reduction on receipt
+      return [
+        { ...bankLine, debit: 0, credit: amt },
+        { ...payeeLine, debit: 0, credit: amt },
+      ];
+    }
     return [
       { ...bankLine, debit: 0, credit: amt },
       { ...payeeLine, debit: amt, credit: 0 },
+    ];
+  }
+
+  if (payeeUsesDebitNormal) {
+    if (isAssetAccount(payeeModel)) {
+      // Asset purchase: bank debit (-), asset debit (+)
+      return [
+        { ...bankLine, debit: amt, credit: 0 },
+        { ...payeeLine, debit: amt, credit: 0 },
+      ];
+    }
+    // Expense payment: bank debit (-), expense credit (-)
+    return [
+      { ...bankLine, debit: amt, credit: 0 },
+      { ...payeeLine, debit: 0, credit: amt },
     ];
   }
 
@@ -749,8 +779,8 @@ const createTransactionsFromBankVoucherEntries = async (voucher, userId) => {
 
       if (alreadyCreated) continue;
 
-      const effect = resolveFinancialPaymentEffectFromVoucher(freshVoucher);
-      const ledgerLabel = getFinancialPaymentLedgerLabel(effect);
+      const effect = resolveFinancialPaymentEffectFromEntry(debit, credit, normalizedModel);
+      const ledgerLabel = getFinancialPaymentLedgerLabel(effect, normalizedModel);
 
       try {
         const fp = await FinancialPayment.create({
@@ -825,11 +855,28 @@ const resolveFinancialTargetFromVoucher = (voucher) => {
 };
 
 const resolveFinancialPaymentEffectFromVoucher = (voucher) => {
-  // User ledger convention: + received = Credit (add), - paid out = Debit (subtract)
-  return voucher.voucherType === 'receipt' ? 'subtract' : 'add';
-};
+  const target = resolveFinancialTargetFromVoucher(voucher);
+  const entries = getEffectiveBankVoucherEntries(voucher);
 
-const getFinancialPaymentLedgerLabel = (effect) => (effect === 'add' ? 'Credit' : 'Debit');
+  if (target) {
+    const payeeEntry = entries.find((entry) => {
+      const normalized = normalizeEntryAccountModel(entry.accountModel);
+      return normalized === target.model && String(entry.account) === String(target.id);
+    });
+
+    if (payeeEntry) {
+      const { debit, credit } = parseLineDebitCredit(payeeEntry);
+      return resolveFinancialPaymentEffectFromEntry(debit, credit, target.model);
+    }
+  }
+
+  // Fallback when no matching payee line (legacy single-line vouchers)
+  const isReceipt = voucher.voucherType === 'receipt';
+  if (target && isDebitNormalAccount(target.model)) {
+    return isReceipt ? 'subtract' : target.model === 'Asset' ? 'add' : 'subtract';
+  }
+  return isReceipt ? 'subtract' : 'add';
+};
 
 /** Amount for financial payee ledger (always positive). */
 const resolveFinancialPaymentAmountFromVoucher = (voucher, targetModel, targetId) => {
@@ -885,8 +932,17 @@ const ensureFinancialPaymentForBankPaymentVoucher = async (voucherId) => {
   };
 
   const mappedMethod = methodMapForFinancial[voucher.paymentMethod] || 'bank_transfer';
-  const effect = resolveFinancialPaymentEffectFromVoucher(voucher);
-  const ledgerLabel = getFinancialPaymentLedgerLabel(effect);
+  const entries = getEffectiveBankVoucherEntries(voucher);
+  const payeeEntry = entries.find((entry) => {
+    const normalized = normalizeEntryAccountModel(entry.accountModel);
+    return normalized === target.model && String(entry.account) === String(target.id);
+  });
+  const { debit: payeeDebit, credit: payeeCredit } = parseLineDebitCredit(payeeEntry);
+  const effect =
+    payeeEntry && (payeeDebit > 0 || payeeCredit > 0)
+      ? resolveFinancialPaymentEffectFromEntry(payeeDebit, payeeCredit, target.model)
+      : resolveFinancialPaymentEffectFromVoucher(voucher);
+  const ledgerLabel = getFinancialPaymentLedgerLabel(effect, target.model);
   const voucherTypeLabel = voucher.voucherType === 'receipt' ? 'Receipt' : 'Payment';
 
   const fp = await FinancialPayment.create({
@@ -934,6 +990,7 @@ module.exports = {
   getEffectiveBankVoucherEntries,
   ensureFinancialPaymentForBankPaymentVoucher,
   resolveFinancialPaymentEffectFromVoucher,
+  resolveFinancialPaymentEffectFromEntry,
   resolveFinancialPaymentAmountFromVoucher,
   getFinancialPaymentLedgerLabel,
   sumCreditsFromEntries,
