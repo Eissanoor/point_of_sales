@@ -33,6 +33,7 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
         'customer',
         'employee',
         'Asset',
+        'Expense',
         'Income',
         'Liability',
         'PartnershipAccount',
@@ -42,6 +43,13 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
         'Owner',
         'Employee',
         'PropertyAccount',
+        'procurement',
+        'logistics',
+        'warehouse',
+        'sales_distribution',
+        'financial',
+        'operational',
+        'miscellaneous',
         'other',
       ],
       default: 'other',
@@ -59,6 +67,7 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
         'Customer',
         'User',
         'Asset',
+        'Expense',
         'Income',
         'Liability',
         'PartnershipAccount',
@@ -79,6 +88,7 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
       type: String,
       enum: [
         'Asset',
+        'Expense',
         'Income',
         'Liability',
         'PartnershipAccount',
@@ -143,6 +153,10 @@ const cashPaymentVoucherSchema = new mongoose.Schema(
     relatedFinancialPayment: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'FinancialPayment',
+    },
+    relatedExpense: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Expense',
     },
     /** Ledger line on source cash book (visible in GET /financial-payments/related/CashBook/:id) */
     relatedCashBookFinancialPayment: {
@@ -332,8 +346,19 @@ cashPaymentVoucherSchema.pre('save', async function(next) {
       this.financialId = null;
     }
 
+    const expenseCategoryTypes = [
+      'procurement',
+      'logistics',
+      'warehouse',
+      'sales_distribution',
+      'financial',
+      'operational',
+      'miscellaneous',
+    ];
+
     const financialModels = [
       'Asset',
+      'Expense',
       'Income',
       'Liability',
       'PartnershipAccount',
@@ -347,6 +372,14 @@ cashPaymentVoucherSchema.pre('save', async function(next) {
       this.payeeModel = this.payeeType;
       this.financialModel = this.payeeType;
       this.financialId = this.payee;
+      if (this.payeeType === 'Expense') {
+        this.relatedExpense = this.payee;
+      }
+    } else if (expenseCategoryTypes.includes(this.payeeType) && this.payee) {
+      this.payeeModel = 'Expense';
+      this.financialModel = 'Expense';
+      this.financialId = this.payee;
+      this.relatedExpense = this.payee;
     }
 
     next();
