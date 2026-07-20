@@ -1,11 +1,11 @@
 /**
  * Debit/credit balance rules by account type.
  *
- * Base (credit-normal): credit = add, debit = subtract — Bank, Income, Liability, etc.
- * Reversed (debit-normal): debit = add, credit = subtract — Asset, Expense.
+ * Base (credit-normal): credit = add, debit = subtract — Income, Liability, etc.
+ * Debit-normal: debit = add, credit = subtract — Asset, Expense, CashBook, Bank, CashAccount.
  */
 
-const DEBIT_NORMAL_MODELS = ['Asset', 'Expense'];
+const DEBIT_NORMAL_MODELS = ['Asset', 'Expense', 'CashBook', 'BankAccount', 'CashAccount'];
 
 const EXPENSE_CATEGORY_ACCOUNT_MODELS = {
   procurement: 'Expense',

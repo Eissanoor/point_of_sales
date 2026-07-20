@@ -10,8 +10,8 @@ const PaymentJourney = require('../models/paymentJourneyModel');
 const Purchase = require('../models/purchaseModel');
 const FinancialPayment = require('../models/financialPaymentModel');
 const {
-  isDebitNormalAccount,
   isAssetAccount,
+  isExpenseAccount,
   resolveFinancialPaymentEffectFromEntry,
   getFinancialPaymentLedgerLabel,
 } = require('../utils/accountDebitCreditRules');
@@ -88,15 +88,15 @@ const parseLineDebitCredit = (entry) => {
 };
 
 /**
- * Balance delta for cash/bank books: debit = subtract, credit = add (base rules).
+ * Balance delta for cash/bank books (debit-normal): debit = add, credit = subtract.
  * Asset/Expense do not update cash/bank via this path — they use FinancialPayment.effect.
  */
 const computeBalanceDeltaFromDebitCredit = (debit, credit) => {
   let delta = 0;
   const d = parseLineAmount(debit);
   const c = parseLineAmount(credit);
-  if (d > 0) delta -= d;
-  if (c > 0) delta += c;
+  if (d > 0) delta += d;
+  if (c > 0) delta -= c;
   return delta;
 };
 
@@ -370,8 +370,8 @@ const isCashVoucherDoubleEntry = (v) => Array.isArray(v.entries) && v.entries.le
 
 /**
  * Build journal lines from legacy cashBook + payee fields.
- * Cash/bank always use base rules (debit = subtract, credit = add).
- * Asset/Expense payees use reversed rules (debit = add, credit = subtract).
+ * Cash/bank are debit-normal: debit = add, credit = subtract.
+ * Asset/Expense payees: debit = add, credit = subtract.
  */
 const buildLegacyEntriesFromCashVoucher = (voucher) => {
   const amt = parseVoucherAmount(voucher.amount);
@@ -394,10 +394,10 @@ const buildLegacyEntriesFromCashVoucher = (voucher) => {
 
   if (!voucher.payee || !payeeModel || voucher.payeeType === 'other') {
     if (voucher.voucherType === 'receipt') {
-      return [{ ...cashLine, debit: 0, credit: amt }];
+      return [{ ...cashLine, debit: amt, credit: 0 }];
     }
     if (voucher.voucherType === 'payment' || voucher.voucherType === 'transfer') {
-      return [{ ...cashLine, debit: amt, credit: 0 }];
+      return [{ ...cashLine, debit: 0, credit: amt }];
     }
     return [];
   }
@@ -418,34 +418,41 @@ const buildLegacyEntriesFromCashVoucher = (voucher) => {
     payeeLine.cashAccount = payeeId;
   }
 
-  const payeeUsesDebitNormal = isDebitNormalAccount(payeeModel);
-
   if (voucher.voucherType === 'receipt') {
-    // Receipt: cash credit (+), payee debit — opposite ledger columns.
-    // Asset/Expense (debit-normal): Debit = add; Income/etc: Debit = subtract.
+    // Receipt: Debit Cash (+), Debit payee column for payee-side effect rules.
+    return [
+      { ...cashLine, debit: amt, credit: 0 },
+      { ...payeeLine, debit: amt, credit: 0 },
+    ];
+  }
+
+  if (isAssetAccount(payeeModel)) {
+    // Asset purchase: Debit Asset (+), Credit Cash (-)
     return [
       { ...cashLine, debit: 0, credit: amt },
       { ...payeeLine, debit: amt, credit: 0 },
     ];
   }
 
-  if (payeeUsesDebitNormal) {
-    if (isAssetAccount(payeeModel)) {
-      // Asset purchase: cash debit (-), asset debit (+)
-      return [
-        { ...cashLine, debit: amt, credit: 0 },
-        { ...payeeLine, debit: amt, credit: 0 },
-      ];
-    }
-    // Expense payment: cash debit (-), expense credit (-)
+  if (isExpenseAccount(payeeModel)) {
+    // Expense payment: Credit Cash (-), Credit Expense (-)
     return [
-      { ...cashLine, debit: amt, credit: 0 },
+      { ...cashLine, debit: 0, credit: amt },
       { ...payeeLine, debit: 0, credit: amt },
     ];
   }
 
+  // Other payees (Income/Liability/CashBook transfer/etc.): Credit Cash (-), Credit payee (+)
+  // CashBook/Bank payee transfers: Debit payee (+) so receiving book increases.
+  if (payeeModel === 'CashBook' || payeeModel === 'BankAccount' || payeeModel === 'CashAccount') {
+    return [
+      { ...cashLine, debit: 0, credit: amt },
+      { ...payeeLine, debit: amt, credit: 0 },
+    ];
+  }
+
   return [
-    { ...cashLine, debit: amt, credit: 0 },
+    { ...cashLine, debit: 0, credit: amt },
     { ...payeeLine, debit: 0, credit: amt },
   ];
 };
@@ -493,9 +500,9 @@ const resolveFinancialPaymentEffectFromVoucher = (voucher) => {
   }
 
   const isReceipt = voucher.voucherType === 'receipt';
-  if (target && isDebitNormalAccount(target.model)) {
+  if (target && (isAssetAccount(target.model) || isExpenseAccount(target.model))) {
     if (isReceipt) return 'add';
-    return target.model === 'Asset' ? 'add' : 'subtract';
+    return isAssetAccount(target.model) ? 'add' : 'subtract';
   }
   return isReceipt ? 'subtract' : 'add';
 };

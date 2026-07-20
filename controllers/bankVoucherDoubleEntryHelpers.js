@@ -10,8 +10,8 @@ const PaymentJourney = require('../models/paymentJourneyModel');
 const Purchase = require('../models/purchaseModel');
 const FinancialPayment = require('../models/financialPaymentModel');
 const {
-  isDebitNormalAccount,
   isAssetAccount,
+  isExpenseAccount,
   resolveFinancialPaymentEffectFromEntry,
   getFinancialPaymentLedgerLabel,
 } = require('../utils/accountDebitCreditRules');
@@ -86,15 +86,15 @@ const parseLineDebitCredit = (entry) => {
 };
 
 /**
- * Balance delta from journal line: debit = -amount, credit = +amount.
+ * Balance delta for cash/bank books (debit-normal): debit = add, credit = subtract.
  * Same convention as cash voucher entries.
  */
 const computeBalanceDeltaFromDebitCredit = (debit, credit) => {
   let delta = 0;
   const d = parseLineAmount(debit);
   const c = parseLineAmount(credit);
-  if (d > 0) delta -= d;
-  if (c > 0) delta += c;
+  if (d > 0) delta += d;
+  if (c > 0) delta -= c;
   return delta;
 };
 
@@ -376,8 +376,8 @@ const parseVoucherAmount = (amount) => {
 
 /**
  * Build journal lines from legacy bankAccount + payee fields.
- * Bank always uses base rules (debit = subtract, credit = add).
- * Asset/Expense payees use reversed rules (debit = add, credit = subtract).
+ * Bank/cash are debit-normal: debit = add, credit = subtract.
+ * Asset/Expense payees: debit = add, credit = subtract.
  */
 const buildLegacyEntriesFromBankVoucher = (voucher) => {
   const amt = parseVoucherAmount(voucher.amount);
@@ -400,10 +400,10 @@ const buildLegacyEntriesFromBankVoucher = (voucher) => {
 
   if (!voucher.payee || !payeeModel || voucher.payeeType === 'other') {
     if (voucher.voucherType === 'receipt') {
-      return [{ ...bankLine, debit: 0, credit: amt }];
+      return [{ ...bankLine, debit: amt, credit: 0 }];
     }
     if (voucher.voucherType === 'payment' || voucher.voucherType === 'transfer') {
-      return [{ ...bankLine, debit: amt, credit: 0 }];
+      return [{ ...bankLine, debit: 0, credit: amt }];
     }
     return [];
   }
@@ -422,34 +422,40 @@ const buildLegacyEntriesFromBankVoucher = (voucher) => {
     payeeLine.cashBook = payeeId;
   }
 
-  const payeeUsesDebitNormal = isDebitNormalAccount(payeeModel);
-
   if (voucher.voucherType === 'receipt') {
-    // Receipt: bank credit (+), payee debit — opposite ledger columns.
-    // Asset/Expense (debit-normal): Debit = add; Income/etc: Debit = subtract.
+    // Receipt: Debit Bank (+), Debit payee column for payee-side effect rules.
+    return [
+      { ...bankLine, debit: amt, credit: 0 },
+      { ...payeeLine, debit: amt, credit: 0 },
+    ];
+  }
+
+  if (isAssetAccount(payeeModel)) {
+    // Asset purchase: Debit Asset (+), Credit Bank (-)
     return [
       { ...bankLine, debit: 0, credit: amt },
       { ...payeeLine, debit: amt, credit: 0 },
     ];
   }
 
-  if (payeeUsesDebitNormal) {
-    if (isAssetAccount(payeeModel)) {
-      // Asset purchase: bank debit (-), asset debit (+)
-      return [
-        { ...bankLine, debit: amt, credit: 0 },
-        { ...payeeLine, debit: amt, credit: 0 },
-      ];
-    }
-    // Expense payment: bank debit (-), expense credit (-)
+  if (isExpenseAccount(payeeModel)) {
+    // Expense payment: Credit Bank (-), Credit Expense (-)
     return [
-      { ...bankLine, debit: amt, credit: 0 },
+      { ...bankLine, debit: 0, credit: amt },
       { ...payeeLine, debit: 0, credit: amt },
     ];
   }
 
+  // CashBook/Bank payee transfers: Credit source (-), Debit payee (+)
+  if (payeeModel === 'CashBook' || payeeModel === 'BankAccount' || payeeModel === 'CashAccount') {
+    return [
+      { ...bankLine, debit: 0, credit: amt },
+      { ...payeeLine, debit: amt, credit: 0 },
+    ];
+  }
+
   return [
-    { ...bankLine, debit: amt, credit: 0 },
+    { ...bankLine, debit: 0, credit: amt },
     { ...payeeLine, debit: 0, credit: amt },
   ];
 };
@@ -867,9 +873,9 @@ const resolveFinancialPaymentEffectFromVoucher = (voucher) => {
 
   // Fallback when no matching payee line (legacy single-line vouchers)
   const isReceipt = voucher.voucherType === 'receipt';
-  if (target && isDebitNormalAccount(target.model)) {
+  if (target && (isAssetAccount(target.model) || isExpenseAccount(target.model))) {
     if (isReceipt) return 'add';
-    return target.model === 'Asset' ? 'add' : 'subtract';
+    return isAssetAccount(target.model) ? 'add' : 'subtract';
   }
   return isReceipt ? 'subtract' : 'add';
 };
