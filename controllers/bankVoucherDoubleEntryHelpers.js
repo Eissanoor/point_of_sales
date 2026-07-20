@@ -425,13 +425,8 @@ const buildLegacyEntriesFromBankVoucher = (voucher) => {
   const payeeUsesDebitNormal = isDebitNormalAccount(payeeModel);
 
   if (voucher.voucherType === 'receipt') {
-    if (payeeUsesDebitNormal) {
-      // Bank credit (+), payee credit (-) for asset/expense reduction on receipt
-      return [
-        { ...bankLine, debit: 0, credit: amt },
-        { ...payeeLine, debit: 0, credit: amt },
-      ];
-    }
+    // Receipt: bank credit (+), payee debit — opposite ledger columns.
+    // Asset/Expense (debit-normal): Debit = add; Income/etc: Debit = subtract.
     return [
       { ...bankLine, debit: 0, credit: amt },
       { ...payeeLine, debit: amt, credit: 0 },
@@ -873,7 +868,8 @@ const resolveFinancialPaymentEffectFromVoucher = (voucher) => {
   // Fallback when no matching payee line (legacy single-line vouchers)
   const isReceipt = voucher.voucherType === 'receipt';
   if (target && isDebitNormalAccount(target.model)) {
-    return isReceipt ? 'subtract' : target.model === 'Asset' ? 'add' : 'subtract';
+    if (isReceipt) return 'add';
+    return target.model === 'Asset' ? 'add' : 'subtract';
   }
   return isReceipt ? 'subtract' : 'add';
 };

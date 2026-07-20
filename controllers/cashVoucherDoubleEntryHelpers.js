@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const CashPaymentVoucher = require('../models/cashPaymentVoucherModel');
 const CashAccount = require('../models/cashAccountModel');
+const CashBook = require('../models/cashBookModel');
 const BankAccount = require('../models/bankAccountModel');
 const SupplierPayment = require('../models/supplierPaymentModel');
 const Payment = require('../models/paymentModel');
@@ -8,6 +9,12 @@ const SupplierJourney = require('../models/supplierJourneyModel');
 const PaymentJourney = require('../models/paymentJourneyModel');
 const Purchase = require('../models/purchaseModel');
 const FinancialPayment = require('../models/financialPaymentModel');
+const {
+  isDebitNormalAccount,
+  isAssetAccount,
+  resolveFinancialPaymentEffectFromEntry,
+  getFinancialPaymentLedgerLabel,
+} = require('../utils/accountDebitCreditRules');
 
 const FINANCIAL_ACCOUNT_MODELS = [
   'Asset',
@@ -40,7 +47,68 @@ const ENTRY_ACCOUNT_MODEL_MAP = {
   propertyaccount: 'PropertyAccount',
 };
 
-const CASH_VOUCHER_BALANCE_POSTED_STATUSES = ['completed', 'posted'];
+const PAYEE_TYPE_TO_ACCOUNT_MODEL = {
+  supplier: 'Supplier',
+  customer: 'Customer',
+  employee: 'Employee',
+  Asset: 'Asset',
+  Expense: 'Expense',
+  Income: 'Income',
+  Liability: 'Liability',
+  PartnershipAccount: 'PartnershipAccount',
+  CashBook: 'CashBook',
+  BankAccount: 'BankAccount',
+  Capital: 'Capital',
+  Owner: 'Owner',
+  Employee: 'Employee',
+  PropertyAccount: 'PropertyAccount',
+  procurement: 'Expense',
+  logistics: 'Expense',
+  warehouse: 'Expense',
+  sales_distribution: 'Expense',
+  financial: 'Expense',
+  operational: 'Expense',
+  miscellaneous: 'Expense',
+};
+
+/** Align with cashPaymentVoucherController posting statuses. */
+const CASH_VOUCHER_BALANCE_POSTED_STATUSES = ['pending', 'approved', 'completed'];
+
+const parseLineAmount = (value) => {
+  const n = typeof value === 'number' ? value : parseFloat(value || 0);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const parseLineDebitCredit = (entry) => {
+  if (!entry) return { debit: 0, credit: 0 };
+  return {
+    debit: parseLineAmount(entry.debit),
+    credit: parseLineAmount(entry.credit),
+  };
+};
+
+/**
+ * Balance delta for cash/bank books: debit = subtract, credit = add (base rules).
+ * Asset/Expense do not update cash/bank via this path — they use FinancialPayment.effect.
+ */
+const computeBalanceDeltaFromDebitCredit = (debit, credit) => {
+  let delta = 0;
+  const d = parseLineAmount(debit);
+  const c = parseLineAmount(credit);
+  if (d > 0) delta -= d;
+  if (c > 0) delta += c;
+  return delta;
+};
+
+const parseVoucherAmount = (amount) => {
+  const amt = typeof amount === 'number' ? amount : parseFloat(amount);
+  return Number.isFinite(amt) && amt > 0 ? amt : 0;
+};
+
+const normalizeEntryAccountModel = (accountModel) => {
+  const s = (accountModel || '').trim().toLowerCase();
+  return ENTRY_ACCOUNT_MODEL_MAP[s] || (accountModel && accountModel.trim ? accountModel.trim() : '');
+};
 
 const normalizeCashVoucherEntryAccountModel = (entry) => {
   let accountModel = entry.accountModel;
@@ -298,32 +366,197 @@ const validateAndNormalizeCashVoucherEntries = async (parsedEntries) => {
   return { ok: true, normalizedEntries, totalDebits };
 };
 
+const isCashVoucherDoubleEntry = (v) => Array.isArray(v.entries) && v.entries.length >= 2;
+
+/**
+ * Build journal lines from legacy cashBook + payee fields.
+ * Cash/bank always use base rules (debit = subtract, credit = add).
+ * Asset/Expense payees use reversed rules (debit = add, credit = subtract).
+ */
+const buildLegacyEntriesFromCashVoucher = (voucher) => {
+  const amt = parseVoucherAmount(voucher.amount);
+  if (!amt || !voucher.cashBook) return [];
+
+  const cashBookId = voucher.cashBook.toString();
+  const cashLine = {
+    account: cashBookId,
+    cashBook: cashBookId,
+    accountModel: 'CashBook',
+    accountName: '',
+    description: voucher.description || '',
+  };
+
+  const payeeModel =
+    voucher.financialModel ||
+    PAYEE_TYPE_TO_ACCOUNT_MODEL[voucher.payeeType] ||
+    (FINANCIAL_ACCOUNT_MODELS.includes(voucher.payeeType) ? voucher.payeeType : null) ||
+    (voucher.payeeModel && voucher.payeeModel !== 'User' ? voucher.payeeModel : null);
+
+  if (!voucher.payee || !payeeModel || voucher.payeeType === 'other') {
+    if (voucher.voucherType === 'receipt') {
+      return [{ ...cashLine, debit: 0, credit: amt }];
+    }
+    if (voucher.voucherType === 'payment' || voucher.voucherType === 'transfer') {
+      return [{ ...cashLine, debit: amt, credit: 0 }];
+    }
+    return [];
+  }
+
+  const payeeId = voucher.payee.toString();
+  const payeeLine = {
+    account: payeeId,
+    accountModel: payeeModel,
+    accountName: voucher.payeeName || '',
+    description: voucher.description || '',
+  };
+
+  if (payeeModel === 'BankAccount') {
+    payeeLine.bankAccount = payeeId;
+  } else if (payeeModel === 'CashBook') {
+    payeeLine.cashBook = payeeId;
+  } else if (payeeModel === 'CashAccount') {
+    payeeLine.cashAccount = payeeId;
+  }
+
+  const payeeUsesDebitNormal = isDebitNormalAccount(payeeModel);
+
+  if (voucher.voucherType === 'receipt') {
+    // Receipt: cash credit (+), payee debit — opposite ledger columns.
+    // Asset/Expense (debit-normal): Debit = add; Income/etc: Debit = subtract.
+    return [
+      { ...cashLine, debit: 0, credit: amt },
+      { ...payeeLine, debit: amt, credit: 0 },
+    ];
+  }
+
+  if (payeeUsesDebitNormal) {
+    if (isAssetAccount(payeeModel)) {
+      // Asset purchase: cash debit (-), asset debit (+)
+      return [
+        { ...cashLine, debit: amt, credit: 0 },
+        { ...payeeLine, debit: amt, credit: 0 },
+      ];
+    }
+    // Expense payment: cash debit (-), expense credit (-)
+    return [
+      { ...cashLine, debit: amt, credit: 0 },
+      { ...payeeLine, debit: 0, credit: amt },
+    ];
+  }
+
+  return [
+    { ...cashLine, debit: amt, credit: 0 },
+    { ...payeeLine, debit: 0, credit: amt },
+  ];
+};
+
+const getEffectiveCashVoucherEntries = (voucher) => {
+  if (isCashVoucherDoubleEntry(voucher)) return voucher.entries;
+  return buildLegacyEntriesFromCashVoucher(voucher);
+};
+
+const resolveFinancialTargetFromVoucher = (voucher) => {
+  if (voucher.financialModel && voucher.financialId && FINANCIAL_ACCOUNT_MODELS.includes(voucher.financialModel)) {
+    return { model: voucher.financialModel, id: voucher.financialId };
+  }
+
+  const fromPayeeType =
+    PAYEE_TYPE_TO_ACCOUNT_MODEL[voucher.payeeType] ||
+    (FINANCIAL_ACCOUNT_MODELS.includes(voucher.payeeType) ? voucher.payeeType : null);
+
+  if (fromPayeeType && FINANCIAL_ACCOUNT_MODELS.includes(fromPayeeType) && voucher.payee) {
+    return { model: fromPayeeType, id: voucher.payee };
+  }
+
+  return null;
+};
+
+/**
+ * FinancialPayment.effect for cash vouchers — same rules as bank vouchers.
+ * Receipt: payee debit → Asset/Expense add; Income/etc subtract.
+ * Payment: Asset add; Expense subtract; base accounts add.
+ */
+const resolveFinancialPaymentEffectFromVoucher = (voucher) => {
+  const target = resolveFinancialTargetFromVoucher(voucher);
+  const entries = getEffectiveCashVoucherEntries(voucher);
+
+  if (target) {
+    const payeeEntry = entries.find((entry) => {
+      const normalized = normalizeEntryAccountModel(entry.accountModel);
+      return normalized === target.model && String(entry.account) === String(target.id);
+    });
+
+    if (payeeEntry) {
+      const { debit, credit } = parseLineDebitCredit(payeeEntry);
+      return resolveFinancialPaymentEffectFromEntry(debit, credit, target.model);
+    }
+  }
+
+  const isReceipt = voucher.voucherType === 'receipt';
+  if (target && isDebitNormalAccount(target.model)) {
+    if (isReceipt) return 'add';
+    return target.model === 'Asset' ? 'add' : 'subtract';
+  }
+  return isReceipt ? 'subtract' : 'add';
+};
+
+const resolveFinancialPaymentAmountFromVoucher = (voucher, targetModel, targetId) => {
+  const entries = getEffectiveCashVoucherEntries(voucher);
+  const payeeEntry = entries.find((entry) => {
+    const normalized = normalizeEntryAccountModel(entry.accountModel);
+    return normalized === targetModel && String(entry.account) === String(targetId);
+  });
+
+  if (payeeEntry) {
+    const { debit, credit } = parseLineDebitCredit(payeeEntry);
+    const mag = Math.max(debit, credit);
+    if (mag > 0) return mag;
+  }
+
+  return parseVoucherAmount(voucher.amount);
+};
+
+const applyBalanceDeltaToEntry = async (entry) => {
+  const { debit, credit } = parseLineDebitCredit(entry);
+  const delta = computeBalanceDeltaFromDebitCredit(debit, credit);
+  if (!Number.isFinite(delta) || delta === 0) return;
+
+  const cashBookId = entry.cashBook || (entry.accountModel === 'CashBook' ? entry.account : null);
+  if (cashBookId) {
+    const cashBook = await CashBook.findByIdAndUpdate(cashBookId, { $inc: { balance: delta } }, { new: true });
+    if (!cashBook) console.error('applyBalanceDeltaToEntry: cash book not found', cashBookId);
+  }
+
+  const bankId = entry.bankAccount || (entry.accountModel === 'BankAccount' ? entry.account : null);
+  if (bankId) {
+    const bank = await BankAccount.findByIdAndUpdate(bankId, { $inc: { balance: delta } }, { new: true });
+    if (!bank) console.error('applyBalanceDeltaToEntry: bank account not found', bankId);
+  }
+
+  const cashAccountId = entry.cashAccount || (entry.accountModel === 'CashAccount' ? entry.account : null);
+  if (cashAccountId) {
+    const cashAccount = await CashAccount.findByIdAndUpdate(
+      cashAccountId,
+      { $inc: { balance: delta } },
+      { new: true }
+    );
+    if (!cashAccount) console.error('applyBalanceDeltaToEntry: cash account not found', cashAccountId);
+  }
+};
+
 const applyEntryBalancesForCashVoucher = async (voucherId) => {
   if (!voucherId || !mongoose.Types.ObjectId.isValid(String(voucherId))) return;
 
   const voucher = await CashPaymentVoucher.findById(voucherId);
   if (!voucher || voucher.cashBalanceApplied) return;
   if (!CASH_VOUCHER_BALANCE_POSTED_STATUSES.includes(voucher.status)) return;
-  if (!Array.isArray(voucher.entries) || voucher.entries.length === 0) return;
 
-  for (const entry of voucher.entries) {
+  const entries = getEffectiveCashVoucherEntries(voucher);
+  if (!entries.length) return;
+
+  for (const entry of entries) {
     if (!entry) continue;
-
-    const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
-    const credit = typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
-    let delta = 0;
-    if (Number.isFinite(debit) && debit > 0) delta -= debit;
-    if (Number.isFinite(credit) && credit > 0) delta += credit;
-    if (!Number.isFinite(delta) || delta === 0) continue;
-
-    if (entry.cashAccount) {
-      const c = await CashAccount.findByIdAndUpdate(entry.cashAccount, { $inc: { balance: delta } }, { new: true });
-      if (!c) console.error('applyEntryBalancesForCashVoucher: cash account not found', entry.cashAccount);
-    }
-    if (entry.bankAccount) {
-      const b = await BankAccount.findByIdAndUpdate(entry.bankAccount, { $inc: { balance: delta } }, { new: true });
-      if (!b) console.error('applyEntryBalancesForCashVoucher: bank account not found', entry.bankAccount);
-    }
+    await applyBalanceDeltaToEntry(entry);
   }
 
   voucher.cashBalanceApplied = true;
@@ -331,17 +564,41 @@ const applyEntryBalancesForCashVoucher = async (voucherId) => {
 };
 
 const createTransactionsFromCashVoucherEntries = async (voucher, userId) => {
-  if (!voucher || !voucher._id || !voucher.entries || !Array.isArray(voucher.entries)) {
-    return { createdPayment: null, createdSupplierPayment: null, createdFinancialPayments: [], error: null };
+  if (!voucher || !voucher._id) {
+    return {
+      createdPayment: null,
+      createdSupplierPayment: null,
+      createdFinancialPayment: null,
+      createdFinancialPayments: [],
+      error: null,
+    };
   }
 
   const freshVoucher = await CashPaymentVoucher.findById(voucher._id);
   if (!freshVoucher) {
-    return { createdPayment: null, createdSupplierPayment: null, createdFinancialPayments: [], error: null };
+    return {
+      createdPayment: null,
+      createdSupplierPayment: null,
+      createdFinancialPayment: null,
+      createdFinancialPayments: [],
+      error: null,
+    };
+  }
+
+  const entries = getEffectiveCashVoucherEntries(freshVoucher);
+  if (entries.length < 2) {
+    return {
+      createdPayment: null,
+      createdSupplierPayment: null,
+      createdFinancialPayment: null,
+      createdFinancialPayments: [],
+      error: null,
+    };
   }
 
   let createdPayment = null;
   let createdSupplierPayment = null;
+  let createdFinancialPayment = null;
   const createdFinancialPayments = [];
   let errorDetails = null;
   const paymentMethodForPayment = 'cash';
@@ -352,32 +609,9 @@ const createTransactionsFromCashVoucherEntries = async (voucher, userId) => {
     `TRX-CPV-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
   const paymentDate = freshVoucher.voucherDate || new Date();
 
-  const normalizeAccountModel = (m) => {
-    const s = (m || '').trim().toLowerCase();
-    const map = {
-      customer: 'Customer',
-      supplier: 'Supplier',
-      bankaccount: 'BankAccount',
-      cashaccount: 'CashAccount',
-      expense: 'Expense',
-      income: 'Income',
-      asset: 'Asset',
-      liability: 'Liability',
-      equity: 'Equity',
-      partnershipaccount: 'PartnershipAccount',
-      cashbook: 'CashBook',
-      capital: 'Capital',
-      owner: 'Owner',
-      employee: 'Employee',
-      propertyaccount: 'PropertyAccount',
-    };
-    return map[s] || (m && m.trim() ? m.trim() : '');
-  };
-
-  for (const entry of freshVoucher.entries) {
-    const debit = typeof entry.debit === 'number' ? entry.debit : parseFloat(entry.debit || 0);
-    const credit = typeof entry.credit === 'number' ? entry.credit : parseFloat(entry.credit || 0);
-    const normalizedModel = normalizeAccountModel(entry.accountModel);
+  for (const entry of entries) {
+    const { debit, credit } = parseLineDebitCredit(entry);
+    const normalizedModel = normalizeEntryAccountModel(entry.accountModel);
 
     if (normalizedModel === 'Customer' && debit > 0 && !freshVoucher.relatedPayment) {
       try {
@@ -521,9 +755,27 @@ const createTransactionsFromCashVoucherEntries = async (voucher, userId) => {
       }
     }
 
-    const amount = debit > 0 ? debit : credit;
-    const isDebit = debit > 0;
+    const amount = Math.max(debit, credit);
     if (amount > 0 && FINANCIAL_ACCOUNT_MODELS.includes(normalizedModel)) {
+      const alreadyCreated =
+        freshVoucher.relatedFinancialPayment &&
+        normalizedModel === (freshVoucher.financialModel || freshVoucher.payeeType) &&
+        String(freshVoucher.financialId || freshVoucher.payee) === String(entry.account);
+
+      if (alreadyCreated) continue;
+
+      // Skip source cash book line — source ledger is handled separately
+      if (
+        normalizedModel === 'CashBook' &&
+        freshVoucher.cashBook &&
+        String(entry.account) === String(freshVoucher.cashBook)
+      ) {
+        continue;
+      }
+
+      const effect = resolveFinancialPaymentEffectFromEntry(debit, credit, normalizedModel);
+      const ledgerLabel = getFinancialPaymentLedgerLabel(effect, normalizedModel);
+
       try {
         const fp = await FinancialPayment.create({
           name: entry.accountName || `${normalizedModel} cash voucher entry`,
@@ -531,23 +783,33 @@ const createTransactionsFromCashVoucherEntries = async (voucher, userId) => {
           code: freshVoucher.referenceNumber || freshVoucher.voucherNumber || null,
           description:
             freshVoucher.description ||
-            `Cash voucher ${freshVoucher.voucherNumber}: ${isDebit ? 'Debit' : 'Credit'} ${amount} to ${
+            `Cash voucher ${freshVoucher.voucherNumber}: ${ledgerLabel} ${amount} to ${
               entry.accountName || normalizedModel
             }. ${freshVoucher.notes || ''}`.trim(),
           amount,
+          currency: freshVoucher.currency || null,
           paymentDate,
           method: 'cash',
-          effect: isDebit ? 'subtract' : 'add',
+          effect,
           relatedModel: normalizedModel,
           relatedId: entry.account,
           user: userId,
           isActive: true,
         });
         createdFinancialPayments.push(fp);
+        createdFinancialPayment = createdFinancialPayment || fp;
+
         if (!freshVoucher.relatedFinancialPayments || !Array.isArray(freshVoucher.relatedFinancialPayments)) {
           freshVoucher.relatedFinancialPayments = [];
         }
         freshVoucher.relatedFinancialPayments.push(fp._id);
+
+        if (!freshVoucher.relatedFinancialPayment) {
+          freshVoucher.relatedFinancialPayment = fp._id;
+          freshVoucher.financialModel = normalizedModel;
+          freshVoucher.financialId = entry.account;
+        }
+
         await freshVoucher.save();
       } catch (err) {
         console.error('Error creating FinancialPayment from cash voucher entry:', err);
@@ -556,16 +818,26 @@ const createTransactionsFromCashVoucherEntries = async (voucher, userId) => {
     }
   }
 
-  return { createdPayment, createdSupplierPayment, createdFinancialPayments, error: errorDetails };
+  return {
+    createdPayment,
+    createdSupplierPayment,
+    createdFinancialPayment,
+    createdFinancialPayments,
+    error: errorDetails,
+  };
 };
-
-const isCashVoucherDoubleEntry = (v) => Array.isArray(v.entries) && v.entries.length >= 2;
 
 module.exports = {
   parseCashVoucherEntriesFromBody,
   validateAndNormalizeCashVoucherEntries,
   applyEntryBalancesForCashVoucher,
   createTransactionsFromCashVoucherEntries,
+  buildLegacyEntriesFromCashVoucher,
+  getEffectiveCashVoucherEntries,
+  resolveFinancialPaymentEffectFromVoucher,
+  resolveFinancialPaymentEffectFromEntry,
+  resolveFinancialPaymentAmountFromVoucher,
+  getFinancialPaymentLedgerLabel,
   CASH_VOUCHER_BALANCE_POSTED_STATUSES,
   isCashVoucherDoubleEntry,
 };

@@ -15,9 +15,15 @@ const {
   validateExpensePayee,
   markExpensePaidFromVoucher,
 } = require('../utils/expensePayeeTypes');
+const {
+  resolveFinancialPaymentEffectFromVoucher,
+  resolveFinancialPaymentAmountFromVoucher,
+  getFinancialPaymentLedgerLabel,
+  CASH_VOUCHER_BALANCE_POSTED_STATUSES,
+} = require('./cashVoucherDoubleEntryHelpers');
 
 /** Statuses where the cash movement is considered posted (balance should reflect the voucher). */
-const CASH_BALANCE_POSTED_STATUSES = ['pending', 'approved', 'completed'];
+const CASH_BALANCE_POSTED_STATUSES = CASH_VOUCHER_BALANCE_POSTED_STATUSES;
 
 const FINANCIAL_ACCOUNT_MODELS = [
   'Asset',
@@ -90,9 +96,8 @@ const validatePayeeForVoucher = async (payeeType, payeeId, createdBy) => {
 };
 
 /**
- * Payee-side balance effect for cash vouchers (double entry with cash account):
- * - payment  => money leaves cash, payee balance increases
- * - receipt  => money enters cash, payee balance decreases
+ * Payee-side CashBook/BankAccount delta (base / credit-normal accounts only).
+ * Asset/Expense effects use resolveFinancialPaymentEffectFromVoucher instead.
  */
 const getPayeeEffectForCashVoucher = (voucherType) =>
   voucherType === 'receipt' ? 'subtract' : 'add';
@@ -855,7 +860,13 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         methodMapForFinancial[freshVoucher.paymentMethod] || 'cash';
 
       const paymentDate = freshVoucher.voucherDate || new Date();
-      const payeeEffect = getPayeeEffectForCashVoucher(freshVoucher.voucherType);
+      const payeeEffect = resolveFinancialPaymentEffectFromVoucher(freshVoucher);
+      const financialAmount = resolveFinancialPaymentAmountFromVoucher(
+        freshVoucher,
+        targetFinancialModel,
+        targetFinancialId
+      );
+      const ledgerLabel = getFinancialPaymentLedgerLabel(payeeEffect, targetFinancialModel);
       const voucherTypeLabel =
         freshVoucher.voucherType === 'receipt' ? 'Receipt' : 'Payment';
 
@@ -868,8 +879,10 @@ const createTransactionFromVoucher = async (voucher, userId) => {
         code: freshVoucher.referenceNumber || null,
         description:
           freshVoucher.description ||
-          `${voucherTypeLabel} via cash payment voucher ${freshVoucher.voucherNumber}`,
-        amount: freshVoucher.amount,
+          `${voucherTypeLabel} via cash payment voucher ${freshVoucher.voucherNumber}: ${ledgerLabel} ${financialAmount} to ${
+            freshVoucher.payeeName || targetFinancialModel
+          }`,
+        amount: financialAmount,
         currency: freshVoucher.currency || null,
         paymentDate,
         method: mappedMethod,
