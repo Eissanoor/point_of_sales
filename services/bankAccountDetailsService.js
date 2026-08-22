@@ -115,9 +115,8 @@ async function fetchBankPaymentLedgerRows(bankAccountId, startDate, endDate) {
         sourceId: v._id,
         reference: v.voucherNumber,
         description: v.description || v.notes || `${isReceipt ? 'Receipt' : 'Payment'} - ${v.payeeName || v.payeeType || 'N/A'}`,
-        // Bank is an asset: receipt = debit (in), payment = credit (out).
-        debit: isReceipt ? amount : 0,
-        credit: isReceipt ? 0 : amount,
+        debit: isReceipt ? 0 : amount,
+        credit: isReceipt ? amount : 0,
         status: v.status,
         voucherType: v.voucherType,
         counterpart: v.payeeName || v.payeeType || null,
@@ -404,9 +403,6 @@ function compareLedgerChronological(a, b) {
 }
 
 function bankLedgerBalanceDelta(row) {
-  if (row.source === 'bankPaymentVoucher') {
-    return computeLedgerBalanceDelta(row.debit, row.credit, 'Asset');
-  }
   return computeLedgerBalanceDelta(row.debit, row.credit);
 }
 

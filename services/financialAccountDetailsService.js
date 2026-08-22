@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const FinancialPayment = require('../models/financialPaymentModel');
+const BankPaymentVoucher = require('../models/bankPaymentVoucherModel');
 const {
   computeLedgerBalanceDelta,
   paymentEffectToDebitCredit,
@@ -101,10 +102,17 @@ const attachRunningBalance = (transactions, openingBalance, accountModel) => {
   return chronological.reverse();
 };
 
+const isReceiptLedgerRow = (row) => {
+  if (row.voucherType === 'receipt') return true;
+  const text = `${row.reference || ''} ${row.description || ''} ${row.metadata?.voucherNumber || ''}`;
+  return /\bBRV-|\bReceipt\b/i.test(text);
+};
+
 /**
- * Asset/Expense remaining: first posted line sets the balance (debit − credit).
- * Every later line reduces remaining by its amount.
- * Example: Debit 1000 → 1000, Credit 500 → 500, Debit 100 → 400.
+ * Asset/Expense remaining:
+ * Payment (BPV) first line: debit − credit (e.g. Debit 1000 → +1000).
+ * Receipt (BRV): always subtracts (e.g. Debit 1000 → -1000).
+ * Later payment lines also reduce remaining.
  */
 const remainingBalanceDelta = (row, accountModel, isFirstApplied) => {
   if (!isDebitNormalAccount(accountModel)) {
@@ -113,17 +121,33 @@ const remainingBalanceDelta = (row, accountModel, isFirstApplied) => {
 
   const debit = row.debit || 0;
   const credit = row.credit || 0;
+  const amount = debit + credit;
+
+  if (isReceiptLedgerRow(row)) {
+    return -amount;
+  }
 
   if (isFirstApplied) {
     return debit - credit;
   }
 
-  return -(debit + credit);
+  return -amount;
 };
 
-const paymentToLedgerRow = (payment) => {
+const paymentToLedgerRow = (payment, voucher) => {
   const amount = typeof payment.amount === 'number' ? payment.amount : parseFloat(payment.amount || 0);
-  const mapped = paymentEffectToDebitCredit(amount, payment.effect, payment.relatedModel);
+  const amt = round2(amount);
+  let mapped = paymentEffectToDebitCredit(amount, payment.effect, payment.relatedModel);
+
+  // Asset/Expense: bank voucher (payment or receipt) always shows as debit.
+  if (isDebitNormalAccount(payment.relatedModel)) {
+    mapped = { debit: amt, credit: 0, ledgerLabel: 'Debit' };
+  }
+
+  const rawDescription = payment.description || payment.name || '';
+  const description = rawDescription
+    .replace(/\bDebit\b/g, mapped.ledgerLabel)
+    .replace(/\bCredit\b/g, mapped.ledgerLabel);
 
   return {
     date: payment.paymentDate || payment.createdAt,
@@ -132,15 +156,15 @@ const paymentToLedgerRow = (payment) => {
     sourceId: payment._id,
     reference: payment.referCode || payment.code || '',
     referCode: payment.referCode || '',
-    description: payment.description || payment.name || '',
+    description,
     debit: mapped.debit,
     credit: mapped.credit,
-    amount: round2(amount),
+    amount: amt,
     effect: payment.effect || 'add',
     ledgerLabel: mapped.ledgerLabel,
     method: payment.method || '',
     status: payment.isActive === false ? 'inactive' : 'active',
-    voucherType: '',
+    voucherType: voucher?.voucherType || '',
     counterpart: null,
     balanceApplied: payment.isActive !== false,
     currency: payment.currency || null,
@@ -152,6 +176,7 @@ const paymentToLedgerRow = (payment) => {
       relatedId: payment.relatedId,
       paymentDate: payment.paymentDate,
       createdAt: payment.createdAt,
+      voucherNumber: voucher?.voucherNumber || '',
     },
   };
 };
@@ -244,10 +269,42 @@ async function fetchFinancialPaymentRows(relatedModel, relatedId, options = {}) 
     .sort({ createdAt: -1, paymentDate: -1 })
     .lean();
 
+  const paymentIds = payments.map((p) => p._id);
+  const vouchers = paymentIds.length
+    ? await BankPaymentVoucher.find({
+        $or: [
+          { relatedFinancialPayment: { $in: paymentIds } },
+          { relatedFinancialPayments: { $in: paymentIds } },
+          { financialModel: relatedModel, financialId: relatedObjectId },
+        ],
+      })
+        .select('voucherNumber voucherType relatedFinancialPayment relatedFinancialPayments')
+        .lean()
+    : [];
+
+  const voucherByFpId = new Map();
+  for (const voucher of vouchers) {
+    if (voucher.relatedFinancialPayment) {
+      voucherByFpId.set(String(voucher.relatedFinancialPayment), voucher);
+    }
+    if (Array.isArray(voucher.relatedFinancialPayments)) {
+      for (const fpId of voucher.relatedFinancialPayments) {
+        voucherByFpId.set(String(fpId), voucher);
+      }
+    }
+  }
+
+  const voucherByNumber = new Map(
+    vouchers.filter((v) => v.voucherNumber).map((v) => [String(v.voucherNumber), v])
+  );
+
   const rows = [];
   for (const payment of payments) {
     if (!inDateRange(payment.paymentDate || payment.createdAt, startDate, endDate)) continue;
-    rows.push(paymentToLedgerRow(payment));
+    const voucher =
+      voucherByFpId.get(String(payment._id)) ||
+      voucherByNumber.get(String(payment.code || ''));
+    rows.push(paymentToLedgerRow(payment, voucher));
   }
 
   return rows;
