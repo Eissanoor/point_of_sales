@@ -46,18 +46,51 @@ const paginateArray = (items, page, limit) => {
   };
 };
 
+const ledgerTime = (row) => {
+  const ms = new Date(row.date).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
+const ledgerCreatedTime = (row) => {
+  const raw = row.createdAt || row.metadata?.createdAt;
+  if (!raw) return 0;
+  const ms = new Date(raw).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
+const ledgerRefNum = (row) => {
+  const ref = String(row.referCode || row.reference || row.code || '');
+  const match = ref.match(/(\d+)$/);
+  return match ? Number(match[1]) : 0;
+};
+
+/** Oldest first: date, then createdAt, then reference (FP-0130 before FP-0131). */
+const compareLedgerChronological = (a, b) => {
+  const dateDiff = ledgerTime(a) - ledgerTime(b);
+  if (dateDiff !== 0) return dateDiff;
+
+  const createdDiff = ledgerCreatedTime(a) - ledgerCreatedTime(b);
+  if (createdDiff !== 0) return createdDiff;
+
+  const refDiff = ledgerRefNum(a) - ledgerRefNum(b);
+  if (refDiff !== 0) return refDiff;
+
+  return String(a.sourceId || '').localeCompare(String(b.sourceId || ''));
+};
+
 const attachRunningBalance = (transactions, openingBalance) => {
-  const asc = [...transactions].sort((a, b) => new Date(a.date) - new Date(b.date));
+  const chronological = [...transactions].sort(compareLedgerChronological);
   let running = round2(openingBalance || 0);
 
-  for (const row of asc) {
+  for (const row of chronological) {
     if (row.balanceApplied !== false) {
-      running = round2(running + row.credit - row.debit);
+      running = round2(running + (row.credit || 0) - (row.debit || 0));
     }
     row.runningBalance = running;
   }
 
-  return asc.sort((a, b) => new Date(b.date) - new Date(a.date));
+  // Display newest first; running balances stay chronological.
+  return chronological.reverse();
 };
 
 const paymentToLedgerRow = (payment) => {
@@ -68,6 +101,7 @@ const paymentToLedgerRow = (payment) => {
 
   return {
     date: payment.paymentDate || payment.createdAt,
+    createdAt: payment.createdAt || payment.paymentDate || null,
     source: 'financialPayment',
     sourceId: payment._id,
     reference: payment.referCode || payment.code || '',

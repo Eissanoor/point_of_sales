@@ -53,8 +53,17 @@ const buildSummary = () => ({
   },
 });
 
+const createdAtFromSourceId = (id) => {
+  const hex = String(id || '');
+  if (hex.length < 8) return null;
+  const seconds = parseInt(hex.substring(0, 8), 16);
+  if (!Number.isFinite(seconds)) return null;
+  return new Date(seconds * 1000);
+};
+
 const makeLedgerRow = ({
   date,
+  createdAt,
   source,
   sourceId,
   reference,
@@ -68,6 +77,7 @@ const makeLedgerRow = ({
   metadata = {},
 }) => ({
   date,
+  createdAt: createdAt || createdAtFromSourceId(sourceId) || date || null,
   source,
   sourceId,
   reference: reference || '',
@@ -87,7 +97,7 @@ async function fetchBankPaymentLedgerRows(bankAccountId, startDate, endDate) {
     bankAccount: bankAccountId,
     bankBalanceApplied: true,
   })
-    .select('voucherNumber voucherDate voucherType amount status payeeName payeeType description notes')
+    .select('voucherNumber voucherDate voucherType amount status payeeName payeeType description notes createdAt')
     .lean();
 
   for (const v of vouchers) {
@@ -99,6 +109,7 @@ async function fetchBankPaymentLedgerRows(bankAccountId, startDate, endDate) {
     rows.push(
       makeLedgerRow({
         date: v.voucherDate,
+        createdAt: v.createdAt,
         source: 'bankPaymentVoucher',
         sourceId: v._id,
         reference: v.voucherNumber,
@@ -123,7 +134,7 @@ async function fetchJournalLedgerRows(bankAccountId, startDate, endDate) {
     bankBalanceApplied: true,
     'entries.bankAccount': bankAccountId,
   })
-    .select('voucherNumber voucherDate voucherType status entries description notes')
+    .select('voucherNumber voucherDate voucherType status entries description notes createdAt')
     .lean();
 
   for (const v of vouchers) {
@@ -139,6 +150,7 @@ async function fetchJournalLedgerRows(bankAccountId, startDate, endDate) {
       rows.push(
         makeLedgerRow({
           date: v.voucherDate,
+          createdAt: v.createdAt,
           source: 'journalPaymentVoucher',
           sourceId: v._id,
           reference: v.voucherNumber,
@@ -164,7 +176,7 @@ async function fetchCashLedgerRows(bankAccountId, startDate, endDate) {
     cashBalanceApplied: true,
     'entries.bankAccount': bankAccountId,
   })
-    .select('voucherNumber voucherDate voucherType status entries description notes')
+    .select('voucherNumber voucherDate voucherType status entries description notes createdAt')
     .lean();
 
   for (const v of vouchers) {
@@ -180,6 +192,7 @@ async function fetchCashLedgerRows(bankAccountId, startDate, endDate) {
       rows.push(
         makeLedgerRow({
           date: v.voucherDate,
+          createdAt: v.createdAt,
           source: 'cashPaymentVoucher',
           sourceId: v._id,
           reference: v.voucherNumber,
@@ -205,7 +218,7 @@ async function fetchSarafLedgerRows(bankAccountId, startDate, endDate) {
     bankBalanceApplied: true,
     'entries.bankAccount': bankAccountId,
   })
-    .select('voucherNumber voucherDate exchangeType status entries description notes')
+    .select('voucherNumber voucherDate exchangeType status entries description notes createdAt')
     .lean();
 
   for (const v of vouchers) {
@@ -221,6 +234,7 @@ async function fetchSarafLedgerRows(bankAccountId, startDate, endDate) {
       rows.push(
         makeLedgerRow({
           date: v.voucherDate,
+          createdAt: v.createdAt,
           source: 'sarafEntryVoucher',
           sourceId: v._id,
           reference: v.voucherNumber,
@@ -248,7 +262,7 @@ async function fetchTransferLedgerRows(bankAccountId, startDate, endDate) {
   })
     .populate('fromBankAccount', 'accountName accountNumber')
     .populate('toBankAccount', 'accountName accountNumber')
-    .select('voucherNumber voucherDate amount totalAmount transferFee status purpose description fromBankAccount toBankAccount')
+    .select('voucherNumber voucherDate amount totalAmount transferFee status purpose description fromBankAccount toBankAccount createdAt')
     .lean();
 
   for (const v of vouchers) {
@@ -265,6 +279,7 @@ async function fetchTransferLedgerRows(bankAccountId, startDate, endDate) {
     rows.push(
       makeLedgerRow({
         date: v.voucherDate,
+        createdAt: v.createdAt,
         source: 'bankAccountTransfer',
         sourceId: v._id,
         reference: v.voucherNumber,
@@ -293,7 +308,7 @@ async function fetchOpeningBalanceRows(bankAccountId, startDate, endDate) {
     accountModel: 'BankAccount',
     status: { $in: ['posted', 'completed', 'approved'] },
   })
-    .select('voucherNumber voucherDate amount voucherType status description accountName')
+    .select('voucherNumber voucherDate amount voucherType status description accountName createdAt')
     .lean();
 
   for (const v of vouchers) {
@@ -305,6 +320,7 @@ async function fetchOpeningBalanceRows(bankAccountId, startDate, endDate) {
     rows.push(
       makeLedgerRow({
         date: v.voucherDate,
+        createdAt: v.createdAt,
         source: 'openingBalanceVoucher',
         sourceId: v._id,
         reference: v.voucherNumber,
@@ -351,18 +367,51 @@ function summarizeRows(rows) {
   return summary;
 }
 
+function ledgerTime(row) {
+  const ms = new Date(row.date).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+function ledgerCreatedTime(row) {
+  const raw = row.createdAt;
+  if (!raw) return 0;
+  const ms = new Date(raw).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+function ledgerRefNum(row) {
+  const ref = String(row.reference || '');
+  const match = ref.match(/(\d+)$/);
+  return match ? Number(match[1]) : 0;
+}
+
+/** Oldest first: date, then createdAt, then voucher number (0001 before 0002). */
+function compareLedgerChronological(a, b) {
+  const dateDiff = ledgerTime(a) - ledgerTime(b);
+  if (dateDiff !== 0) return dateDiff;
+
+  const createdDiff = ledgerCreatedTime(a) - ledgerCreatedTime(b);
+  if (createdDiff !== 0) return createdDiff;
+
+  const refDiff = ledgerRefNum(a) - ledgerRefNum(b);
+  if (refDiff !== 0) return refDiff;
+
+  return String(a.sourceId || '').localeCompare(String(b.sourceId || ''));
+}
+
 function attachRunningBalance(transactions, openingBalance) {
-  const asc = [...transactions].sort((a, b) => new Date(a.date) - new Date(b.date));
+  const chronological = [...transactions].sort(compareLedgerChronological);
   let running = round2(openingBalance || 0);
 
-  for (const row of asc) {
+  for (const row of chronological) {
     if (row.balanceApplied !== false) {
-      running = round2(running + row.credit - row.debit);
+      running = round2(running + (row.credit || 0) - (row.debit || 0));
     }
     row.runningBalance = running;
   }
 
-  return asc.sort((a, b) => new Date(b.date) - new Date(a.date));
+  // Display newest first; running balances stay chronological.
+  return chronological.reverse();
 }
 
 function paginateArray(items, page, limit) {
@@ -444,7 +493,7 @@ async function collectLedgerRows(bankAccountId, { startDate, endDate } = {}) {
   ]);
 
   return [...bankPayments, ...journals, ...cashVouchers, ...sarafVouchers, ...transfers, ...openingBalances].sort(
-    (a, b) => new Date(b.date) - new Date(a.date)
+    (a, b) => compareLedgerChronological(b, a)
   );
 }
 
