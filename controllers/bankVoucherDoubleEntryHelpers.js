@@ -425,9 +425,10 @@ const buildLegacyEntriesFromBankVoucher = (voucher) => {
 
   if (voucher.voucherType === 'receipt') {
     if (payeeUsesDebitNormal) {
+      // Receipt to asset/expense: bank debit (−), asset/expense credit (+)
       return [
-        { ...bankLine, debit: 0, credit: amt },
-        { ...payeeLine, debit: amt, credit: 0 },
+        { ...bankLine, debit: amt, credit: 0 },
+        { ...payeeLine, debit: 0, credit: amt },
       ];
     }
     return [
@@ -460,7 +461,7 @@ const toPlainBankVoucherEntry = (entry) => {
  * Asset/Expense follow debit-normal rules regardless of how the UI posted the line.
  * Payment/transfer: debit = increase. Receipt: credit = decrease.
  */
-const applyAssetExpensePayeeSides = (entries) => {
+const applyAssetExpensePayeeSides = (entries, voucherType) => {
   if (!Array.isArray(entries) || !entries.length) return entries;
 
   return entries.map((entry) => {
@@ -471,6 +472,31 @@ const applyAssetExpensePayeeSides = (entries) => {
     const amount = Math.max(debit, credit);
     if (amount <= 0) return plain;
 
+    if (voucherType === 'receipt') {
+      return { ...plain, debit: 0, credit: amount };
+    }
+
+    return { ...plain, debit: amount, credit: 0 };
+  });
+};
+
+const applyBankSideForAssetExpense = (entries, voucherType) => {
+  if (!Array.isArray(entries) || !entries.length) return entries;
+  const hasAssetOrExpense = entries.some((entry) =>
+    isDebitNormalAccount(toPlainBankVoucherEntry(entry).accountModel)
+  );
+  if (!hasAssetOrExpense) return entries;
+
+  return entries.map((entry) => {
+    const plain = toPlainBankVoucherEntry(entry);
+    const isBank = plain.accountModel === 'BankAccount' || !!plain.bankAccount;
+    if (!isBank) return plain;
+
+    const { debit, credit } = parseLineDebitCredit(plain);
+    const amount = Math.max(debit, credit);
+    if (amount <= 0) return plain;
+
+    // Payment or receipt to Asset/Expense: money leaves the bank.
     return { ...plain, debit: amount, credit: 0 };
   });
 };
@@ -479,7 +505,10 @@ const getEffectiveBankVoucherEntries = (voucher) => {
   const entries = isBankVoucherDoubleEntry(voucher)
     ? voucher.entries
     : buildLegacyEntriesFromBankVoucher(voucher);
-  return applyAssetExpensePayeeSides(entries);
+  return applyBankSideForAssetExpense(
+    applyAssetExpensePayeeSides(entries, voucher.voucherType),
+    voucher.voucherType
+  );
 };
 
 const applyBalanceDeltaToEntry = async (entry) => {

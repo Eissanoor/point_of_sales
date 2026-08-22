@@ -6,7 +6,7 @@ const SarafEntryVoucher = require('../models/sarafEntryVoucherModel');
 const BankAccountTransferVoucher = require('../models/bankAccountTransferVoucherModel');
 const ReconcileBankAccountsVoucher = require('../models/reconcileBankAccountsVoucherModel');
 const OpeningBalanceVoucher = require('../models/openingBalanceVoucherModel');
-const { computeLedgerBalanceDelta } = require('../utils/accountDebitCreditRules');
+const { computeLedgerBalanceDelta, isDebitNormalAccount } = require('../utils/accountDebitCreditRules');
 
 const BANK_PAYMENT_POSTED_STATUSES = ['pending', 'approved', 'completed'];
 const JOURNAL_POSTED_STATUSES = ['completed', 'posted'];
@@ -98,7 +98,7 @@ async function fetchBankPaymentLedgerRows(bankAccountId, startDate, endDate) {
     bankAccount: bankAccountId,
     bankBalanceApplied: true,
   })
-    .select('voucherNumber voucherDate voucherType amount status payeeName payeeType description notes createdAt')
+    .select('voucherNumber voucherDate voucherType amount status payeeName payeeType financialModel description notes createdAt')
     .lean();
 
   for (const v of vouchers) {
@@ -107,6 +107,10 @@ async function fetchBankPaymentLedgerRows(bankAccountId, startDate, endDate) {
     if (!Number.isFinite(amount) || amount <= 0) continue;
 
     const isReceipt = v.voucherType === 'receipt';
+    const payeeIsAssetOrExpense =
+      isDebitNormalAccount(v.payeeType) || isDebitNormalAccount(v.financialModel);
+    // Receipt to Asset/Expense still leaves the bank (debit / −amount).
+    const bankDebit = !isReceipt || payeeIsAssetOrExpense;
     rows.push(
       makeLedgerRow({
         date: v.voucherDate,
@@ -115,8 +119,8 @@ async function fetchBankPaymentLedgerRows(bankAccountId, startDate, endDate) {
         sourceId: v._id,
         reference: v.voucherNumber,
         description: v.description || v.notes || `${isReceipt ? 'Receipt' : 'Payment'} - ${v.payeeName || v.payeeType || 'N/A'}`,
-        debit: isReceipt ? 0 : amount,
-        credit: isReceipt ? amount : 0,
+        debit: bankDebit ? amount : 0,
+        credit: bankDebit ? 0 : amount,
         status: v.status,
         voucherType: v.voucherType,
         counterpart: v.payeeName || v.payeeType || null,

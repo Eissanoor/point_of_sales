@@ -124,7 +124,7 @@ const remainingBalanceDelta = (row, accountModel, isFirstApplied) => {
   const amount = debit + credit;
 
   if (isReceiptLedgerRow(row)) {
-    return -amount;
+    return amount;
   }
 
   if (isFirstApplied) {
@@ -139,9 +139,14 @@ const paymentToLedgerRow = (payment, voucher) => {
   const amt = round2(amount);
   let mapped = paymentEffectToDebitCredit(amount, payment.effect, payment.relatedModel);
 
-  // Asset/Expense: bank voucher (payment or receipt) always shows as debit.
+  // Asset/Expense: payment = debit (+), receipt = credit (−).
   if (isDebitNormalAccount(payment.relatedModel)) {
-    mapped = { debit: amt, credit: 0, ledgerLabel: 'Debit' };
+    const isReceipt =
+      voucher?.voucherType === 'receipt' ||
+      /\bBRV-|\bReceipt\b/i.test(`${payment.code || ''} ${payment.description || ''}`);
+    mapped = isReceipt
+      ? { debit: 0, credit: amt, ledgerLabel: 'Credit' }
+      : { debit: amt, credit: 0, ledgerLabel: 'Debit' };
   }
 
   const rawDescription = payment.description || payment.name || '';
