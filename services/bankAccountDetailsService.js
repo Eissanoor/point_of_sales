@@ -6,6 +6,7 @@ const SarafEntryVoucher = require('../models/sarafEntryVoucherModel');
 const BankAccountTransferVoucher = require('../models/bankAccountTransferVoucherModel');
 const ReconcileBankAccountsVoucher = require('../models/reconcileBankAccountsVoucherModel');
 const OpeningBalanceVoucher = require('../models/openingBalanceVoucherModel');
+const { computeLedgerBalanceDelta } = require('../utils/accountDebitCreditRules');
 
 const BANK_PAYMENT_POSTED_STATUSES = ['pending', 'approved', 'completed'];
 const JOURNAL_POSTED_STATUSES = ['completed', 'posted'];
@@ -114,8 +115,9 @@ async function fetchBankPaymentLedgerRows(bankAccountId, startDate, endDate) {
         sourceId: v._id,
         reference: v.voucherNumber,
         description: v.description || v.notes || `${isReceipt ? 'Receipt' : 'Payment'} - ${v.payeeName || v.payeeType || 'N/A'}`,
-        debit: isReceipt ? 0 : amount,
-        credit: isReceipt ? amount : 0,
+        // Bank is an asset: receipt = debit (in), payment = credit (out).
+        debit: isReceipt ? amount : 0,
+        credit: isReceipt ? 0 : amount,
         status: v.status,
         voucherType: v.voucherType,
         counterpart: v.payeeName || v.payeeType || null,
@@ -360,10 +362,12 @@ function summarizeRows(rows) {
       summary.totalDebit = round2(summary.totalDebit + (row.debit || 0));
       summary.totalCredit = round2(summary.totalCredit + (row.credit || 0));
       summary.transactionCount += 1;
+      summary.netMovement = round2(
+        summary.netMovement + bankLedgerBalanceDelta(row)
+      );
     }
   }
 
-  summary.netMovement = round2(summary.totalCredit - summary.totalDebit);
   return summary;
 }
 
@@ -399,13 +403,20 @@ function compareLedgerChronological(a, b) {
   return String(a.sourceId || '').localeCompare(String(b.sourceId || ''));
 }
 
+function bankLedgerBalanceDelta(row) {
+  if (row.source === 'bankPaymentVoucher') {
+    return computeLedgerBalanceDelta(row.debit, row.credit, 'Asset');
+  }
+  return computeLedgerBalanceDelta(row.debit, row.credit);
+}
+
 function attachRunningBalance(transactions, openingBalance) {
   const chronological = [...transactions].sort(compareLedgerChronological);
   let running = round2(openingBalance || 0);
 
   for (const row of chronological) {
     if (row.balanceApplied !== false) {
-      running = round2(running + (row.credit || 0) - (row.debit || 0));
+      running = round2(running + bankLedgerBalanceDelta(row));
     }
     row.runningBalance = running;
   }
@@ -624,6 +635,7 @@ async function getAllBankAccountsDetails(options = {}) {
       acc.totalCurrentBalance = round2(acc.totalCurrentBalance + a.currentBalance);
       acc.totalDebit = round2(acc.totalDebit + a.totalDebit);
       acc.totalCredit = round2(acc.totalCredit + a.totalCredit);
+      acc.netMovement = round2(acc.netMovement + a.netMovement);
       acc.transactionCount += a.transactionCount;
       return acc;
     },
@@ -633,11 +645,10 @@ async function getAllBankAccountsDetails(options = {}) {
       totalCurrentBalance: 0,
       totalDebit: 0,
       totalCredit: 0,
+      netMovement: 0,
       transactionCount: 0,
     }
   );
-
-  totals.netMovement = round2(totals.totalCredit - totals.totalDebit);
 
   return { totals, accounts };
 }

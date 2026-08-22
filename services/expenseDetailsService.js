@@ -288,8 +288,8 @@ function buildBankVoucherExpenseLedgerRows(bankPaymentVouchers, payeeIds) {
             voucher.description ||
             voucher.notes ||
             `Bank ${voucher.voucherType || 'payment'} - ${voucher.payeeName || 'Expense'}`,
-          debit: isReceipt ? amount : 0,
-          credit: isReceipt ? 0 : amount,
+          debit: amount,
+          credit: 0,
           status: voucher.status,
           voucherType: voucher.voucherType,
           counterpart: voucher.bankAccount?.accountName || voucher.payeeName || null,

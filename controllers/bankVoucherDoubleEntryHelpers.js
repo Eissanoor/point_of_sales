@@ -11,7 +11,6 @@ const Purchase = require('../models/purchaseModel');
 const FinancialPayment = require('../models/financialPaymentModel');
 const {
   isDebitNormalAccount,
-  isAssetAccount,
   resolveFinancialPaymentEffectFromEntry,
   getFinancialPaymentLedgerLabel,
 } = require('../utils/accountDebitCreditRules');
@@ -426,7 +425,7 @@ const buildLegacyEntriesFromBankVoucher = (voucher) => {
 
   if (voucher.voucherType === 'receipt') {
     if (payeeUsesDebitNormal) {
-      // Bank credit (+), payee credit (-) for asset/expense reduction on receipt
+      // Bank credit (+), asset/expense credit (-)
       return [
         { ...bankLine, debit: 0, credit: amt },
         { ...payeeLine, debit: 0, credit: amt },
@@ -439,17 +438,10 @@ const buildLegacyEntriesFromBankVoucher = (voucher) => {
   }
 
   if (payeeUsesDebitNormal) {
-    if (isAssetAccount(payeeModel)) {
-      // Asset purchase: bank debit (-), asset debit (+)
-      return [
-        { ...bankLine, debit: amt, credit: 0 },
-        { ...payeeLine, debit: amt, credit: 0 },
-      ];
-    }
-    // Expense payment: bank debit (-), expense credit (-)
+    // Payment: bank debit (-), asset/expense debit (+)
     return [
       { ...bankLine, debit: amt, credit: 0 },
-      { ...payeeLine, debit: 0, credit: amt },
+      { ...payeeLine, debit: amt, credit: 0 },
     ];
   }
 
@@ -459,9 +451,40 @@ const buildLegacyEntriesFromBankVoucher = (voucher) => {
   ];
 };
 
+const toPlainBankVoucherEntry = (entry) => {
+  if (!entry) return entry;
+  if (typeof entry.toObject === 'function') return entry.toObject();
+  return { ...entry };
+};
+
+/**
+ * Asset/Expense follow debit-normal rules regardless of how the UI posted the line.
+ * Payment/transfer: debit = increase. Receipt: credit = decrease.
+ */
+const applyAssetExpensePayeeSides = (entries, voucherType) => {
+  if (!Array.isArray(entries) || !entries.length) return entries;
+
+  return entries.map((entry) => {
+    const plain = toPlainBankVoucherEntry(entry);
+    if (!isDebitNormalAccount(plain.accountModel)) return plain;
+
+    const { debit, credit } = parseLineDebitCredit(plain);
+    const amount = Math.max(debit, credit);
+    if (amount <= 0) return plain;
+
+    if (voucherType === 'receipt') {
+      return { ...plain, debit: 0, credit: amount };
+    }
+
+    return { ...plain, debit: amount, credit: 0 };
+  });
+};
+
 const getEffectiveBankVoucherEntries = (voucher) => {
-  if (isBankVoucherDoubleEntry(voucher)) return voucher.entries;
-  return buildLegacyEntriesFromBankVoucher(voucher);
+  const entries = isBankVoucherDoubleEntry(voucher)
+    ? voucher.entries
+    : buildLegacyEntriesFromBankVoucher(voucher);
+  return applyAssetExpensePayeeSides(entries, voucher.voucherType);
 };
 
 const applyBalanceDeltaToEntry = async (entry) => {
@@ -871,11 +894,7 @@ const resolveFinancialPaymentEffectFromVoucher = (voucher) => {
   }
 
   // Fallback when no matching payee line (legacy single-line vouchers)
-  const isReceipt = voucher.voucherType === 'receipt';
-  if (target && isDebitNormalAccount(target.model)) {
-    return isReceipt ? 'subtract' : target.model === 'Asset' ? 'add' : 'subtract';
-  }
-  return isReceipt ? 'subtract' : 'add';
+  return voucher.voucherType === 'receipt' ? 'subtract' : 'add';
 };
 
 /** Amount for financial payee ledger (always positive). */

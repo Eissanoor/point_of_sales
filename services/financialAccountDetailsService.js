@@ -1,10 +1,16 @@
 const mongoose = require('mongoose');
 const FinancialPayment = require('../models/financialPaymentModel');
+const {
+  computeLedgerBalanceDelta,
+  paymentEffectToDebitCredit,
+  isDebitNormalAccount,
+} = require('../utils/accountDebitCreditRules');
 require('../models/userModel');
 require('../models/currencyModel');
 
 const MODEL_MAP = {
   Asset: () => require('../models/assetModel'),
+  Expense: () => require('../models/expenseModel'),
   Income: () => require('../models/incomeModel'),
   Liability: () => require('../models/liabilityModel'),
   PartnershipAccount: () => require('../models/partnershipAccountModel'),
@@ -78,13 +84,15 @@ const compareLedgerChronological = (a, b) => {
   return String(a.sourceId || '').localeCompare(String(b.sourceId || ''));
 };
 
-const attachRunningBalance = (transactions, openingBalance) => {
+const attachRunningBalance = (transactions, openingBalance, accountModel) => {
   const chronological = [...transactions].sort(compareLedgerChronological);
   let running = round2(openingBalance || 0);
+  let hasApplied = running !== 0;
 
   for (const row of chronological) {
     if (row.balanceApplied !== false) {
-      running = round2(running + (row.credit || 0) - (row.debit || 0));
+      running = round2(running + remainingBalanceDelta(row, accountModel, !hasApplied));
+      hasApplied = true;
     }
     row.runningBalance = running;
   }
@@ -93,11 +101,29 @@ const attachRunningBalance = (transactions, openingBalance) => {
   return chronological.reverse();
 };
 
+/**
+ * Asset/Expense remaining: first posted line sets the balance (debit − credit).
+ * Every later line reduces remaining by its amount.
+ * Example: Debit 1000 → 1000, Credit 500 → 500, Debit 100 → 400.
+ */
+const remainingBalanceDelta = (row, accountModel, isFirstApplied) => {
+  if (!isDebitNormalAccount(accountModel)) {
+    return computeLedgerBalanceDelta(row.debit, row.credit, accountModel);
+  }
+
+  const debit = row.debit || 0;
+  const credit = row.credit || 0;
+
+  if (isFirstApplied) {
+    return debit - credit;
+  }
+
+  return -(debit + credit);
+};
+
 const paymentToLedgerRow = (payment) => {
   const amount = typeof payment.amount === 'number' ? payment.amount : parseFloat(payment.amount || 0);
-  const isCredit = payment.effect !== 'subtract';
-  const debit = isCredit ? 0 : round2(amount);
-  const credit = isCredit ? round2(amount) : 0;
+  const mapped = paymentEffectToDebitCredit(amount, payment.effect, payment.relatedModel);
 
   return {
     date: payment.paymentDate || payment.createdAt,
@@ -107,11 +133,11 @@ const paymentToLedgerRow = (payment) => {
     reference: payment.referCode || payment.code || '',
     referCode: payment.referCode || '',
     description: payment.description || payment.name || '',
-    debit,
-    credit,
+    debit: mapped.debit,
+    credit: mapped.credit,
     amount: round2(amount),
     effect: payment.effect || 'add',
-    ledgerLabel: isCredit ? 'Credit' : 'Debit',
+    ledgerLabel: mapped.ledgerLabel,
     method: payment.method || '',
     status: payment.isActive === false ? 'inactive' : 'active',
     voucherType: '',
@@ -130,22 +156,29 @@ const paymentToLedgerRow = (payment) => {
   };
 };
 
-const summarizeLedgerRows = (rows) => {
+const summarizeLedgerRows = (rows, accountModel) => {
   let totalDebit = 0;
   let totalCredit = 0;
   let transactionCount = 0;
+  let netMovement = 0;
+  let hasApplied = false;
+  const chronological = [...rows].sort(compareLedgerChronological);
 
-  for (const row of rows) {
+  for (const row of chronological) {
     if (row.balanceApplied === false) continue;
     totalDebit = round2(totalDebit + (row.debit || 0));
     totalCredit = round2(totalCredit + (row.credit || 0));
+    netMovement = round2(
+      netMovement + remainingBalanceDelta(row, accountModel, !hasApplied)
+    );
+    hasApplied = true;
     transactionCount += 1;
   }
 
   return {
     totalDebit,
     totalCredit,
-    netMovement: round2(totalCredit - totalDebit),
+    netMovement,
     transactionCount,
     bySource: {
       financialPayment: {
@@ -244,14 +277,18 @@ async function getFinancialAccountDetails(relatedModel, relatedId, options = {})
   });
 
   const balanceAppliedRows = allRows.filter((r) => r.balanceApplied !== false);
-  const summary = summarizeLedgerRows(allRows);
+  const summary = summarizeLedgerRows(allRows, relatedModel);
   const { openingBalance, currentBalance: storedBalance } = readStoredBalances(account);
   const calculatedBalance = round2(openingBalance + summary.netMovement);
   const currentBalance = storedBalance !== null ? storedBalance : calculatedBalance;
   const balanceDifference =
     storedBalance !== null ? round2(storedBalance - calculatedBalance) : 0;
 
-  const transactionsWithBalance = attachRunningBalance(balanceAppliedRows, openingBalance);
+  const transactionsWithBalance = attachRunningBalance(
+    balanceAppliedRows,
+    openingBalance,
+    relatedModel
+  );
 
   let currency = null;
   if (currencyId && mongoose.Types.ObjectId.isValid(String(currencyId))) {
