@@ -1,10 +1,5 @@
 const mongoose = require('mongoose');
 const FinancialPayment = require('../models/financialPaymentModel');
-const {
-  computeLedgerBalanceDelta,
-  paymentEffectToDebitCredit,
-  attachRunningBalanceForAccount,
-} = require('../utils/accountDebitCreditRules');
 require('../models/userModel');
 require('../models/currencyModel');
 
@@ -51,51 +46,62 @@ const paginateArray = (items, page, limit) => {
   };
 };
 
-const attachRunningBalance = (transactions, openingBalance, relatedModel) =>
-  attachRunningBalanceForAccount(transactions, openingBalance, relatedModel);
+const ledgerTime = (row) => {
+  const ms = new Date(row.date).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+};
 
-const summarizeLedgerRows = (rows, relatedModel) => {
-  let totalDebit = 0;
-  let totalCredit = 0;
-  let transactionCount = 0;
-  let netMovement = 0;
+const ledgerCreatedTime = (row) => {
+  const raw = row.createdAt || row.metadata?.createdAt;
+  if (!raw) return 0;
+  const ms = new Date(raw).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+};
 
-  for (const row of rows) {
-    if (row.balanceApplied === false) continue;
-    totalDebit = round2(totalDebit + (row.debit || 0));
-    totalCredit = round2(totalCredit + (row.credit || 0));
-    netMovement = round2(
-      netMovement + computeLedgerBalanceDelta(row.debit, row.credit, relatedModel)
-    );
-    transactionCount += 1;
+const ledgerRefNum = (row) => {
+  const ref = String(row.referCode || row.reference || row.code || '');
+  const match = ref.match(/(\d+)$/);
+  return match ? Number(match[1]) : 0;
+};
+
+/** Oldest first: date, then createdAt, then reference (FP-0130 before FP-0131). */
+const compareLedgerChronological = (a, b) => {
+  const dateDiff = ledgerTime(a) - ledgerTime(b);
+  if (dateDiff !== 0) return dateDiff;
+
+  const createdDiff = ledgerCreatedTime(a) - ledgerCreatedTime(b);
+  if (createdDiff !== 0) return createdDiff;
+
+  const refDiff = ledgerRefNum(a) - ledgerRefNum(b);
+  if (refDiff !== 0) return refDiff;
+
+  return String(a.sourceId || '').localeCompare(String(b.sourceId || ''));
+};
+
+const attachRunningBalance = (transactions, openingBalance) => {
+  const chronological = [...transactions].sort(compareLedgerChronological);
+  let running = round2(openingBalance || 0);
+
+  for (const row of chronological) {
+    if (row.balanceApplied !== false) {
+      running = round2(running + (row.credit || 0) - (row.debit || 0));
+    }
+    row.runningBalance = running;
   }
 
-  return {
-    totalDebit,
-    totalCredit,
-    netMovement,
-    transactionCount,
-    bySource: {
-      financialPayment: {
-        debit: totalDebit,
-        credit: totalCredit,
-        count: transactionCount,
-      },
-    },
-  };
+  // Display newest first; running balances stay chronological.
+  return chronological.reverse();
 };
 
 const paymentToLedgerRow = (payment) => {
   const amount = typeof payment.amount === 'number' ? payment.amount : parseFloat(payment.amount || 0);
-  const relatedModel = payment.relatedModel || '';
-  const { debit, credit, ledgerLabel } = paymentEffectToDebitCredit(
-    amount,
-    payment.effect,
-    relatedModel
-  );
+  const isCredit = payment.effect !== 'subtract';
+  const debit = isCredit ? 0 : round2(amount);
+  const credit = isCredit ? round2(amount) : 0;
 
   return {
     date: payment.paymentDate || payment.createdAt,
+    createdAt: payment.createdAt || payment.paymentDate || null,
     source: 'financialPayment',
     sourceId: payment._id,
     reference: payment.referCode || payment.code || '',
@@ -105,7 +111,7 @@ const paymentToLedgerRow = (payment) => {
     credit,
     amount: round2(amount),
     effect: payment.effect || 'add',
-    ledgerLabel,
+    ledgerLabel: isCredit ? 'Credit' : 'Debit',
     method: payment.method || '',
     status: payment.isActive === false ? 'inactive' : 'active',
     voucherType: '',
@@ -120,6 +126,33 @@ const paymentToLedgerRow = (payment) => {
       relatedId: payment.relatedId,
       paymentDate: payment.paymentDate,
       createdAt: payment.createdAt,
+    },
+  };
+};
+
+const summarizeLedgerRows = (rows) => {
+  let totalDebit = 0;
+  let totalCredit = 0;
+  let transactionCount = 0;
+
+  for (const row of rows) {
+    if (row.balanceApplied === false) continue;
+    totalDebit = round2(totalDebit + (row.debit || 0));
+    totalCredit = round2(totalCredit + (row.credit || 0));
+    transactionCount += 1;
+  }
+
+  return {
+    totalDebit,
+    totalCredit,
+    netMovement: round2(totalCredit - totalDebit),
+    transactionCount,
+    bySource: {
+      financialPayment: {
+        debit: totalDebit,
+        credit: totalCredit,
+        count: transactionCount,
+      },
     },
   };
 };
@@ -211,18 +244,14 @@ async function getFinancialAccountDetails(relatedModel, relatedId, options = {})
   });
 
   const balanceAppliedRows = allRows.filter((r) => r.balanceApplied !== false);
-  const summary = summarizeLedgerRows(allRows, relatedModel);
+  const summary = summarizeLedgerRows(allRows);
   const { openingBalance, currentBalance: storedBalance } = readStoredBalances(account);
   const calculatedBalance = round2(openingBalance + summary.netMovement);
   const currentBalance = storedBalance !== null ? storedBalance : calculatedBalance;
   const balanceDifference =
     storedBalance !== null ? round2(storedBalance - calculatedBalance) : 0;
 
-  const transactionsWithBalance = attachRunningBalance(
-    balanceAppliedRows,
-    openingBalance,
-    relatedModel
-  );
+  const transactionsWithBalance = attachRunningBalance(balanceAppliedRows, openingBalance);
 
   let currency = null;
   if (currencyId && mongoose.Types.ObjectId.isValid(String(currencyId))) {
